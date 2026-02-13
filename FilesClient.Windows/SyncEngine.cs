@@ -45,15 +45,15 @@ public class SyncEngine : IDisposable
 
     public async Task<string> PopulateAsync(CancellationToken ct)
     {
-        return await PopulateRecursiveAsync("root", _syncRootPath, ct, depth: 0);
-    }
+        // Phase 1: Fetch the entire tree from the server
+        Console.WriteLine("Fetching directory tree...");
+        var tree = new List<(string parentId, string localParentPath, StorageNode[] children)>();
+        await FetchTreeAsync("root", _syncRootPath, tree, ct, depth: 0);
 
-    private async Task<string> PopulateRecursiveAsync(
-        string parentId, string localParentPath, CancellationToken ct, int depth)
-    {
-        var children = await _jmapClient.GetChildrenAsync(parentId, ct);
-
-        if (children.Length > 0)
+        // Phase 2: Create all placeholders in one fast pass (parent before children,
+        // but each directory's children are created immediately after the directory)
+        Console.WriteLine($"Creating placeholders ({tree.Sum(t => t.children.Length)} items)...");
+        foreach (var (parentId, localParentPath, children) in tree)
         {
             var newChildren = children
                 .Where(c => !Path.Exists(Path.Combine(localParentPath, PlaceholderManager.SanitizeName(c.Name))))
@@ -61,14 +61,24 @@ public class SyncEngine : IDisposable
 
             if (newChildren.Length > 0)
                 _placeholderManager.CreatePlaceholders(localParentPath, newChildren);
+
+            foreach (var child in children)
+            {
+                var childPath = Path.Combine(localParentPath, PlaceholderManager.SanitizeName(child.Name));
+                _pathToNodeId[childPath] = child.Id;
+            }
         }
 
-        // Record path-to-id mappings for all children
-        foreach (var child in children)
-        {
-            var childPath = Path.Combine(localParentPath, PlaceholderManager.SanitizeName(child.Name));
-            _pathToNodeId[childPath] = child.Id;
-        }
+        return await _jmapClient.GetStateAsync(ct);
+    }
+
+    private async Task FetchTreeAsync(
+        string parentId, string localParentPath,
+        List<(string parentId, string localParentPath, StorageNode[] children)> tree,
+        CancellationToken ct, int depth)
+    {
+        var children = await _jmapClient.GetChildrenAsync(parentId, ct);
+        tree.Add((parentId, localParentPath, children));
 
         // Recurse into subdirectories (limit depth for PoC)
         if (depth < 3)
@@ -76,12 +86,9 @@ public class SyncEngine : IDisposable
             foreach (var child in children.Where(c => c.IsFolder))
             {
                 var childPath = Path.Combine(localParentPath, PlaceholderManager.SanitizeName(child.Name));
-                Directory.CreateDirectory(childPath);
-                await PopulateRecursiveAsync(child.Id, childPath, ct, depth + 1);
+                await FetchTreeAsync(child.Id, childPath, tree, ct, depth + 1);
             }
         }
-
-        return await _jmapClient.GetStateAsync(ct);
     }
 
     public async Task<string> PollChangesAsync(string sinceState, CancellationToken ct)
