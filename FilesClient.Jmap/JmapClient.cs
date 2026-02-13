@@ -4,7 +4,7 @@ using FilesClient.Jmap.Models;
 
 namespace FilesClient.Jmap;
 
-public class JmapClient : IDisposable
+public class JmapClient : IJmapClient
 {
     private readonly HttpClient _http;
     private JmapSession? _session;
@@ -135,6 +135,15 @@ public class JmapClient : IDisposable
         }
 
         return response.GetArgs<ChangesResponse>(0);
+    }
+
+    public async Task<string> GetStateAsync(CancellationToken ct = default)
+    {
+        var request = JmapRequest.Create(StorageNodeUsing,
+            ("StorageNode/get", new { accountId = AccountId, ids = new[] { "root" } }, "s0"));
+
+        var response = await CallAsync(request, ct);
+        return response.GetArgs<GetResponse<StorageNode>>(0).State;
     }
 
     public async Task<Stream> DownloadBlobAsync(string blobId, string? type = null, string? name = null, CancellationToken ct = default)

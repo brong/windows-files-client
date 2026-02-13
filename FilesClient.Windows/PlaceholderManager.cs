@@ -52,6 +52,7 @@ internal class PlaceholderManager
                 }
                 else
                 {
+                    info.FsMetadata.BasicInfo.FileAttributes = (uint)FileAttributes.Normal;
                     info.FsMetadata.FileSize = node.Size;
                 }
 
@@ -62,17 +63,27 @@ internal class PlaceholderManager
                 {
                     info.FsMetadata.BasicInfo.LastWriteTime = node.Modified.Value.ToFileTimeUtc();
                     info.FsMetadata.BasicInfo.ChangeTime = node.Modified.Value.ToFileTimeUtc();
+                    info.FsMetadata.BasicInfo.LastAccessTime = node.Modified.Value.ToFileTimeUtc();
                 }
 
                 infos[i] = info;
             }
 
             uint entriesProcessed = 0;
-            PInvoke.CfCreatePlaceholders(
+            var hr = PInvoke.CfCreatePlaceholders(
                 parentPath,
                 infos.AsSpan(),
                 CF_CREATE_FLAGS.CF_CREATE_FLAG_NONE,
-                out entriesProcessed).ThrowOnFailure();
+                out entriesProcessed);
+
+            if (hr.Failed)
+            {
+                // Report per-entry results before throwing
+                for (int i = 0; i < children.Length; i++)
+                    Console.Error.WriteLine($"  [{i}] {children[i].Name} (folder={children[i].IsFolder}): 0x{infos[i].Result:X8}");
+                Console.Error.WriteLine($"CfCreatePlaceholders failed in {parentPath}: 0x{hr.Value:X8} ({entriesProcessed} processed)");
+                hr.ThrowOnFailure();
+            }
 
             Console.WriteLine($"Created {entriesProcessed} placeholders in {parentPath}");
         }

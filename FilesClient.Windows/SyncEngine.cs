@@ -6,14 +6,14 @@ namespace FilesClient.Windows;
 public class SyncEngine : IDisposable
 {
     private readonly string _syncRootPath;
-    private readonly JmapClient _jmapClient;
+    private readonly IJmapClient _jmapClient;
     private readonly SyncRoot _syncRoot;
     private readonly PlaceholderManager _placeholderManager;
     private readonly SyncCallbacks _syncCallbacks;
 
     public string SyncRootPath => _syncRootPath;
 
-    public SyncEngine(string syncRootPath, JmapClient jmapClient)
+    public SyncEngine(string syncRootPath, IJmapClient jmapClient)
     {
         _syncRootPath = syncRootPath;
         _jmapClient = jmapClient;
@@ -61,12 +61,7 @@ public class SyncEngine : IDisposable
             }
         }
 
-        // Get state from a StorageNode/get call
-        var request = JmapRequest.Create(
-            [JmapClient.CoreCapability, JmapClient.StorageNodeCapability],
-            ("StorageNode/get", new { accountId = _jmapClient.AccountId, ids = new[] { parentId } }, "s0"));
-        var response = await _jmapClient.CallAsync(request, ct);
-        return response.GetArgs<GetResponse<StorageNode>>(0).State;
+        return await _jmapClient.GetStateAsync(ct);
     }
 
     public async Task<string> PollChangesAsync(string sinceState, CancellationToken ct)

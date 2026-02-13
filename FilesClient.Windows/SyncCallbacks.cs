@@ -9,9 +9,9 @@ namespace FilesClient.Windows;
 
 internal class SyncCallbacks
 {
-    private readonly JmapClient _jmapClient;
+    private readonly IJmapClient _jmapClient;
 
-    public SyncCallbacks(JmapClient jmapClient)
+    public SyncCallbacks(IJmapClient jmapClient)
     {
         _jmapClient = jmapClient;
     }

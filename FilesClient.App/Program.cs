@@ -14,6 +14,7 @@ class Program
         string sessionUrl = DefaultSessionUrl;
         string? syncRootPath = null;
         bool debug = false;
+        bool stub = false;
 
         for (int i = 0; i < args.Length; i++)
         {
@@ -31,12 +32,15 @@ class Program
                 case "--debug":
                     debug = true;
                     break;
+                case "--stub":
+                    stub = true;
+                    break;
             }
         }
 
         token ??= Environment.GetEnvironmentVariable("FASTMAIL_TOKEN");
 
-        if (string.IsNullOrEmpty(token))
+        if (!stub && string.IsNullOrEmpty(token))
         {
             Console.Error.WriteLine("Usage: FilesClient.App --token <app-password>");
             Console.Error.WriteLine("  or set FASTMAIL_TOKEN environment variable");
@@ -46,6 +50,7 @@ class Program
             Console.Error.WriteLine("  --session-url <url>     JMAP session URL (default: Fastmail)");
             Console.Error.WriteLine("  --sync-root <path>      Local sync folder path");
             Console.Error.WriteLine("  --debug                 Log all JMAP HTTP traffic to stderr");
+            Console.Error.WriteLine("  --stub                  Use stub JMAP client (single hello.txt file)");
             return 1;
         }
 
@@ -65,29 +70,40 @@ class Program
             Console.WriteLine("\nShutting down...");
         };
 
-        using var jmapClient = new JmapClient(token, debug);
+        IJmapClient jmapClient;
+        if (stub)
+        {
+            jmapClient = new StubJmapClient();
+            Console.WriteLine("Using stub JMAP client");
+        }
+        else
+        {
+            var realClient = new JmapClient(token!, debug);
+            Console.WriteLine("Connecting to JMAP...");
+            await realClient.ConnectAsync(sessionUrl, cts.Token);
+            Console.WriteLine($"Connected as {realClient.Session.Username}");
+            jmapClient = realClient;
+        }
+        Console.WriteLine($"Account: {jmapClient.AccountId}");
+        Console.WriteLine();
+
+        using var _ = jmapClient;
 
         try
         {
-            // 1. Connect to JMAP
-            Console.WriteLine("Connecting to JMAP...");
-            await jmapClient.ConnectAsync(sessionUrl, cts.Token);
-            Console.WriteLine($"Connected as {jmapClient.Session.Username}");
-            Console.WriteLine($"Account: {jmapClient.AccountId}");
-            Console.WriteLine();
 
-            // 2. Set up sync engine (register + connect callbacks)
+            // 1. Set up sync engine (register + connect callbacks)
             using var engine = new SyncEngine(syncRootPath, jmapClient);
             Console.WriteLine("Registering sync root...");
             engine.RegisterAndConnect();
 
-            // 3. Initial population
+            // 2. Initial population
             Console.WriteLine("Populating placeholders...");
             var state = await engine.PopulateAsync(cts.Token);
             Console.WriteLine($"Initial sync complete. State: {state}");
             Console.WriteLine();
 
-            // 4. Sync loop — poll for changes
+            // 3. Sync loop — poll for changes
             Console.WriteLine("Watching for changes (Ctrl+C to stop)...");
             string currentState = state;
             while (!cts.Token.IsCancellationRequested)
