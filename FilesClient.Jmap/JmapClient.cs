@@ -8,9 +8,6 @@ public class JmapClient : IDisposable
 {
     private readonly HttpClient _http;
     private JmapSession? _session;
-    internal static readonly bool Debug =
-        string.Equals(Environment.GetEnvironmentVariable("DEBUGJMAP"), "true", StringComparison.OrdinalIgnoreCase)
-        || Environment.GetEnvironmentVariable("DEBUGJMAP") == "1";
 
     // Fastmail uses "https://www.fastmailusercontent.com/jmap/api/" but we
     // discover it via the session resource.
@@ -22,10 +19,10 @@ public class JmapClient : IDisposable
 
     public string AccountId => Session.GetPrimaryAccount(StorageNodeCapability);
 
-    public JmapClient(string token)
+    public JmapClient(string token, bool debug = false)
     {
         HttpMessageHandler handler = new TokenAuth(token);
-        if (Debug)
+        if (debug)
         {
             Console.Error.WriteLine("[JMAP] Debug logging enabled");
             handler = new DebugLoggingHandler(handler);

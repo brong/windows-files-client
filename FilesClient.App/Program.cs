@@ -13,6 +13,7 @@ class Program
         string? token = null;
         string sessionUrl = DefaultSessionUrl;
         string? syncRootPath = null;
+        bool debug = false;
 
         for (int i = 0; i < args.Length; i++)
         {
@@ -26,6 +27,9 @@ class Program
                     break;
                 case "--sync-root" when i + 1 < args.Length:
                     syncRootPath = args[++i];
+                    break;
+                case "--debug":
+                    debug = true;
                     break;
             }
         }
@@ -41,6 +45,7 @@ class Program
             Console.Error.WriteLine("  --token <token>         Fastmail app password / bearer token");
             Console.Error.WriteLine("  --session-url <url>     JMAP session URL (default: Fastmail)");
             Console.Error.WriteLine("  --sync-root <path>      Local sync folder path");
+            Console.Error.WriteLine("  --debug                 Log all JMAP HTTP traffic to stderr");
             return 1;
         }
 
@@ -60,7 +65,7 @@ class Program
             Console.WriteLine("\nShutting down...");
         };
 
-        using var jmapClient = new JmapClient(token);
+        using var jmapClient = new JmapClient(token, debug);
 
         try
         {
