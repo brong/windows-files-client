@@ -27,12 +27,13 @@ internal sealed class FileChangeWatcher : IDisposable
         _watcher = new FileSystemWatcher(_syncRootPath)
         {
             IncludeSubdirectories = true,
-            NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size,
+            NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName
+                | NotifyFilters.LastWrite | NotifyFilters.Size,
         };
 
-        _watcher.Created += (_, e) => EnqueueIfNotPlaceholder(e.FullPath, ChangeKind.Created);
+        _watcher.Created += (_, e) => OnCreated(e.FullPath);
         _watcher.Changed += (_, e) => EnqueueIfNotPlaceholder(e.FullPath, ChangeKind.Modified);
-        _watcher.Renamed += (_, e) => EnqueueIfNotPlaceholder(e.FullPath, ChangeKind.Created);
+        _watcher.Renamed += (_, e) => OnCreated(e.FullPath);
 
         _watcher.EnableRaisingEvents = true;
         Console.WriteLine("File change watcher started.");
@@ -43,6 +44,23 @@ internal sealed class FileChangeWatcher : IDisposable
         if (_watcher != null)
             _watcher.EnableRaisingEvents = false;
         _debounceTimer.Change(Timeout.Infinite, Timeout.Infinite);
+    }
+
+    private void OnCreated(string path)
+    {
+        // For directories, strip Zone.Identifier immediately (no upload needed)
+        if (Directory.Exists(path))
+        {
+            StripZoneIdentifier(path);
+            return;
+        }
+
+        EnqueueIfNotPlaceholder(path, ChangeKind.Created);
+    }
+
+    private static void StripZoneIdentifier(string path)
+    {
+        try { File.Delete(path + ":Zone.Identifier"); } catch { }
     }
 
     private void EnqueueIfNotPlaceholder(string path, ChangeKind kind)

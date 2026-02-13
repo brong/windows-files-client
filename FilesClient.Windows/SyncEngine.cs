@@ -240,15 +240,7 @@ public class SyncEngine : IDisposable
 
     private static void StripZoneIdentifier(string filePath)
     {
-        try
-        {
-            // Remove the Mark of the Web alternate data stream so Windows
-            // doesn't treat files in the sync root as "downloaded from the internet".
-            var adsPath = filePath + ":Zone.Identifier";
-            if (File.Exists(adsPath))
-                File.Delete(adsPath);
-        }
-        catch { /* best-effort — ADS may not exist or may be locked */ }
+        try { File.Delete(filePath + ":Zone.Identifier"); } catch { }
     }
 
     private static Microsoft.Win32.SafeHandles.SafeFileHandle OpenWithRetry(string filePath)
