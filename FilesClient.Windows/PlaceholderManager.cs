@@ -9,11 +9,30 @@ namespace FilesClient.Windows;
 
 internal class PlaceholderManager
 {
+    private static readonly char[] InvalidChars = ['\\', '/', ':', '*', '?', '"', '<', '>', '|'];
+
     private readonly string _syncRootPath;
 
     public PlaceholderManager(string syncRootPath)
     {
         _syncRootPath = syncRootPath;
+    }
+
+    /// <summary>
+    /// Replace characters that are invalid in Windows filenames with underscore.
+    /// </summary>
+    internal static string SanitizeName(string name)
+    {
+        if (name.IndexOfAny(InvalidChars) < 0)
+            return name;
+
+        var chars = name.ToCharArray();
+        for (int i = 0; i < chars.Length; i++)
+        {
+            if (Array.IndexOf(InvalidChars, chars[i]) >= 0)
+                chars[i] = '_';
+        }
+        return new string(chars).TrimEnd(' ', '.');
     }
 
     public unsafe void CreatePlaceholders(string parentPath, StorageNode[] children)
@@ -32,7 +51,7 @@ internal class PlaceholderManager
                 var node = children[i];
 
                 // Pin the name string — PCWSTR needs a char*
-                var nameChars = (node.Name + "\0").ToCharArray();
+                var nameChars = (SanitizeName(node.Name) + "\0").ToCharArray();
                 pinnedNames[i] = GCHandle.Alloc(nameChars, GCHandleType.Pinned);
 
                 // Identity blob: store the StorageNode ID as UTF-8
@@ -105,7 +124,7 @@ internal class PlaceholderManager
 
         while (current != null && current.Id != "root")
         {
-            parts.Add(current.Name);
+            parts.Add(SanitizeName(current.Name));
             if (current.ParentId != null && nodeMap.TryGetValue(current.ParentId, out var parent))
                 current = parent;
             else

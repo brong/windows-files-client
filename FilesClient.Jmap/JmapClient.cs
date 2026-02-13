@@ -154,6 +154,76 @@ public class JmapClient : IJmapClient
         return await response.Content.ReadAsStreamAsync(ct);
     }
 
+    public async Task<string> UploadBlobAsync(Stream data, string contentType, CancellationToken ct = default)
+    {
+        var url = Session.GetUploadUrl(AccountId);
+        var content = new StreamContent(data);
+        content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(contentType);
+        var response = await _http.PostAsync(url, content, ct);
+        response.EnsureSuccessStatusCode();
+        var json = await response.Content.ReadAsStringAsync(ct);
+        var upload = JsonSerializer.Deserialize<UploadResponse>(json, JmapSerializerOptions.Default)
+            ?? throw new InvalidOperationException("Failed to parse upload response");
+        return upload.BlobId;
+    }
+
+    public async Task<StorageNode> CreateStorageNodeAsync(string parentId, string blobId, string name, string? type = null, CancellationToken ct = default)
+    {
+        var request = JmapRequest.Create(StorageNodeUsing,
+            ("StorageNode/set", new
+            {
+                accountId = AccountId,
+                create = new Dictionary<string, object>
+                {
+                    ["c0"] = new { parentId, blobId, name, type },
+                },
+            }, "s0"));
+
+        var response = await CallAsync(request, ct);
+        var (method, _, _) = response.GetResponse(0);
+
+        if (method == "error")
+        {
+            var error = response.GetArgs<JsonElement>(0);
+            throw new InvalidOperationException($"JMAP error: {error}");
+        }
+
+        var setResponse = response.GetArgs<SetResponse>(0);
+        if (setResponse.NotCreated != null && setResponse.NotCreated.TryGetValue("c0", out var setError))
+            throw new InvalidOperationException($"StorageNode/set create failed: {setError.Type} — {setError.Description}");
+
+        if (setResponse.Created == null || !setResponse.Created.TryGetValue("c0", out var created))
+            throw new InvalidOperationException("StorageNode/set create returned no result");
+
+        return created;
+    }
+
+    public async Task UpdateStorageNodeBlobAsync(string nodeId, string blobId, CancellationToken ct = default)
+    {
+        var request = JmapRequest.Create(StorageNodeUsing,
+            ("StorageNode/set", new
+            {
+                accountId = AccountId,
+                update = new Dictionary<string, object>
+                {
+                    [nodeId] = new { blobId },
+                },
+            }, "s0"));
+
+        var response = await CallAsync(request, ct);
+        var (method, _, _) = response.GetResponse(0);
+
+        if (method == "error")
+        {
+            var error = response.GetArgs<JsonElement>(0);
+            throw new InvalidOperationException($"JMAP error: {error}");
+        }
+
+        var setResponse = response.GetArgs<SetResponse>(0);
+        if (setResponse.NotUpdated != null && setResponse.NotUpdated.TryGetValue(nodeId, out var setError))
+            throw new InvalidOperationException($"StorageNode/set update failed: {setError.Type} — {setError.Description}");
+    }
+
     public void Dispose()
     {
         _http.Dispose();

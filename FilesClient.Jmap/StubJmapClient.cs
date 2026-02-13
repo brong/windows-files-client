@@ -5,37 +5,45 @@ namespace FilesClient.Jmap;
 
 public class StubJmapClient : IJmapClient
 {
-    private const string FileId = "stub-file-1";
     private const string FileBlobId = "stub-blob-1";
 
-    private static readonly StorageNode HelloFile = new()
+    private int _nextId = 2;
+    private int _nextBlobId = 2;
+    private readonly Dictionary<string, StorageNode> _nodes = new();
+    private readonly Dictionary<string, byte[]> _blobs = new();
+
+    public StubJmapClient()
     {
-        Id = FileId,
-        Name = "hello.txt",
-        ParentId = "root",
-        BlobId = FileBlobId,
-        Type = "text/plain",
-        Size = 5,
-        Created = new DateTime(2025, 1, 1, 0, 0, 0, DateTimeKind.Utc),
-        Modified = new DateTime(2025, 1, 1, 0, 0, 0, DateTimeKind.Utc),
-    };
+        var helloFile = new StorageNode
+        {
+            Id = "stub-file-1",
+            Name = "hello.txt",
+            ParentId = "root",
+            BlobId = FileBlobId,
+            Type = "text/plain",
+            Size = 5,
+            Created = new DateTime(2025, 1, 1, 0, 0, 0, DateTimeKind.Utc),
+            Modified = new DateTime(2025, 1, 1, 0, 0, 0, DateTimeKind.Utc),
+        };
+        _nodes[helloFile.Id] = helloFile;
+        _blobs[FileBlobId] = Encoding.UTF8.GetBytes("world");
+    }
 
     public string AccountId => "stub-account";
 
     public Task<StorageNode[]> GetStorageNodesAsync(string[] ids, CancellationToken ct = default)
     {
         var nodes = ids
-            .Where(id => id == FileId)
-            .Select(_ => HelloFile)
+            .Where(id => _nodes.ContainsKey(id))
+            .Select(id => _nodes[id])
             .ToArray();
         return Task.FromResult(nodes);
     }
 
     public Task<StorageNode[]> GetChildrenAsync(string parentId, CancellationToken ct = default)
     {
-        if (parentId == "root")
-            return Task.FromResult(new[] { HelloFile });
-        return Task.FromResult(Array.Empty<StorageNode>());
+        var children = _nodes.Values.Where(n => n.ParentId == parentId).ToArray();
+        return Task.FromResult(children);
     }
 
     public Task<ChangesResponse> GetChangesAsync(string sinceState, CancellationToken ct = default)
@@ -50,9 +58,52 @@ public class StubJmapClient : IJmapClient
 
     public Task<Stream> DownloadBlobAsync(string blobId, string? type = null, string? name = null, CancellationToken ct = default)
     {
-        if (blobId == FileBlobId)
-            return Task.FromResult<Stream>(new MemoryStream(Encoding.UTF8.GetBytes("world")));
+        if (_blobs.TryGetValue(blobId, out var data))
+            return Task.FromResult<Stream>(new MemoryStream(data));
         throw new InvalidOperationException($"Unknown blob: {blobId}");
+    }
+
+    public Task<string> UploadBlobAsync(Stream data, string contentType, CancellationToken ct = default)
+    {
+        using var ms = new MemoryStream();
+        data.CopyTo(ms);
+        var blobId = $"stub-blob-{_nextBlobId++}";
+        _blobs[blobId] = ms.ToArray();
+        Console.WriteLine($"[Stub] Uploaded blob {blobId} ({ms.Length} bytes)");
+        return Task.FromResult(blobId);
+    }
+
+    public Task<StorageNode> CreateStorageNodeAsync(string parentId, string blobId, string name, string? type = null, CancellationToken ct = default)
+    {
+        var id = $"stub-file-{_nextId++}";
+        var size = _blobs.TryGetValue(blobId, out var data) ? data.Length : 0;
+        var node = new StorageNode
+        {
+            Id = id,
+            ParentId = parentId,
+            BlobId = blobId,
+            Name = name,
+            Type = type,
+            Size = size,
+            Created = DateTime.UtcNow,
+            Modified = DateTime.UtcNow,
+        };
+        _nodes[id] = node;
+        Console.WriteLine($"[Stub] Created StorageNode {id}: {name}");
+        return Task.FromResult(node);
+    }
+
+    public Task UpdateStorageNodeBlobAsync(string nodeId, string blobId, CancellationToken ct = default)
+    {
+        if (_nodes.TryGetValue(nodeId, out var node))
+        {
+            node.BlobId = blobId;
+            node.Modified = DateTime.UtcNow;
+            if (_blobs.TryGetValue(blobId, out var data))
+                node.Size = data.Length;
+            Console.WriteLine($"[Stub] Updated StorageNode {nodeId} blob to {blobId}");
+        }
+        return Task.CompletedTask;
     }
 
     public void Dispose() { }

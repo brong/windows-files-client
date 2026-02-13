@@ -63,11 +63,15 @@ internal class SyncCallbacks
                 return;
             }
 
-            Console.WriteLine($"FETCH_DATA: {callbackInfo->NormalizedPath} (node={nodeId}, offset={requiredOffset}, len={requiredLength})");
+            Console.WriteLine($"FETCH_DATA: node={nodeId}, offset={requiredOffset}, len={requiredLength}");
 
-            // Bridge async -> sync for the callback
-            TransferDataAsync(*callbackInfo, nodeId, requiredOffset, requiredLength)
+            // Download blob data asynchronously, then transfer to cfapi
+            // synchronously on the callback thread (CfExecute requires
+            // the callback thread context for the transfer key to be valid).
+            var (data, totalSize) = FetchBlobDataAsync(nodeId)
                 .GetAwaiter().GetResult();
+
+            TransferData(*callbackInfo, data, requiredOffset, requiredLength, totalSize);
         }
         catch (Exception ex)
         {
@@ -76,51 +80,41 @@ internal class SyncCallbacks
         }
     }
 
-    private async Task TransferDataAsync(CF_CALLBACK_INFO callbackInfo, string nodeId, long offset, long length)
+    /// <summary>
+    /// Download blob data asynchronously (can run on any thread).
+    /// Returns the full blob contents and the file size.
+    /// </summary>
+    private async Task<(byte[] data, long totalSize)> FetchBlobDataAsync(string nodeId)
     {
         var nodes = await _jmapClient.GetStorageNodesAsync([nodeId]);
         if (nodes.Length == 0 || nodes[0].BlobId == null)
-        {
-            Console.Error.WriteLine($"Node {nodeId} not found or has no blob");
-            TransferError(callbackInfo, new NTSTATUS(unchecked((int)0xC0000034))); // STATUS_OBJECT_NAME_NOT_FOUND
-            return;
-        }
+            throw new FileNotFoundException($"Node {nodeId} not found or has no blob");
 
         var node = nodes[0];
         using var stream = await _jmapClient.DownloadBlobAsync(node.BlobId!, node.Type, node.Name);
+        using var ms = new MemoryStream();
+        await stream.CopyToAsync(ms);
+        return (ms.ToArray(), node.Size);
+    }
 
-        const int chunkSize = 4 * 1024 * 1024; // 4MB chunks
-        var buffer = new byte[chunkSize];
+    /// <summary>
+    /// Transfer downloaded data to cfapi. Must run on the callback thread.
+    /// </summary>
+    private static void TransferData(CF_CALLBACK_INFO callbackInfo, byte[] data, long offset, long length, long totalSize)
+    {
+        const int chunkSize = 4 * 1024 * 1024; // 4MB
         long totalTransferred = 0;
-        long totalSize = node.Size;
 
-        // Skip to the requested offset
-        if (offset > 0)
-        {
-            long skipped = 0;
-            while (skipped < offset)
-            {
-                int toRead = (int)Math.Min(buffer.Length, offset - skipped);
-                int read = await stream.ReadAsync(buffer, 0, toRead);
-                if (read == 0) break;
-                skipped += read;
-            }
-        }
-
-        // Read and transfer data
-        long remaining = length;
+        // Transfer the requested range
+        long dataOffset = offset; // offset within the file where data starts
+        long remaining = Math.Min(length, data.Length - offset);
         while (remaining > 0)
         {
-            int toRead = (int)Math.Min(chunkSize, remaining);
-            int bytesRead = await stream.ReadAsync(buffer, 0, toRead);
-            if (bytesRead == 0)
-                break;
+            int chunkLen = (int)Math.Min(chunkSize, remaining);
+            TransferChunk(callbackInfo, data, (int)(offset + totalTransferred), dataOffset + totalTransferred, chunkLen);
+            totalTransferred += chunkLen;
+            remaining -= chunkLen;
 
-            TransferChunk(callbackInfo, buffer, offset + totalTransferred, bytesRead);
-            totalTransferred += bytesRead;
-            remaining -= bytesRead;
-
-            // Report progress
             if (totalSize > 0)
             {
                 try
@@ -136,7 +130,7 @@ internal class SyncCallbacks
         }
     }
 
-    private static unsafe void TransferChunk(CF_CALLBACK_INFO callbackInfo, byte[] data, long offset, int length)
+    private static unsafe void TransferChunk(CF_CALLBACK_INFO callbackInfo, byte[] data, int sourceOffset, long fileOffset, int length)
     {
         var opInfo = new CF_OPERATION_INFO
         {
@@ -147,13 +141,13 @@ internal class SyncCallbacks
             RequestKey = callbackInfo.RequestKey,
         };
 
-        fixed (byte* pData = data)
+        fixed (byte* pData = &data[sourceOffset])
         {
             var opParams = new CF_OPERATION_PARAMETERS();
             opParams.ParamSize = (uint)sizeof(CF_OPERATION_PARAMETERS);
             opParams.Anonymous.TransferData.CompletionStatus = new NTSTATUS(0); // STATUS_SUCCESS
             opParams.Anonymous.TransferData.Buffer = pData;
-            opParams.Anonymous.TransferData.Offset = offset;
+            opParams.Anonymous.TransferData.Offset = fileOffset;
             opParams.Anonymous.TransferData.Length = length;
 
             PInvoke.CfExecute(in opInfo, ref opParams).ThrowOnFailure();

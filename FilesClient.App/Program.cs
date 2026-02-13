@@ -95,7 +95,7 @@ class Program
             // 1. Set up sync engine (register + connect callbacks)
             using var engine = new SyncEngine(syncRootPath, jmapClient);
             Console.WriteLine("Registering sync root...");
-            engine.RegisterAndConnect();
+            await engine.RegisterAndConnectAsync();
 
             // 2. Initial population
             Console.WriteLine("Populating placeholders...");

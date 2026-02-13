@@ -39,6 +39,11 @@ public class JmapSession
             : throw new InvalidOperationException($"No primary account for capability {capability}");
     }
 
+    public string GetUploadUrl(string accountId)
+    {
+        return UploadUrl.Replace("{accountId}", Uri.EscapeDataString(accountId));
+    }
+
     public string GetDownloadUrl(string accountId, string blobId, string? type = null, string? name = null)
     {
         return DownloadUrl

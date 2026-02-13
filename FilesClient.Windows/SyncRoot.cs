@@ -1,4 +1,6 @@
 using System.Runtime.InteropServices;
+using Windows.Storage;
+using Windows.Storage.Provider;
 using Windows.Win32;
 using Windows.Win32.Storage.CloudFilters;
 
@@ -8,6 +10,8 @@ internal class SyncRoot : IDisposable
 {
     // Stable provider GUID — must remain the same across all runs.
     private static readonly Guid ProviderId = new("f5e2d9a1-3b7c-4e8f-9a01-6c2d5e8f1b3a");
+
+    private const string SyncRootId = "FastmailFiles";
 
     private readonly string _syncRootPath;
     private CF_CONNECTION_KEY _connectionKey;
@@ -26,45 +30,29 @@ internal class SyncRoot : IDisposable
         _syncRootPath = syncRootPath;
     }
 
-    public unsafe void Register(string providerName, string providerVersion)
+    public async Task RegisterAsync(string providerName, string providerVersion)
     {
         Directory.CreateDirectory(_syncRootPath);
 
-        fixed (char* pProviderName = providerName)
-        fixed (char* pProviderVersion = providerVersion)
-        {
-            var registration = new CF_SYNC_REGISTRATION
-            {
-                StructSize = (uint)sizeof(CF_SYNC_REGISTRATION),
-                ProviderName = pProviderName,
-                ProviderVersion = pProviderVersion,
-                ProviderId = ProviderId,
-            };
+        var folder = await StorageFolder.GetFolderFromPathAsync(_syncRootPath);
 
-            var policies = new CF_SYNC_POLICIES
-            {
-                StructSize = (uint)sizeof(CF_SYNC_POLICIES),
-                Hydration = new CF_HYDRATION_POLICY
-                {
-                    Primary = CF_HYDRATION_POLICY_PRIMARY.CF_HYDRATION_POLICY_FULL,
-                    Modifier = CF_HYDRATION_POLICY_MODIFIER.CF_HYDRATION_POLICY_MODIFIER_NONE,
-                },
-                Population = new CF_POPULATION_POLICY
-                {
-                    Primary = CF_POPULATION_POLICY_PRIMARY.CF_POPULATION_POLICY_ALWAYS_FULL,
-                    Modifier = CF_POPULATION_POLICY_MODIFIER.CF_POPULATION_POLICY_MODIFIER_NONE,
-                },
-                InSync = CF_INSYNC_POLICY.CF_INSYNC_POLICY_TRACK_ALL,
-                HardLink = CF_HARDLINK_POLICY.CF_HARDLINK_POLICY_NONE,
-                PlaceholderManagement = CF_PLACEHOLDER_MANAGEMENT_POLICY.CF_PLACEHOLDER_MANAGEMENT_POLICY_DEFAULT,
-            };
+        var info = new StorageProviderSyncRootInfo();
+        info.Id = SyncRootId;
+        info.Path = folder;
+        info.DisplayNameResource = providerName;
+        info.IconResource = "%SystemRoot%\\system32\\shell32.dll,-1";
+        info.HydrationPolicy = StorageProviderHydrationPolicy.Full;
+        info.HydrationPolicyModifier = StorageProviderHydrationPolicyModifier.None;
+        info.PopulationPolicy = StorageProviderPopulationPolicy.AlwaysFull;
+        info.InSyncPolicy = StorageProviderInSyncPolicy.FileLastWriteTime
+            | StorageProviderInSyncPolicy.DirectoryLastWriteTime;
+        info.Version = providerVersion;
+        info.ShowSiblingsAsGroup = false;
+        info.HardlinkPolicy = StorageProviderHardlinkPolicy.None;
+        info.ProtectionMode = StorageProviderProtectionMode.Personal;
+        info.ProviderId = ProviderId;
 
-            PInvoke.CfRegisterSyncRoot(
-                _syncRootPath,
-                in registration,
-                in policies,
-                CF_REGISTER_FLAGS.CF_REGISTER_FLAG_UPDATE).ThrowOnFailure();
-        }
+        StorageProviderSyncRootManager.Register(info);
 
         _registered = true;
         Console.WriteLine($"Sync root registered: {_syncRootPath}");
@@ -107,7 +95,7 @@ internal class SyncRoot : IDisposable
     {
         if (_registered)
         {
-            PInvoke.CfUnregisterSyncRoot(_syncRootPath).ThrowOnFailure();
+            StorageProviderSyncRootManager.Unregister(SyncRootId);
             _registered = false;
             Console.WriteLine("Sync root unregistered.");
         }

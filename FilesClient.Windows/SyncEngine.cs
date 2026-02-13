@@ -1,5 +1,10 @@
+using System.Collections.Concurrent;
+using System.Runtime.InteropServices;
+using System.Text;
 using FilesClient.Jmap;
 using FilesClient.Jmap.Models;
+using Windows.Win32;
+using Windows.Win32.Storage.CloudFilters;
 
 namespace FilesClient.Windows;
 
@@ -10,6 +15,10 @@ public class SyncEngine : IDisposable
     private readonly SyncRoot _syncRoot;
     private readonly PlaceholderManager _placeholderManager;
     private readonly SyncCallbacks _syncCallbacks;
+    private readonly FileChangeWatcher _fileChangeWatcher;
+
+    // Maps local file path → StorageNode ID (populated during sync)
+    private readonly ConcurrentDictionary<string, string> _pathToNodeId = new(StringComparer.OrdinalIgnoreCase);
 
     public string SyncRootPath => _syncRootPath;
 
@@ -20,14 +29,18 @@ public class SyncEngine : IDisposable
         _syncRoot = new SyncRoot(syncRootPath);
         _placeholderManager = new PlaceholderManager(syncRootPath);
         _syncCallbacks = new SyncCallbacks(jmapClient);
+        _fileChangeWatcher = new FileChangeWatcher(syncRootPath);
+        _fileChangeWatcher.OnChanges += OnLocalFileChanges;
     }
 
-    public void RegisterAndConnect()
+    public async Task RegisterAndConnectAsync()
     {
-        _syncRoot.Register("Fastmail Files", "1.0");
+        await _syncRoot.RegisterAsync("Fastmail Files", "1.0");
 
         var (registrations, delegates) = _syncCallbacks.CreateCallbackRegistrations();
         _syncRoot.Connect(registrations, delegates);
+
+        _fileChangeWatcher.Start();
     }
 
     public async Task<string> PopulateAsync(CancellationToken ct)
@@ -43,11 +56,18 @@ public class SyncEngine : IDisposable
         if (children.Length > 0)
         {
             var newChildren = children
-                .Where(c => !Path.Exists(Path.Combine(localParentPath, c.Name)))
+                .Where(c => !Path.Exists(Path.Combine(localParentPath, PlaceholderManager.SanitizeName(c.Name))))
                 .ToArray();
 
             if (newChildren.Length > 0)
                 _placeholderManager.CreatePlaceholders(localParentPath, newChildren);
+        }
+
+        // Record path-to-id mappings for all children
+        foreach (var child in children)
+        {
+            var childPath = Path.Combine(localParentPath, PlaceholderManager.SanitizeName(child.Name));
+            _pathToNodeId[childPath] = child.Id;
         }
 
         // Recurse into subdirectories (limit depth for PoC)
@@ -55,7 +75,7 @@ public class SyncEngine : IDisposable
         {
             foreach (var child in children.Where(c => c.IsFolder))
             {
-                var childPath = Path.Combine(localParentPath, child.Name);
+                var childPath = Path.Combine(localParentPath, PlaceholderManager.SanitizeName(child.Name));
                 Directory.CreateDirectory(childPath);
                 await PopulateRecursiveAsync(child.Id, childPath, ct, depth + 1);
             }
@@ -84,7 +104,8 @@ public class SyncEngine : IDisposable
                     var parentPath = await ResolveLocalPathAsync(node.ParentId, ct);
                     if (parentPath != null)
                     {
-                        var childPath = Path.Combine(parentPath, node.Name);
+                        var childPath = Path.Combine(parentPath, PlaceholderManager.SanitizeName(node.Name));
+                        _pathToNodeId[childPath] = node.Id;
                         if (!Path.Exists(childPath))
                             _placeholderManager.CreatePlaceholders(parentPath, [node]);
                     }
@@ -101,6 +122,120 @@ public class SyncEngine : IDisposable
         return changes.NewState;
     }
 
+    private void OnLocalFileChanges(FileChangeWatcher.FileChange[] changes)
+    {
+        // Process uploads on a background thread (fire-and-forget from the timer callback)
+        _ = Task.Run(async () =>
+        {
+            foreach (var change in changes)
+            {
+                try
+                {
+                    await ProcessLocalChangeAsync(change);
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"Upload error for {change.FullPath}: {ex.Message}");
+                }
+            }
+        });
+    }
+
+    private async Task ProcessLocalChangeAsync(FileChangeWatcher.FileChange change)
+    {
+        if (!File.Exists(change.FullPath))
+            return;
+
+        var fileName = Path.GetFileName(change.FullPath);
+        var parentDir = Path.GetDirectoryName(change.FullPath)!;
+
+        // Determine MIME type from extension
+        var ext = Path.GetExtension(change.FullPath).ToLowerInvariant();
+        var contentType = ext switch
+        {
+            ".txt" => "text/plain",
+            ".html" or ".htm" => "text/html",
+            ".css" => "text/css",
+            ".js" => "application/javascript",
+            ".json" => "application/json",
+            ".xml" => "application/xml",
+            ".png" => "image/png",
+            ".jpg" or ".jpeg" => "image/jpeg",
+            ".gif" => "image/gif",
+            ".pdf" => "application/pdf",
+            ".zip" => "application/zip",
+            _ => "application/octet-stream",
+        };
+
+        if (_pathToNodeId.TryGetValue(change.FullPath, out var existingNodeId))
+        {
+            // Modified existing file — upload new blob and update the StorageNode
+            Console.WriteLine($"Uploading modified file: {fileName}");
+            using var stream = new FileStream(change.FullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            var blobId = await _jmapClient.UploadBlobAsync(stream, contentType);
+            await _jmapClient.UpdateStorageNodeBlobAsync(existingNodeId, blobId);
+            SetInSync(change.FullPath);
+            Console.WriteLine($"Updated: {fileName} → blob {blobId}");
+        }
+        else
+        {
+            // New file — upload blob, create StorageNode, convert to placeholder
+            var parentId = ResolveParentNodeId(parentDir);
+            if (parentId == null)
+            {
+                Console.Error.WriteLine($"Cannot upload {fileName}: parent folder not mapped");
+                return;
+            }
+
+            Console.WriteLine($"Uploading new file: {fileName}");
+            using var stream = new FileStream(change.FullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            var blobId = await _jmapClient.UploadBlobAsync(stream, contentType);
+            var node = await _jmapClient.CreateStorageNodeAsync(parentId, blobId, fileName, contentType);
+
+            // Convert the regular file to a cloud placeholder
+            ConvertToPlaceholder(change.FullPath, node.Id);
+            _pathToNodeId[change.FullPath] = node.Id;
+            SetInSync(change.FullPath);
+            Console.WriteLine($"Created: {fileName} → node {node.Id}");
+        }
+    }
+
+    private string? ResolveParentNodeId(string localPath)
+    {
+        if (string.Equals(localPath, _syncRootPath, StringComparison.OrdinalIgnoreCase))
+            return "root";
+        return _pathToNodeId.TryGetValue(localPath, out var id) ? id : null;
+    }
+
+    private static unsafe void ConvertToPlaceholder(string filePath, string nodeId)
+    {
+        var identityBytes = Encoding.UTF8.GetBytes(nodeId);
+        using var safeHandle = File.OpenHandle(filePath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+        var handle = new global::Windows.Win32.Foundation.HANDLE(safeHandle.DangerousGetHandle());
+        fixed (byte* pIdentity = identityBytes)
+        {
+            long usn = 0;
+            PInvoke.CfConvertToPlaceholder(
+                handle,
+                pIdentity,
+                (uint)identityBytes.Length,
+                CF_CONVERT_FLAGS.CF_CONVERT_FLAG_MARK_IN_SYNC,
+                &usn,
+                null).ThrowOnFailure();
+        }
+    }
+
+    private static unsafe void SetInSync(string filePath)
+    {
+        using var safeHandle = File.OpenHandle(filePath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+        var handle = new global::Windows.Win32.Foundation.HANDLE(safeHandle.DangerousGetHandle());
+        PInvoke.CfSetInSyncState(
+            handle,
+            CF_IN_SYNC_STATE.CF_IN_SYNC_STATE_IN_SYNC,
+            CF_SET_IN_SYNC_FLAGS.CF_SET_IN_SYNC_FLAG_NONE,
+            null).ThrowOnFailure();
+    }
+
     private async Task<string?> ResolveLocalPathAsync(string nodeId, CancellationToken ct)
     {
         if (nodeId == "root")
@@ -115,11 +250,12 @@ public class SyncEngine : IDisposable
             return _syncRootPath;
 
         var parentPath = await ResolveLocalPathAsync(node.ParentId, ct);
-        return parentPath != null ? Path.Combine(parentPath, node.Name) : null;
+        return parentPath != null ? Path.Combine(parentPath, PlaceholderManager.SanitizeName(node.Name)) : null;
     }
 
     public void Dispose()
     {
+        _fileChangeWatcher.Dispose();
         _syncRoot.Dispose();
     }
 }
