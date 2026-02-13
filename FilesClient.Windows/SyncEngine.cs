@@ -174,6 +174,7 @@ public class SyncEngine : IDisposable
             using var stream = new FileStream(change.FullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
             var blobId = await _jmapClient.UploadBlobAsync(stream, contentType);
             await _jmapClient.UpdateStorageNodeBlobAsync(existingNodeId, blobId);
+            StripZoneIdentifier(change.FullPath);
             SetInSync(change.FullPath);
             Console.WriteLine($"Updated: {fileName} → blob {blobId}");
         }
@@ -195,6 +196,7 @@ public class SyncEngine : IDisposable
             // Convert the regular file to a cloud placeholder
             ConvertToPlaceholder(change.FullPath, node.Id);
             _pathToNodeId[change.FullPath] = node.Id;
+            StripZoneIdentifier(change.FullPath);
             SetInSync(change.FullPath);
             Console.WriteLine($"Created: {fileName} → node {node.Id}");
         }
@@ -234,6 +236,19 @@ public class SyncEngine : IDisposable
             CF_IN_SYNC_STATE.CF_IN_SYNC_STATE_IN_SYNC,
             CF_SET_IN_SYNC_FLAGS.CF_SET_IN_SYNC_FLAG_NONE,
             null).ThrowOnFailure();
+    }
+
+    private static void StripZoneIdentifier(string filePath)
+    {
+        try
+        {
+            // Remove the Mark of the Web alternate data stream so Windows
+            // doesn't treat files in the sync root as "downloaded from the internet".
+            var adsPath = filePath + ":Zone.Identifier";
+            if (File.Exists(adsPath))
+                File.Delete(adsPath);
+        }
+        catch { /* best-effort — ADS may not exist or may be locked */ }
     }
 
     private static Microsoft.Win32.SafeHandles.SafeFileHandle OpenWithRetry(string filePath)
