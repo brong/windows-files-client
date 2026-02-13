@@ -210,7 +210,7 @@ public class SyncEngine : IDisposable
     private static unsafe void ConvertToPlaceholder(string filePath, string nodeId)
     {
         var identityBytes = Encoding.UTF8.GetBytes(nodeId);
-        using var safeHandle = File.OpenHandle(filePath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+        using var safeHandle = OpenWithRetry(filePath);
         var handle = new global::Windows.Win32.Foundation.HANDLE(safeHandle.DangerousGetHandle());
         fixed (byte* pIdentity = identityBytes)
         {
@@ -227,13 +227,30 @@ public class SyncEngine : IDisposable
 
     private static unsafe void SetInSync(string filePath)
     {
-        using var safeHandle = File.OpenHandle(filePath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+        using var safeHandle = OpenWithRetry(filePath);
         var handle = new global::Windows.Win32.Foundation.HANDLE(safeHandle.DangerousGetHandle());
         PInvoke.CfSetInSyncState(
             handle,
             CF_IN_SYNC_STATE.CF_IN_SYNC_STATE_IN_SYNC,
             CF_SET_IN_SYNC_FLAGS.CF_SET_IN_SYNC_FLAG_NONE,
             null).ThrowOnFailure();
+    }
+
+    private static Microsoft.Win32.SafeHandles.SafeFileHandle OpenWithRetry(string filePath)
+    {
+        const int maxRetries = 5;
+        for (int attempt = 0; ; attempt++)
+        {
+            try
+            {
+                return File.OpenHandle(filePath, FileMode.Open, FileAccess.ReadWrite,
+                    FileShare.ReadWrite | FileShare.Delete);
+            }
+            catch (IOException) when (attempt < maxRetries - 1)
+            {
+                Thread.Sleep(200 * (attempt + 1));
+            }
+        }
     }
 
     private async Task<string?> ResolveLocalPathAsync(string nodeId, CancellationToken ct)
