@@ -1,0 +1,106 @@
+using System.Runtime.InteropServices;
+using System.Text;
+using Windows.Win32;
+using Windows.Win32.Storage.CloudFilters;
+using Windows.Win32.Storage.FileSystem;
+using FilesClient.Jmap.Models;
+
+namespace FilesClient.Windows;
+
+internal class PlaceholderManager
+{
+    private readonly string _syncRootPath;
+
+    public PlaceholderManager(string syncRootPath)
+    {
+        _syncRootPath = syncRootPath;
+    }
+
+    public unsafe void CreatePlaceholders(string parentPath, StorageNode[] children)
+    {
+        if (children.Length == 0)
+            return;
+
+        var infos = new CF_PLACEHOLDER_CREATE_INFO[children.Length];
+        var pinnedIdentities = new GCHandle[children.Length];
+        var pinnedNames = new GCHandle[children.Length];
+
+        try
+        {
+            for (int i = 0; i < children.Length; i++)
+            {
+                var node = children[i];
+
+                // Pin the name string — PCWSTR needs a char*
+                var nameChars = (node.Name + "\0").ToCharArray();
+                pinnedNames[i] = GCHandle.Alloc(nameChars, GCHandleType.Pinned);
+
+                // Identity blob: store the StorageNode ID as UTF-8
+                var identityBytes = Encoding.UTF8.GetBytes(node.Id);
+                pinnedIdentities[i] = GCHandle.Alloc(identityBytes, GCHandleType.Pinned);
+
+                var info = new CF_PLACEHOLDER_CREATE_INFO();
+
+                info.RelativeFileName = (char*)pinnedNames[i].AddrOfPinnedObject();
+                info.FileIdentity = (void*)pinnedIdentities[i].AddrOfPinnedObject();
+                info.FileIdentityLength = (uint)identityBytes.Length;
+                info.Flags = CF_PLACEHOLDER_CREATE_FLAGS.CF_PLACEHOLDER_CREATE_FLAG_MARK_IN_SYNC;
+
+                if (node.IsFolder)
+                {
+                    info.FsMetadata.BasicInfo.FileAttributes = (uint)FileAttributes.Directory;
+                }
+                else
+                {
+                    info.FsMetadata.FileSize = node.Size;
+                }
+
+                if (node.Created.HasValue)
+                    info.FsMetadata.BasicInfo.CreationTime = node.Created.Value.ToFileTimeUtc();
+
+                if (node.Modified.HasValue)
+                {
+                    info.FsMetadata.BasicInfo.LastWriteTime = node.Modified.Value.ToFileTimeUtc();
+                    info.FsMetadata.BasicInfo.ChangeTime = node.Modified.Value.ToFileTimeUtc();
+                }
+
+                infos[i] = info;
+            }
+
+            uint entriesProcessed = 0;
+            PInvoke.CfCreatePlaceholders(
+                parentPath,
+                infos.AsSpan(),
+                CF_CREATE_FLAGS.CF_CREATE_FLAG_NONE,
+                out entriesProcessed).ThrowOnFailure();
+
+            Console.WriteLine($"Created {entriesProcessed} placeholders in {parentPath}");
+        }
+        finally
+        {
+            for (int i = 0; i < children.Length; i++)
+            {
+                if (pinnedNames[i].IsAllocated) pinnedNames[i].Free();
+                if (pinnedIdentities[i].IsAllocated) pinnedIdentities[i].Free();
+            }
+        }
+    }
+
+    public string GetLocalPath(StorageNode node, Dictionary<string, StorageNode> nodeMap)
+    {
+        var parts = new List<string>();
+        var current = node;
+
+        while (current != null && current.Id != "root")
+        {
+            parts.Add(current.Name);
+            if (current.ParentId != null && nodeMap.TryGetValue(current.ParentId, out var parent))
+                current = parent;
+            else
+                break;
+        }
+
+        parts.Reverse();
+        return Path.Combine(_syncRootPath, Path.Combine(parts.ToArray()));
+    }
+}
