@@ -6,6 +6,9 @@ namespace FilesClient.Windows;
 
 internal class SyncRoot : IDisposable
 {
+    // Stable provider GUID — must remain the same across all runs.
+    private static readonly Guid ProviderId = new("f5e2d9a1-3b7c-4e8f-9a01-6c2d5e8f1b3a");
+
     private readonly string _syncRootPath;
     private CF_CONNECTION_KEY _connectionKey;
     private bool _connected;
@@ -35,7 +38,7 @@ internal class SyncRoot : IDisposable
                 StructSize = (uint)sizeof(CF_SYNC_REGISTRATION),
                 ProviderName = pProviderName,
                 ProviderVersion = pProviderVersion,
-                ProviderId = Guid.NewGuid(),
+                ProviderId = ProviderId,
             };
 
             var policies = new CF_SYNC_POLICIES
@@ -60,7 +63,7 @@ internal class SyncRoot : IDisposable
                 _syncRootPath,
                 in registration,
                 in policies,
-                CF_REGISTER_FLAGS.CF_REGISTER_FLAG_NONE).ThrowOnFailure();
+                CF_REGISTER_FLAGS.CF_REGISTER_FLAG_UPDATE).ThrowOnFailure();
         }
 
         _registered = true;
