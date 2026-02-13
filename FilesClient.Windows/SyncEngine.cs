@@ -33,9 +33,9 @@ public class SyncEngine : IDisposable
         _fileChangeWatcher.OnChanges += OnLocalFileChanges;
     }
 
-    public async Task RegisterAndConnectAsync()
+    public async Task RegisterAndConnectAsync(string displayName, string? iconPath = null)
     {
-        await _syncRoot.RegisterAsync("Fastmail Files", "1.0");
+        await _syncRoot.RegisterAsync(displayName, "1.0", iconPath);
 
         var (registrations, delegates) = _syncCallbacks.CreateCallbackRegistrations();
         _syncRoot.Connect(registrations, delegates);

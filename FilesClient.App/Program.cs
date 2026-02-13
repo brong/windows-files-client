@@ -6,7 +6,7 @@ namespace FilesClient.App;
 class Program
 {
     private const string DefaultSessionUrl = "https://api.fastmail.com/jmap/session";
-    private const string DefaultSyncRootFolder = "FastmailFiles";
+    private const string FaviconUrl = "https://www.fastmail.com/favicon.ico";
 
     static async Task<int> Main(string[] args)
     {
@@ -54,14 +54,6 @@ class Program
             return 1;
         }
 
-        syncRootPath ??= Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-            DefaultSyncRootFolder);
-
-        Console.WriteLine("Fastmail Files Client");
-        Console.WriteLine($"Sync root: {syncRootPath}");
-        Console.WriteLine();
-
         using var cts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) =>
         {
@@ -85,17 +77,27 @@ class Program
             jmapClient = realClient;
         }
         Console.WriteLine($"Account: {jmapClient.AccountId}");
+
+        // Derive display name and folder name from account username
+        var displayName = $"{jmapClient.Username} Files";
+        syncRootPath ??= Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            SanitizeFolderName(displayName));
+
+        Console.WriteLine($"Sync root: {syncRootPath}");
         Console.WriteLine();
+
+        // Download Fastmail favicon for use as sync root icon
+        var iconPath = await DownloadIconAsync(cts.Token);
 
         using var _ = jmapClient;
 
         try
         {
-
             // 1. Set up sync engine (register + connect callbacks)
             using var engine = new SyncEngine(syncRootPath, jmapClient);
             Console.WriteLine("Registering sync root...");
-            await engine.RegisterAndConnectAsync();
+            await engine.RegisterAndConnectAsync(displayName, iconPath);
 
             // 2. Initial population
             Console.WriteLine("Populating placeholders...");
@@ -138,5 +140,44 @@ class Program
         }
 
         return 0;
+    }
+
+    private static string SanitizeFolderName(string name)
+    {
+        var invalid = Path.GetInvalidFileNameChars();
+        var chars = name.ToCharArray();
+        for (int i = 0; i < chars.Length; i++)
+        {
+            if (Array.IndexOf(invalid, chars[i]) >= 0)
+                chars[i] = '_';
+        }
+        return new string(chars).TrimEnd(' ', '.');
+    }
+
+    private static async Task<string?> DownloadIconAsync(CancellationToken ct)
+    {
+        try
+        {
+            var iconDir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "FastmailFiles");
+            Directory.CreateDirectory(iconDir);
+            var iconPath = Path.Combine(iconDir, "icon.ico");
+
+            // Skip download if we already have it
+            if (File.Exists(iconPath))
+                return iconPath;
+
+            using var http = new HttpClient();
+            var data = await http.GetByteArrayAsync(FaviconUrl, ct);
+            await File.WriteAllBytesAsync(iconPath, data, ct);
+            Console.WriteLine($"Downloaded icon to {iconPath}");
+            return iconPath;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Could not download icon: {ex.Message}");
+            return null;
+        }
     }
 }

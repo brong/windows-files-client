@@ -17,6 +17,7 @@ internal class SyncRoot : IDisposable
     private CF_CONNECTION_KEY _connectionKey;
     private bool _connected;
     private bool _registered;
+    private NavPaneIntegration? _navPane;
 
     // Must keep a reference to the callback registrations & delegates
     // so the GC doesn't collect them while the connection is active.
@@ -30,17 +31,21 @@ internal class SyncRoot : IDisposable
         _syncRootPath = syncRootPath;
     }
 
-    public async Task RegisterAsync(string providerName, string providerVersion)
+    public async Task RegisterAsync(string displayName, string providerVersion, string? iconPath = null)
     {
         Directory.CreateDirectory(_syncRootPath);
 
         var folder = await StorageFolder.GetFolderFromPathAsync(_syncRootPath);
 
+        var iconResource = iconPath != null
+            ? iconPath
+            : "%SystemRoot%\\system32\\shell32.dll,-1";
+
         var info = new StorageProviderSyncRootInfo();
         info.Id = SyncRootId;
         info.Path = folder;
-        info.DisplayNameResource = providerName;
-        info.IconResource = "%SystemRoot%\\system32\\shell32.dll,-1";
+        info.DisplayNameResource = displayName;
+        info.IconResource = iconResource;
         info.HydrationPolicy = StorageProviderHydrationPolicy.Full;
         info.HydrationPolicyModifier = StorageProviderHydrationPolicyModifier.None;
         info.PopulationPolicy = StorageProviderPopulationPolicy.AlwaysFull;
@@ -53,9 +58,12 @@ internal class SyncRoot : IDisposable
         info.ProviderId = ProviderId;
 
         StorageProviderSyncRootManager.Register(info);
-
         _registered = true;
         Console.WriteLine($"Sync root registered: {_syncRootPath}");
+
+        // Register top-level Explorer nav pane entry
+        _navPane = new NavPaneIntegration(ProviderId, displayName, _syncRootPath, iconResource);
+        _navPane.Register();
     }
 
     internal unsafe void Connect(CF_CALLBACK_REGISTRATION[] callbacks, CF_CALLBACK[] delegates)
@@ -93,6 +101,9 @@ internal class SyncRoot : IDisposable
 
     public void Unregister()
     {
+        _navPane?.Unregister();
+        _navPane = null;
+
         if (_registered)
         {
             StorageProviderSyncRootManager.Unregister(SyncRootId);

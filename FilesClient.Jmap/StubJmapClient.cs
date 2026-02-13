@@ -30,6 +30,7 @@ public class StubJmapClient : IJmapClient
     }
 
     public string AccountId => "stub-account";
+    public string Username => "stub@example.com";
 
     public Task<StorageNode[]> GetStorageNodesAsync(string[] ids, CancellationToken ct = default)
     {

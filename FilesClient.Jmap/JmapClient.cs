@@ -19,6 +19,7 @@ public class JmapClient : IJmapClient
         ?? throw new InvalidOperationException("Session not initialised — call ConnectAsync first");
 
     public string AccountId => Session.GetPrimaryAccount(StorageNodeCapability);
+    public string Username => Session.Username;
 
     public JmapClient(string token, bool debug = false)
     {

@@ -5,6 +5,7 @@ namespace FilesClient.Jmap;
 public interface IJmapClient : IDisposable
 {
     string AccountId { get; }
+    string Username { get; }
     Task<StorageNode[]> GetStorageNodesAsync(string[] ids, CancellationToken ct = default);
     Task<StorageNode[]> GetChildrenAsync(string parentId, CancellationToken ct = default);
     Task<ChangesResponse> GetChangesAsync(string sinceState, CancellationToken ct = default);
