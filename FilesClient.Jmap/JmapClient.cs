@@ -8,16 +8,9 @@ public class JmapClient : IDisposable
 {
     private readonly HttpClient _http;
     private JmapSession? _session;
-    private static readonly bool _debug =
+    internal static readonly bool Debug =
         string.Equals(Environment.GetEnvironmentVariable("DEBUGJMAP"), "true", StringComparison.OrdinalIgnoreCase)
         || Environment.GetEnvironmentVariable("DEBUGJMAP") == "1";
-
-    private static readonly JsonSerializerOptions _prettyJson = new()
-    {
-        WriteIndented = true,
-        DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull,
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-    };
 
     // Fastmail uses "https://www.fastmailusercontent.com/jmap/api/" but we
     // discover it via the session resource.
@@ -31,16 +24,20 @@ public class JmapClient : IDisposable
 
     public JmapClient(string token)
     {
-        _http = new HttpClient(new TokenAuth(token));
+        HttpMessageHandler handler = new TokenAuth(token);
+        if (Debug)
+        {
+            Console.Error.WriteLine("[JMAP] Debug logging enabled");
+            handler = new DebugLoggingHandler(handler);
+        }
+        _http = new HttpClient(handler);
     }
 
     public async Task ConnectAsync(string sessionUrl, CancellationToken ct = default)
     {
-        if (_debug) Console.Error.WriteLine($">> GET {sessionUrl}");
         var response = await _http.GetAsync(sessionUrl, ct);
         response.EnsureSuccessStatusCode();
         var json = await response.Content.ReadAsStringAsync(ct);
-        if (_debug) DebugJson("Session", json);
         _session = JsonSerializer.Deserialize<JmapSession>(json)
             ?? throw new InvalidOperationException("Failed to parse JMAP session");
     }
@@ -48,12 +45,10 @@ public class JmapClient : IDisposable
     public async Task<JmapResponse> CallAsync(JmapRequest request, CancellationToken ct = default)
     {
         var json = JsonSerializer.Serialize(request, JmapSerializerOptions.Default);
-        if (_debug) DebugJson("Request", json);
         var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
         var response = await _http.PostAsync(Session.ApiUrl, content, ct);
         response.EnsureSuccessStatusCode();
         var responseJson = await response.Content.ReadAsStringAsync(ct);
-        if (_debug) DebugJson("Response", responseJson);
         return JsonSerializer.Deserialize<JmapResponse>(responseJson, JmapSerializerOptions.Default)
             ?? throw new InvalidOperationException("Failed to parse JMAP response");
     }
@@ -147,24 +142,9 @@ public class JmapClient : IDisposable
     public async Task<Stream> DownloadBlobAsync(string blobId, string? type = null, string? name = null, CancellationToken ct = default)
     {
         var url = Session.GetDownloadUrl(AccountId, blobId, type, name);
-        if (_debug) Console.Error.WriteLine($">> GET blob {blobId} ({type}) from {url}");
         var response = await _http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
         response.EnsureSuccessStatusCode();
         return await response.Content.ReadAsStreamAsync(ct);
-    }
-
-    private static void DebugJson(string label, string json)
-    {
-        try
-        {
-            var doc = JsonDocument.Parse(json);
-            var pretty = JsonSerializer.Serialize(doc, _prettyJson);
-            Console.Error.WriteLine($"[JMAP {label}]\n{pretty}");
-        }
-        catch
-        {
-            Console.Error.WriteLine($"[JMAP {label}]\n{json}");
-        }
     }
 
     public void Dispose()
