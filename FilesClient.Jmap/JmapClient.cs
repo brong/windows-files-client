@@ -11,8 +11,9 @@ public class JmapClient : IDisposable
 
     // Fastmail uses "https://www.fastmailusercontent.com/jmap/api/" but we
     // discover it via the session resource.
+    public const string CoreCapability = "urn:ietf:params:jmap:core";
     public const string StorageNodeCapability = "https://www.fastmail.com/dev/files";
-    private static readonly string[] StorageNodeUsing = [StorageNodeCapability];
+    private static readonly string[] StorageNodeUsing = [CoreCapability, StorageNodeCapability];
 
     public JmapSession Session => _session
         ?? throw new InvalidOperationException("Session not initialised — call ConnectAsync first");

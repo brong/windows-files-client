@@ -63,7 +63,7 @@ public class SyncEngine : IDisposable
 
         // Get state from a StorageNode/get call
         var request = JmapRequest.Create(
-            [JmapClient.StorageNodeCapability],
+            [JmapClient.CoreCapability, JmapClient.StorageNodeCapability],
             ("StorageNode/get", new { accountId = _jmapClient.AccountId, ids = new[] { parentId } }, "s0"));
         var response = await _jmapClient.CallAsync(request, ct);
         return response.GetArgs<GetResponse<StorageNode>>(0).State;
