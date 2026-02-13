@@ -17,7 +17,6 @@ internal class SyncRoot : IDisposable
     private CF_CONNECTION_KEY _connectionKey;
     private bool _connected;
     private bool _registered;
-    private NavPaneIntegration? _navPane;
 
     // Must keep a reference to the callback registrations & delegates
     // so the GC doesn't collect them while the connection is active.
@@ -34,6 +33,9 @@ internal class SyncRoot : IDisposable
     public async Task RegisterAsync(string displayName, string providerVersion, string? iconPath = null)
     {
         Directory.CreateDirectory(_syncRootPath);
+
+        // Clean up stale registry entries from previous manual nav pane registration
+        NavPaneIntegration.CleanupStaleEntries(ProviderId);
 
         var folder = await StorageFolder.GetFolderFromPathAsync(_syncRootPath);
 
@@ -60,10 +62,6 @@ internal class SyncRoot : IDisposable
         StorageProviderSyncRootManager.Register(info);
         _registered = true;
         Console.WriteLine($"Sync root registered: {_syncRootPath}");
-
-        // Register top-level Explorer nav pane entry
-        _navPane = new NavPaneIntegration(ProviderId, displayName, _syncRootPath, iconResource);
-        _navPane.Register();
     }
 
     internal unsafe void Connect(CF_CALLBACK_REGISTRATION[] callbacks, CF_CALLBACK[] delegates)
@@ -101,9 +99,6 @@ internal class SyncRoot : IDisposable
 
     public void Unregister()
     {
-        _navPane?.Unregister();
-        _navPane = null;
-
         if (_registered)
         {
             StorageProviderSyncRootManager.Unregister(SyncRootId);
