@@ -19,6 +19,8 @@ public class SyncEngine : IDisposable
 
     // Maps local file path → StorageNode ID (populated during sync)
     private readonly ConcurrentDictionary<string, string> _pathToNodeId = new(StringComparer.OrdinalIgnoreCase);
+    // Reverse mapping: StorageNode ID → local file path (needed for delete handling)
+    private readonly ConcurrentDictionary<string, string> _nodeIdToPath = new();
 
     public string SyncRootPath => _syncRootPath;
 
@@ -66,6 +68,7 @@ public class SyncEngine : IDisposable
             {
                 var childPath = Path.Combine(localParentPath, PlaceholderManager.SanitizeName(child.Name));
                 _pathToNodeId[childPath] = child.Id;
+                _nodeIdToPath[child.Id] = childPath;
             }
         }
 
@@ -113,6 +116,7 @@ public class SyncEngine : IDisposable
                     {
                         var childPath = Path.Combine(parentPath, PlaceholderManager.SanitizeName(node.Name));
                         _pathToNodeId[childPath] = node.Id;
+                        _nodeIdToPath[node.Id] = childPath;
                         if (!Path.Exists(childPath))
                             _placeholderManager.CreatePlaceholders(parentPath, [node]);
                     }
@@ -121,7 +125,17 @@ public class SyncEngine : IDisposable
         }
 
         foreach (var destroyedId in changes.Destroyed)
-            Console.WriteLine($"  Destroyed: {destroyedId} (removal not yet implemented)");
+        {
+            if (_nodeIdToPath.TryRemove(destroyedId, out var localPath))
+            {
+                _pathToNodeId.TryRemove(localPath, out _);
+                DeleteLocalItem(localPath);
+            }
+            else
+            {
+                Console.WriteLine($"  Destroyed: {destroyedId} (no local path mapped)");
+            }
+        }
 
         if (changes.HasMoreChanges)
             return await PollChangesAsync(changes.NewState, ct);
@@ -203,6 +217,7 @@ public class SyncEngine : IDisposable
             // Convert the regular file to a cloud placeholder
             ConvertToPlaceholder(change.FullPath, node.Id);
             _pathToNodeId[change.FullPath] = node.Id;
+            _nodeIdToPath[node.Id] = change.FullPath;
             StripZoneIdentifier(change.FullPath);
             SetInSync(change.FullPath);
             Console.WriteLine($"Created: {fileName} → node {node.Id}");
@@ -214,6 +229,31 @@ public class SyncEngine : IDisposable
         if (string.Equals(localPath, _syncRootPath, StringComparison.OrdinalIgnoreCase))
             return "root";
         return _pathToNodeId.TryGetValue(localPath, out var id) ? id : null;
+    }
+
+    private static void DeleteLocalItem(string localPath)
+    {
+        try
+        {
+            if (Directory.Exists(localPath))
+            {
+                Directory.Delete(localPath, recursive: true);
+                Console.WriteLine($"  Deleted folder: {localPath}");
+            }
+            else if (File.Exists(localPath))
+            {
+                File.Delete(localPath);
+                Console.WriteLine($"  Deleted file: {localPath}");
+            }
+            else
+            {
+                Console.WriteLine($"  Already gone: {localPath}");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"  Failed to delete {localPath}: {ex.Message}");
+        }
     }
 
     private static unsafe void ConvertToPlaceholder(string filePath, string nodeId)
