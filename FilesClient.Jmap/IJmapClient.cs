@@ -16,4 +16,5 @@ public interface IJmapClient : IDisposable
     Task<StorageNode> ReplaceStorageNodeBlobAsync(string nodeId, string parentId, string name, string blobId, string? type = null, CancellationToken ct = default);
     Task MoveStorageNodeAsync(string nodeId, string parentId, string newName, CancellationToken ct = default);
     Task DestroyStorageNodeAsync(string nodeId, CancellationToken ct = default);
+    IAsyncEnumerable<string> WatchForChangesAsync(CancellationToken ct = default);
 }

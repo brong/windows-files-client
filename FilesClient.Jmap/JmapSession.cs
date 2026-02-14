@@ -44,6 +44,12 @@ public class JmapSession
         return UploadUrl.Replace("{accountId}", Uri.EscapeDataString(accountId));
     }
 
+    public string GetEventSourceUrl(string types, string closeafter, string ping) =>
+        EventSourceUrl
+            .Replace("{types}", Uri.EscapeDataString(types))
+            .Replace("{closeafter}", Uri.EscapeDataString(closeafter))
+            .Replace("{ping}", Uri.EscapeDataString(ping));
+
     public string GetDownloadUrl(string accountId, string blobId, string? type = null, string? name = null)
     {
         return DownloadUrl

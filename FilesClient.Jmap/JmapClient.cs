@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Text.Json;
 using FilesClient.Jmap.Auth;
 using FilesClient.Jmap.Models;
@@ -282,6 +283,74 @@ public class JmapClient : IJmapClient
         var setResponse = response.GetArgs<SetResponse>(0);
         if (setResponse.NotDestroyed != null && setResponse.NotDestroyed.TryGetValue(nodeId, out var setError))
             throw new InvalidOperationException($"StorageNode/set destroy failed: {setError.Type} — {setError.Description}");
+    }
+
+    public async IAsyncEnumerable<string> WatchForChangesAsync([EnumeratorCancellation] CancellationToken ct = default)
+    {
+        var url = Session.GetEventSourceUrl("StorageNode", "no", "60");
+        var request = new HttpRequestMessage(HttpMethod.Get, url);
+        request.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("text/event-stream"));
+
+        using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+        response.EnsureSuccessStatusCode();
+
+        using var stream = await response.Content.ReadAsStreamAsync(ct);
+        using var reader = new StreamReader(stream);
+
+        string? eventType = null;
+        string? dataBuffer = null;
+
+        while (!ct.IsCancellationRequested)
+        {
+            var line = await reader.ReadLineAsync(ct);
+            if (line == null)
+                break; // Stream ended
+
+            if (line.StartsWith(':'))
+                continue; // SSE comment / ping
+
+            if (line.Length == 0)
+            {
+                // Blank line = end of event
+                if (eventType == "state" && dataBuffer != null)
+                {
+                    var newState = ParseStateChangeData(dataBuffer);
+                    if (newState != null)
+                        yield return newState;
+                }
+                eventType = null;
+                dataBuffer = null;
+                continue;
+            }
+
+            if (line.StartsWith("event:"))
+                eventType = line.Substring(6).Trim();
+            else if (line.StartsWith("data:"))
+            {
+                var data = line.Substring(5).Trim();
+                dataBuffer = dataBuffer == null ? data : dataBuffer + "\n" + data;
+            }
+        }
+    }
+
+    private string? ParseStateChangeData(string data)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(data);
+            var root = doc.RootElement;
+            if (root.TryGetProperty("changed", out var changed) &&
+                changed.TryGetProperty(AccountId, out var account) &&
+                account.TryGetProperty("StorageNode", out var state))
+            {
+                return state.GetString();
+            }
+        }
+        catch (JsonException)
+        {
+            // Malformed JSON — skip
+        }
+        return null;
     }
 
     public void Dispose()

@@ -105,25 +105,41 @@ class Program
             Console.WriteLine($"Initial sync complete. State: {state}");
             Console.WriteLine();
 
-            // 3. Sync loop — poll for changes
+            // 3. Sync loop — EventSource push notifications with polling fallback
             Console.WriteLine("Watching for changes (Ctrl+C to stop)...");
             string currentState = state;
             while (!cts.Token.IsCancellationRequested)
             {
                 try
                 {
-                    await Task.Delay(TimeSpan.FromSeconds(30), cts.Token);
+                    Console.WriteLine("Connecting to push notifications...");
+                    await foreach (var newState in jmapClient.WatchForChangesAsync(cts.Token))
+                    {
+                        try
+                        {
+                            currentState = await engine.PollChangesAsync(currentState, cts.Token);
+                        }
+                        catch (Exception ex) when (ex is not OperationCanceledException)
+                        {
+                            Console.Error.WriteLine($"Change poll error: {ex.Message}");
+                        }
+                    }
+                    // Stream ended normally — reconnect after brief delay
+                    Console.WriteLine("Push connection closed, reconnecting...");
                 }
-                catch (OperationCanceledException)
+                catch (OperationCanceledException) { break; }
+                catch (Exception ex)
                 {
-                    break;
+                    Console.Error.WriteLine($"Push error: {ex.Message}");
                 }
-
+                // Brief delay before reconnect, plus one poll to catch anything missed
                 try
                 {
+                    await Task.Delay(TimeSpan.FromSeconds(5), cts.Token);
                     currentState = await engine.PollChangesAsync(currentState, cts.Token);
                 }
-                catch (Exception ex) when (ex is not OperationCanceledException)
+                catch (OperationCanceledException) { break; }
+                catch (Exception ex)
                 {
                     Console.Error.WriteLine($"Change poll error: {ex.Message}");
                 }

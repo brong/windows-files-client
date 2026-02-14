@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Text;
 using FilesClient.Jmap.Models;
 
@@ -132,6 +133,15 @@ public class StubJmapClient : IJmapClient
             Console.WriteLine($"[Stub] Moved StorageNode {nodeId} to {parentId}/{newName}");
         }
         return Task.CompletedTask;
+    }
+
+    public async IAsyncEnumerable<string> WatchForChangesAsync([EnumeratorCancellation] CancellationToken ct = default)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(30), ct);
+            yield return "stub-state";
+        }
     }
 
     public void Dispose() { }
