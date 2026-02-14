@@ -51,7 +51,7 @@ public class SyncEngine : IDisposable
         // Phase 1: Fetch the entire tree from the server
         Console.WriteLine("Fetching directory tree...");
         var tree = new List<(string parentId, string localParentPath, StorageNode[] children)>();
-        await FetchTreeAsync("root", _syncRootPath, tree, ct, depth: 0);
+        await FetchTreeAsync("root", _syncRootPath, tree, ct);
 
         // Phase 2: Create all placeholders in one fast pass (parent before children,
         // but each directory's children are created immediately after the directory)
@@ -98,19 +98,15 @@ public class SyncEngine : IDisposable
     private async Task FetchTreeAsync(
         string parentId, string localParentPath,
         List<(string parentId, string localParentPath, StorageNode[] children)> tree,
-        CancellationToken ct, int depth)
+        CancellationToken ct)
     {
         var children = await _jmapClient.GetChildrenAsync(parentId, ct);
         tree.Add((parentId, localParentPath, children));
 
-        // Recurse into subdirectories (limit depth for PoC)
-        if (depth < 3)
+        foreach (var child in children.Where(c => c.IsFolder))
         {
-            foreach (var child in children.Where(c => c.IsFolder))
-            {
-                var childPath = Path.Combine(localParentPath, PlaceholderManager.SanitizeName(child.Name));
-                await FetchTreeAsync(child.Id, childPath, tree, ct, depth + 1);
-            }
+            var childPath = Path.Combine(localParentPath, PlaceholderManager.SanitizeName(child.Name));
+            await FetchTreeAsync(child.Id, childPath, tree, ct);
         }
     }
 
