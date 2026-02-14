@@ -32,6 +32,7 @@ public class SyncEngine : IDisposable
         _placeholderManager = new PlaceholderManager(syncRootPath);
         _syncCallbacks = new SyncCallbacks(jmapClient);
         _syncCallbacks.OnRenameCompleted += OnPlaceholderRenamed;
+        _syncCallbacks.OnDirectoryPopulated += OnDirectoryPopulated;
         _fileChangeWatcher = new FileChangeWatcher(syncRootPath);
         _fileChangeWatcher.OnChanges += OnLocalFileChanges;
     }
@@ -538,6 +539,99 @@ public class SyncEngine : IDisposable
                 Console.Error.WriteLine($"RENAME_COMPLETION error: {ex.Message}");
             }
         });
+    }
+
+    private void OnDirectoryPopulated(SyncCallbacks.DirectoryPopulatedInfo info)
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                // Brief delay for pin state to propagate from parent to children
+                await Task.Delay(500);
+                HydratePinnedFiles(info.DirectoryPath);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Hydration scan error for {info.DirectoryPath}: {ex.Message}");
+            }
+        });
+    }
+
+    private void HydratePinnedFiles(string directoryPath)
+    {
+        if (!Directory.Exists(directoryPath))
+            return;
+
+        // Check if this directory is pinned
+        var dirPinState = ReadPinState(directoryPath);
+        if (dirPinState != 1) // CF_PIN_STATE_PINNED
+            return;
+
+        const FileAttributes dehydratedFlag = (FileAttributes)0x00400000; // FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
+
+        foreach (var filePath in Directory.GetFiles(directoryPath))
+        {
+            try
+            {
+                var attrs = File.GetAttributes(filePath);
+                if ((attrs & dehydratedFlag) == 0)
+                    continue; // Already hydrated
+
+                Console.WriteLine($"Hydrating pinned file: {Path.GetFileName(filePath)}");
+                HydratePlaceholder(filePath);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"  Hydration failed for {Path.GetFileName(filePath)}: {ex.Message}");
+            }
+        }
+    }
+
+    private static unsafe int ReadPinState(string path)
+    {
+        try
+        {
+            var options = Directory.Exists(path) ? (FileOptions)0x02000000 : FileOptions.None;
+            using var safeHandle = File.OpenHandle(path, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete, options);
+            var handle = new global::Windows.Win32.Foundation.HANDLE(safeHandle.DangerousGetHandle());
+
+            var buffer = new byte[256];
+            fixed (byte* pBuffer = buffer)
+            {
+                uint returnedLen;
+                var hr = PInvoke.CfGetPlaceholderInfo(
+                    handle,
+                    CF_PLACEHOLDER_INFO_CLASS.CF_PLACEHOLDER_INFO_BASIC,
+                    pBuffer,
+                    (uint)buffer.Length,
+                    &returnedLen);
+
+                if (hr.Failed || returnedLen < 4)
+                    return 0; // Unknown
+
+                return *(int*)pBuffer; // PinState at offset 0
+            }
+        }
+        catch
+        {
+            return 0;
+        }
+    }
+
+    private static unsafe void HydratePlaceholder(string filePath)
+    {
+        using var safeHandle = File.OpenHandle(filePath, FileMode.Open, FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
+        var handle = new global::Windows.Win32.Foundation.HANDLE(safeHandle.DangerousGetHandle());
+        PInvoke.CfHydratePlaceholder(
+            handle,
+            0,      // start offset
+            -1,     // entire file
+            CF_HYDRATE_FLAGS.CF_HYDRATE_FLAG_NONE,
+            null    // synchronous
+        ).ThrowOnFailure();
     }
 
     private string? ResolveParentNodeId(string localPath)

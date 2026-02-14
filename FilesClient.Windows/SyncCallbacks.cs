@@ -21,6 +21,9 @@ internal class SyncCallbacks
     public record RenameCompletedInfo(string? NodeId, string OldFullPath, string NewFullPath);
     public event Action<RenameCompletedInfo>? OnRenameCompleted;
 
+    public record DirectoryPopulatedInfo(string DirectoryPath);
+    public event Action<DirectoryPopulatedInfo>? OnDirectoryPopulated;
+
     public SyncCallbacks(IJmapClient jmapClient)
     {
         _jmapClient = jmapClient;
@@ -95,6 +98,12 @@ internal class SyncCallbacks
             opParams.Anonymous.TransferPlaceholders.Flags = CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAGS.CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_NONE;
 
             PInvoke.CfExecute(in opInfo, ref opParams).ThrowOnFailure();
+
+            // Notify SyncEngine so it can hydrate pinned files in this directory
+            var dirPath = callbackInfo->VolumeDosName.ToString() + callbackInfo->NormalizedPath.ToString();
+            if (dirPath.StartsWith(@"\\?\"))
+                dirPath = dirPath.Substring(4);
+            OnDirectoryPopulated?.Invoke(new DirectoryPopulatedInfo(dirPath));
         }
         catch (Exception ex)
         {
