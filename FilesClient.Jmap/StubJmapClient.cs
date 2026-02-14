@@ -74,10 +74,17 @@ public class StubJmapClient : IJmapClient
         return Task.FromResult(blobId);
     }
 
-    public Task<StorageNode> CreateStorageNodeAsync(string parentId, string blobId, string name, string? type = null, CancellationToken ct = default)
+    public Task DestroyStorageNodeAsync(string nodeId, CancellationToken ct = default)
+    {
+        if (_nodes.Remove(nodeId))
+            Console.WriteLine($"[Stub] Destroyed StorageNode {nodeId}");
+        return Task.CompletedTask;
+    }
+
+    public Task<StorageNode> CreateStorageNodeAsync(string parentId, string? blobId, string name, string? type = null, CancellationToken ct = default)
     {
         var id = $"stub-file-{_nextId++}";
-        var size = _blobs.TryGetValue(blobId, out var data) ? data.Length : 0;
+        var size = blobId != null && _blobs.TryGetValue(blobId, out var data) ? data.Length : 0;
         var node = new StorageNode
         {
             Id = id,

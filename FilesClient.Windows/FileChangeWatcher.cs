@@ -4,7 +4,7 @@ namespace FilesClient.Windows;
 
 internal sealed class FileChangeWatcher : IDisposable
 {
-    public enum ChangeKind { Created, Modified, Renamed }
+    public enum ChangeKind { Created, Modified, Renamed, Deleted }
 
     public record FileChange(string FullPath, ChangeKind Kind, string? OldFullPath = null);
 
@@ -34,6 +34,7 @@ internal sealed class FileChangeWatcher : IDisposable
         _watcher.Created += (_, e) => OnCreated(e.FullPath);
         _watcher.Changed += (_, e) => EnqueueIfNotPlaceholder(e.FullPath, ChangeKind.Modified);
         _watcher.Renamed += (_, e) => OnRenamed(e.FullPath, e.OldFullPath);
+        _watcher.Deleted += (_, e) => OnDeleted(e.FullPath);
 
         _watcher.EnableRaisingEvents = true;
         Console.WriteLine("File change watcher started.");
@@ -48,14 +49,23 @@ internal sealed class FileChangeWatcher : IDisposable
 
     private void OnCreated(string path)
     {
-        // For directories, strip Zone.Identifier immediately (no upload needed)
+        // For directories, strip Zone.Identifier and enqueue as Created
         if (Directory.Exists(path))
         {
             StripZoneIdentifier(path);
+            _pending[path] = (ChangeKind.Created, null);
+            _debounceTimer.Change(_debounceInterval, Timeout.InfiniteTimeSpan);
             return;
         }
 
         EnqueueIfNotPlaceholder(path, ChangeKind.Created);
+    }
+
+    private void OnDeleted(string path)
+    {
+        // File/folder is already gone — no placeholder check possible or needed
+        _pending[path] = (ChangeKind.Deleted, null);
+        _debounceTimer.Change(_debounceInterval, Timeout.InfiniteTimeSpan);
     }
 
     private void OnRenamed(string fullPath, string oldFullPath)

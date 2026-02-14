@@ -216,17 +216,24 @@ public class SyncEngine : IDisposable
         _ = Task.Run(async () =>
         {
             // Sort renames shallowest-first (by depth of old path) to handle
-            // parent renames before children; non-renames keep original order
+            // parent renames before children
             var renames = changes
                 .Where(c => c.Kind == FileChangeWatcher.ChangeKind.Renamed)
                 .OrderBy(c => c.OldFullPath?.Count(ch => ch == Path.DirectorySeparatorChar) ?? 0)
                 .ToList();
-            var others = changes
-                .Where(c => c.Kind != FileChangeWatcher.ChangeKind.Renamed)
+            // Creates and modifies in original order
+            var createsAndModifies = changes
+                .Where(c => c.Kind == FileChangeWatcher.ChangeKind.Created
+                          || c.Kind == FileChangeWatcher.ChangeKind.Modified)
+                .ToList();
+            // Deletes deepest-first so children are destroyed before parents
+            var deletes = changes
+                .Where(c => c.Kind == FileChangeWatcher.ChangeKind.Deleted)
+                .OrderByDescending(c => c.FullPath.Count(ch => ch == Path.DirectorySeparatorChar))
                 .ToList();
 
-            // Process renames first (shallowest-first), then other changes
-            foreach (var change in renames.Concat(others))
+            // Process renames first, then creates/modifies, then deletes
+            foreach (var change in renames.Concat(createsAndModifies).Concat(deletes))
             {
                 try
                 {
@@ -246,6 +253,20 @@ public class SyncEngine : IDisposable
         if (change.Kind == FileChangeWatcher.ChangeKind.Renamed)
         {
             await ProcessRenameAsync(change);
+            return;
+        }
+
+        // Handle deletes
+        if (change.Kind == FileChangeWatcher.ChangeKind.Deleted)
+        {
+            await ProcessDeleteAsync(change);
+            return;
+        }
+
+        // Handle new directories
+        if (Directory.Exists(change.FullPath))
+        {
+            await ProcessNewFolderAsync(change);
             return;
         }
 
@@ -378,6 +399,62 @@ public class SyncEngine : IDisposable
         _nodeIdToPath[nodeId] = change.FullPath;
 
         Console.WriteLine($"Renamed: {newName} (node {nodeId})");
+    }
+
+    private async Task ProcessDeleteAsync(FileChangeWatcher.FileChange change)
+    {
+        // Look up the node ID for this path; if not found, it's an echo from
+        // a server-side destroy (PollChangesAsync already removed the mapping)
+        // or a file we never knew about
+        if (!_pathToNodeId.TryGetValue(change.FullPath, out var nodeId))
+        {
+            Console.WriteLine($"Delete: skipping unknown or echo path: {change.FullPath}");
+            return;
+        }
+
+        Console.WriteLine($"Destroying node {nodeId} for deleted path: {change.FullPath}");
+        await _jmapClient.DestroyStorageNodeAsync(nodeId);
+
+        // Clean up descendant mappings if this was a directory
+        var prefix = change.FullPath + Path.DirectorySeparatorChar;
+        var descendants = _pathToNodeId
+            .Where(kvp => kvp.Key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        foreach (var (descPath, descNodeId) in descendants)
+        {
+            _pathToNodeId.TryRemove(descPath, out _);
+            _nodeIdToPath.TryRemove(descNodeId, out _);
+        }
+
+        _pathToNodeId.TryRemove(change.FullPath, out _);
+        _nodeIdToPath.TryRemove(nodeId, out _);
+    }
+
+    private async Task ProcessNewFolderAsync(FileChangeWatcher.FileChange change)
+    {
+        // If already mapped, this is an echo from a server-side create
+        if (_pathToNodeId.ContainsKey(change.FullPath))
+        {
+            Console.WriteLine($"New folder: skipping echo for {change.FullPath}");
+            return;
+        }
+
+        var folderName = Path.GetFileName(change.FullPath);
+        var parentDir = Path.GetDirectoryName(change.FullPath)!;
+        var parentId = ResolveParentNodeId(parentDir);
+        if (parentId == null)
+        {
+            Console.Error.WriteLine($"Cannot create folder {folderName}: parent not mapped");
+            return;
+        }
+
+        Console.WriteLine($"Creating folder on server: {folderName}");
+        var node = await _jmapClient.CreateStorageNodeAsync(parentId, null, folderName);
+
+        ConvertToPlaceholder(change.FullPath, node.Id);
+        _pathToNodeId[change.FullPath] = node.Id;
+        _nodeIdToPath[node.Id] = change.FullPath;
+        Console.WriteLine($"Created folder: {folderName} → node {node.Id}");
     }
 
     private void OnPlaceholderRenamed(SyncCallbacks.RenameCompletedInfo info)

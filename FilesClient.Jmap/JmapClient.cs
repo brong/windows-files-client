@@ -168,7 +168,7 @@ public class JmapClient : IJmapClient
         return upload.BlobId;
     }
 
-    public async Task<StorageNode> CreateStorageNodeAsync(string parentId, string blobId, string name, string? type = null, CancellationToken ct = default)
+    public async Task<StorageNode> CreateStorageNodeAsync(string parentId, string? blobId, string name, string? type = null, CancellationToken ct = default)
     {
         var request = JmapRequest.Create(StorageNodeUsing,
             ("StorageNode/set", new
@@ -259,6 +259,29 @@ public class JmapClient : IJmapClient
         var setResponse = response.GetArgs<SetResponse>(0);
         if (setResponse.NotUpdated != null && setResponse.NotUpdated.TryGetValue(nodeId, out var setError))
             throw new InvalidOperationException($"StorageNode/set move failed: {setError.Type} — {setError.Description}");
+    }
+
+    public async Task DestroyStorageNodeAsync(string nodeId, CancellationToken ct = default)
+    {
+        var request = JmapRequest.Create(StorageNodeUsing,
+            ("StorageNode/set", new
+            {
+                accountId = AccountId,
+                destroy = new[] { nodeId },
+            }, "d0"));
+
+        var response = await CallAsync(request, ct);
+        var (method, _, _) = response.GetResponse(0);
+
+        if (method == "error")
+        {
+            var error = response.GetArgs<JsonElement>(0);
+            throw new InvalidOperationException($"JMAP error: {error}");
+        }
+
+        var setResponse = response.GetArgs<SetResponse>(0);
+        if (setResponse.NotDestroyed != null && setResponse.NotDestroyed.TryGetValue(nodeId, out var setError))
+            throw new InvalidOperationException($"StorageNode/set destroy failed: {setError.Type} — {setError.Description}");
     }
 
     public void Dispose()
