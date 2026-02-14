@@ -16,6 +16,7 @@ public class SyncEngine : IDisposable
     private readonly PlaceholderManager _placeholderManager;
     private readonly SyncCallbacks _syncCallbacks;
     private readonly FileChangeWatcher _fileChangeWatcher;
+    private readonly CancellationTokenSource _hydrationCts = new();
 
     // Maps local file path → StorageNode ID (populated during sync)
     private readonly ConcurrentDictionary<string, string> _pathToNodeId = new(StringComparer.OrdinalIgnoreCase);
@@ -45,6 +46,7 @@ public class SyncEngine : IDisposable
         _syncRoot.Connect(registrations, delegates);
 
         _fileChangeWatcher.Start();
+        _ = Task.Run(() => HydrationMonitorLoop(_hydrationCts.Token));
     }
 
     public async Task<string> PopulateAsync(CancellationToken ct)
@@ -558,6 +560,57 @@ public class SyncEngine : IDisposable
         });
     }
 
+    private async Task HydrationMonitorLoop(CancellationToken ct)
+    {
+        // Wait for initial population to complete before scanning
+        await Task.Delay(TimeSpan.FromSeconds(10), ct);
+
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                int hydrated = ScanAndHydratePinnedFiles();
+                if (hydrated > 0)
+                    Console.WriteLine($"Hydration scan: hydrated {hydrated} pinned files");
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                Console.Error.WriteLine($"Hydration monitor error: {ex.Message}");
+            }
+
+            await Task.Delay(TimeSpan.FromSeconds(5), ct);
+        }
+    }
+
+    private int ScanAndHydratePinnedFiles()
+    {
+        const FileAttributes dehydratedFlag = (FileAttributes)0x00400000; // FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
+        int count = 0;
+
+        foreach (var filePath in Directory.EnumerateFiles(_syncRootPath, "*", SearchOption.AllDirectories))
+        {
+            try
+            {
+                var attrs = File.GetAttributes(filePath);
+                if ((attrs & dehydratedFlag) == 0)
+                    continue; // Already hydrated
+
+                var pinState = ReadPinState(filePath);
+                if (pinState != 1) // CF_PIN_STATE_PINNED
+                    continue;
+
+                Console.WriteLine($"Hydrating pinned file: {Path.GetFileName(filePath)}");
+                HydratePlaceholder(filePath);
+                count++;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"  Hydration error for {Path.GetFileName(filePath)}: {ex.Message}");
+            }
+        }
+        return count;
+    }
+
     private void HydratePinnedFiles(string directoryPath)
     {
         if (!Directory.Exists(directoryPath))
@@ -860,6 +913,8 @@ public class SyncEngine : IDisposable
 
     public void Dispose()
     {
+        _hydrationCts.Cancel();
+        _hydrationCts.Dispose();
         _fileChangeWatcher.Dispose();
         _syncRoot.Dispose();
     }
