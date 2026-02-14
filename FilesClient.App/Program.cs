@@ -78,11 +78,18 @@ class Program
         }
         Console.WriteLine($"Account: {jmapClient.AccountId}");
 
-        // Derive display name and folder name from account username
+        // Derive display name (nav pane) and folder name (disk) from account username.
+        // The folder name uses only the local part of the email to avoid domain-like
+        // strings (e.g. "brong.net") which trigger Windows' Internet zone heuristics
+        // and produce "These files might be harmful" security warnings.
         var displayName = $"{jmapClient.Username} Files";
+        var username = jmapClient.Username;
+        var folderLabel = username.Contains('@')
+            ? username[..username.IndexOf('@')]
+            : username;
         syncRootPath ??= Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-            SanitizeFolderName(displayName));
+            SanitizeFolderName($"{folderLabel} Files"));
 
         Console.WriteLine($"Sync root: {syncRootPath}");
         Console.WriteLine();
@@ -97,7 +104,7 @@ class Program
             // 1. Set up sync engine (register + connect callbacks)
             using var engine = new SyncEngine(syncRootPath, jmapClient);
             Console.WriteLine("Registering sync root...");
-            await engine.RegisterAndConnectAsync(displayName, iconPath);
+            await engine.RegisterAndConnectAsync(displayName, jmapClient.AccountId, iconPath);
 
             // 2. Initial population
             Console.WriteLine("Populating placeholders...");

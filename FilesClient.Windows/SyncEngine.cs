@@ -33,9 +33,9 @@ public class SyncEngine : IDisposable
         _fileChangeWatcher.OnChanges += OnLocalFileChanges;
     }
 
-    public async Task RegisterAndConnectAsync(string displayName, string? iconPath = null)
+    public async Task RegisterAndConnectAsync(string displayName, string accountId, string? iconPath = null)
     {
-        await _syncRoot.RegisterAsync(displayName, "1.0", iconPath);
+        await _syncRoot.RegisterAsync(displayName, "1.0", accountId, iconPath);
 
         var (registrations, delegates) = _syncCallbacks.CreateCallbackRegistrations();
         _syncRoot.Connect(registrations, delegates);
