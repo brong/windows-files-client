@@ -107,20 +107,86 @@ public class SyncEngine : IDisposable
         if (idsToFetch.Length > 0)
         {
             var nodes = await _jmapClient.GetStorageNodesAsync(idsToFetch, ct);
-            foreach (var node in nodes)
+            var createdSet = new HashSet<string>(changes.Created);
+
+            // Process updated nodes first — sort shallowest-first by existing path
+            // to handle parent renames before children
+            var updatedNodes = nodes
+                .Where(n => !createdSet.Contains(n.Id))
+                .OrderBy(n => _nodeIdToPath.TryGetValue(n.Id, out var p)
+                    ? p.Count(ch => ch == Path.DirectorySeparatorChar)
+                    : int.MaxValue)
+                .ToList();
+
+            foreach (var node in updatedNodes)
             {
-                if (node.ParentId != null)
+                if (node.ParentId == null)
+                    continue;
+
+                var oldPath = _nodeIdToPath.GetValueOrDefault(node.Id);
+                var parentPath = await ResolveLocalPathAsync(node.ParentId, ct);
+                if (parentPath == null)
+                    continue;
+
+                var newPath = Path.Combine(parentPath, PlaceholderManager.SanitizeName(node.Name));
+
+                if (oldPath != null && !string.Equals(oldPath, newPath, StringComparison.OrdinalIgnoreCase))
                 {
-                    var parentPath = await ResolveLocalPathAsync(node.ParentId, ct);
-                    if (parentPath != null)
+                    // Name or parent changed — rename on disk
+                    // Update mappings FIRST so the file watcher echo finds the new path
+                    // and skips the redundant server call
+                    var isDirectory = Directory.Exists(oldPath);
+                    if (isDirectory)
+                        UpdateDescendantMappings(oldPath, newPath);
+
+                    _pathToNodeId.TryRemove(oldPath, out _);
+                    _pathToNodeId[newPath] = node.Id;
+                    _nodeIdToPath[node.Id] = newPath;
+
+                    try
                     {
-                        var childPath = Path.Combine(parentPath, PlaceholderManager.SanitizeName(node.Name));
-                        _pathToNodeId[childPath] = node.Id;
-                        _nodeIdToPath[node.Id] = childPath;
-                        if (!Path.Exists(childPath))
-                            _placeholderManager.CreatePlaceholders(parentPath, [node]);
+                        if (isDirectory)
+                        {
+                            Directory.Move(oldPath, newPath);
+                            Console.WriteLine($"  Renamed folder: {oldPath} → {newPath}");
+                        }
+                        else if (File.Exists(oldPath))
+                        {
+                            File.Move(oldPath, newPath);
+                            Console.WriteLine($"  Renamed file: {oldPath} → {newPath}");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.Error.WriteLine($"  Failed to rename {oldPath} → {newPath}: {ex.Message}");
                     }
                 }
+                else
+                {
+                    // No rename — just ensure mappings are up-to-date
+                    _pathToNodeId[newPath] = node.Id;
+                    _nodeIdToPath[node.Id] = newPath;
+                    if (!Path.Exists(newPath))
+                        _placeholderManager.CreatePlaceholders(parentPath, [node]);
+                }
+            }
+
+            // Process created nodes — create placeholders for new items
+            var createdNodes = nodes.Where(n => createdSet.Contains(n.Id));
+            foreach (var node in createdNodes)
+            {
+                if (node.ParentId == null)
+                    continue;
+
+                var parentPath = await ResolveLocalPathAsync(node.ParentId, ct);
+                if (parentPath == null)
+                    continue;
+
+                var childPath = Path.Combine(parentPath, PlaceholderManager.SanitizeName(node.Name));
+                _pathToNodeId[childPath] = node.Id;
+                _nodeIdToPath[node.Id] = childPath;
+                if (!Path.Exists(childPath))
+                    _placeholderManager.CreatePlaceholders(parentPath, [node]);
             }
         }
 
@@ -148,7 +214,18 @@ public class SyncEngine : IDisposable
         // Process uploads on a background thread (fire-and-forget from the timer callback)
         _ = Task.Run(async () =>
         {
-            foreach (var change in changes)
+            // Sort renames shallowest-first (by depth of old path) to handle
+            // parent renames before children; non-renames keep original order
+            var renames = changes
+                .Where(c => c.Kind == FileChangeWatcher.ChangeKind.Renamed)
+                .OrderBy(c => c.OldFullPath?.Count(ch => ch == Path.DirectorySeparatorChar) ?? 0)
+                .ToList();
+            var others = changes
+                .Where(c => c.Kind != FileChangeWatcher.ChangeKind.Renamed)
+                .ToList();
+
+            // Process renames first (shallowest-first), then other changes
+            foreach (var change in renames.Concat(others))
             {
                 try
                 {
@@ -243,9 +320,25 @@ public class SyncEngine : IDisposable
         if (change.OldFullPath == null)
             return;
 
-        if (!_pathToNodeId.TryGetValue(change.OldFullPath, out var nodeId))
+        // Primary lookup: old path in our dictionary
+        string? nodeId = null;
+        if (!_pathToNodeId.TryGetValue(change.OldFullPath, out nodeId))
         {
-            Console.Error.WriteLine($"Rename: old path not mapped: {change.OldFullPath}");
+            // Fallback: read the node ID from cfapi placeholder identity on the new path
+            nodeId = ReadPlaceholderNodeId(change.FullPath);
+            if (nodeId == null)
+            {
+                Console.Error.WriteLine($"Rename: cannot resolve node ID for: {change.OldFullPath}");
+                return;
+            }
+        }
+
+        // Echo check: if this rename was initiated by PollChangesAsync,
+        // the mapping already points to the new path — skip the server call
+        if (_nodeIdToPath.TryGetValue(nodeId, out var mappedPath) &&
+            string.Equals(mappedPath, change.FullPath, StringComparison.OrdinalIgnoreCase))
+        {
+            Console.WriteLine($"Rename: skipping echo for {Path.GetFileName(change.FullPath)} (node {nodeId})");
             return;
         }
 
@@ -254,7 +347,11 @@ public class SyncEngine : IDisposable
 
         await _jmapClient.RenameStorageNodeAsync(nodeId, newName);
 
-        // Update local path mappings
+        // Update descendant mappings first if this is a directory
+        if (Directory.Exists(change.FullPath))
+            UpdateDescendantMappings(change.OldFullPath, change.FullPath);
+
+        // Update the renamed item's own mapping
         _pathToNodeId.TryRemove(change.OldFullPath, out _);
         _pathToNodeId[change.FullPath] = nodeId;
         _nodeIdToPath[nodeId] = change.FullPath;
@@ -321,6 +418,82 @@ public class SyncEngine : IDisposable
             CF_IN_SYNC_STATE.CF_IN_SYNC_STATE_IN_SYNC,
             CF_SET_IN_SYNC_FLAGS.CF_SET_IN_SYNC_FLAG_NONE,
             null).ThrowOnFailure();
+    }
+
+    private static unsafe string? ReadPlaceholderNodeId(string path)
+    {
+        try
+        {
+            using var safeHandle = File.OpenHandle(path, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            var handle = new global::Windows.Win32.Foundation.HANDLE(safeHandle.DangerousGetHandle());
+
+            var buffer = new byte[256];
+            fixed (byte* pBuffer = buffer)
+            {
+                uint returnedLen;
+                var hr = PInvoke.CfGetPlaceholderInfo(
+                    handle,
+                    CF_PLACEHOLDER_INFO_CLASS.CF_PLACEHOLDER_INFO_BASIC,
+                    pBuffer,
+                    (uint)buffer.Length,
+                    &returnedLen);
+
+                if (hr.Failed)
+                    return null;
+
+                // CF_PLACEHOLDER_BASIC_INFO layout:
+                //   PinState (int, offset 0)
+                //   InSyncState (int, offset 4)
+                //   FileId (long, offset 8)
+                //   SyncRootFileId (long, offset 16)
+                //   FileIdentityLength (uint, offset 24)
+                //   FileIdentity (byte[], offset 28)
+                const int fileIdentityLengthOffset = 24;
+                const int fileIdentityOffset = 28;
+
+                if (returnedLen < (uint)fileIdentityOffset)
+                    return null;
+
+                var identityLength = *(uint*)(pBuffer + fileIdentityLengthOffset);
+                if (identityLength == 0 || returnedLen < (uint)fileIdentityOffset + identityLength)
+                    return null;
+
+                return Encoding.UTF8.GetString(pBuffer + fileIdentityOffset, (int)identityLength);
+            }
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private void UpdateDescendantMappings(string oldDirPath, string newDirPath)
+    {
+        var oldPrefix = oldDirPath + Path.DirectorySeparatorChar;
+
+        // Collect entries to update (can't modify dictionary while enumerating)
+        var toUpdate = new List<(string oldPath, string nodeId)>();
+        foreach (var kvp in _pathToNodeId)
+        {
+            if (kvp.Key.StartsWith(oldPrefix, StringComparison.OrdinalIgnoreCase))
+                toUpdate.Add((kvp.Key, kvp.Value));
+        }
+
+        foreach (var (oldPath, nodeId) in toUpdate)
+        {
+            var newPath = newDirPath + oldPath.Substring(oldDirPath.Length);
+            _pathToNodeId.TryRemove(oldPath, out _);
+            _pathToNodeId[newPath] = nodeId;
+            _nodeIdToPath[nodeId] = newPath;
+        }
+
+        // Update the directory's own entry
+        if (_pathToNodeId.TryRemove(oldDirPath, out var dirNodeId))
+        {
+            _pathToNodeId[newDirPath] = dirNodeId;
+            _nodeIdToPath[dirNodeId] = newDirPath;
+        }
     }
 
     private static void StripZoneIdentifier(string filePath)

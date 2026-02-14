@@ -60,10 +60,6 @@ internal sealed class FileChangeWatcher : IDisposable
 
     private void OnRenamed(string fullPath, string oldFullPath)
     {
-        // Skip directory renames for now
-        if (Directory.Exists(fullPath))
-            return;
-
         // No placeholder check needed — we just update the server-side name
         _pending[fullPath] = (ChangeKind.Renamed, oldFullPath);
         _debounceTimer.Change(_debounceInterval, Timeout.InfiniteTimeSpan);
