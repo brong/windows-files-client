@@ -627,7 +627,9 @@ public class SyncEngine : IDisposable
             0,
             null,   // no dehydrate range
             0,
-            CF_UPDATE_FLAGS.CF_UPDATE_FLAG_MARK_IN_SYNC | CF_UPDATE_FLAGS.CF_UPDATE_FLAG_ALWAYS_FULL,
+            CF_UPDATE_FLAGS.CF_UPDATE_FLAG_MARK_IN_SYNC
+                | CF_UPDATE_FLAGS.CF_UPDATE_FLAG_ENABLE_ON_DEMAND_POPULATION
+                | CF_UPDATE_FLAGS.CF_UPDATE_FLAG_ALWAYS_FULL,
             &usn,
             null).ThrowOnFailure();
     }
