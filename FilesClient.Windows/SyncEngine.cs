@@ -164,6 +164,13 @@ public class SyncEngine : IDisposable
 
     private async Task ProcessLocalChangeAsync(FileChangeWatcher.FileChange change)
     {
+        // Handle renames separately — the file may still be a placeholder
+        if (change.Kind == FileChangeWatcher.ChangeKind.Renamed)
+        {
+            await ProcessRenameAsync(change);
+            return;
+        }
+
         if (!File.Exists(change.FullPath))
             return;
 
@@ -190,6 +197,13 @@ public class SyncEngine : IDisposable
 
         if (_pathToNodeId.TryGetValue(change.FullPath, out var existingNodeId))
         {
+            // Skip re-upload if this file was just hydrated by cfapi
+            if (_syncCallbacks.RecentlyHydrated.TryRemove(existingNodeId, out _))
+            {
+                Console.WriteLine($"Skipping re-upload of recently hydrated file: {fileName}");
+                return;
+            }
+
             // Modified existing file — upload new blob and update the StorageNode
             Console.WriteLine($"Uploading modified file: {fileName}");
             using var stream = new FileStream(change.FullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
@@ -222,6 +236,30 @@ public class SyncEngine : IDisposable
             SetInSync(change.FullPath);
             Console.WriteLine($"Created: {fileName} → node {node.Id}");
         }
+    }
+
+    private async Task ProcessRenameAsync(FileChangeWatcher.FileChange change)
+    {
+        if (change.OldFullPath == null)
+            return;
+
+        if (!_pathToNodeId.TryGetValue(change.OldFullPath, out var nodeId))
+        {
+            Console.Error.WriteLine($"Rename: old path not mapped: {change.OldFullPath}");
+            return;
+        }
+
+        var newName = Path.GetFileName(change.FullPath);
+        Console.WriteLine($"Renaming node {nodeId}: {Path.GetFileName(change.OldFullPath)} → {newName}");
+
+        await _jmapClient.RenameStorageNodeAsync(nodeId, newName);
+
+        // Update local path mappings
+        _pathToNodeId.TryRemove(change.OldFullPath, out _);
+        _pathToNodeId[change.FullPath] = nodeId;
+        _nodeIdToPath[nodeId] = change.FullPath;
+
+        Console.WriteLine($"Renamed: {newName} (node {nodeId})");
     }
 
     private string? ResolveParentNodeId(string localPath)

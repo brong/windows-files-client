@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using System.Text;
 using Windows.Win32;
@@ -10,6 +11,12 @@ namespace FilesClient.Windows;
 internal class SyncCallbacks
 {
     private readonly IJmapClient _jmapClient;
+
+    /// <summary>
+    /// Node IDs that were recently hydrated by cfapi. SyncEngine checks this
+    /// to avoid re-uploading a file that was just downloaded.
+    /// </summary>
+    public ConcurrentDictionary<string, byte> RecentlyHydrated { get; } = new();
 
     public SyncCallbacks(IJmapClient jmapClient)
     {
@@ -72,6 +79,11 @@ internal class SyncCallbacks
                 .GetAwaiter().GetResult();
 
             TransferData(*callbackInfo, data, requiredOffset, requiredLength, totalSize);
+
+            // Record that we just hydrated this file so SyncEngine doesn't
+            // re-upload it when FileSystemWatcher fires a Changed event.
+            if (nodeId != null)
+                RecentlyHydrated[nodeId] = 0;
         }
         catch (Exception ex)
         {

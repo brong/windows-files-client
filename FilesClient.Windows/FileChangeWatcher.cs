@@ -4,13 +4,13 @@ namespace FilesClient.Windows;
 
 internal sealed class FileChangeWatcher : IDisposable
 {
-    public enum ChangeKind { Created, Modified }
+    public enum ChangeKind { Created, Modified, Renamed }
 
-    public record FileChange(string FullPath, ChangeKind Kind);
+    public record FileChange(string FullPath, ChangeKind Kind, string? OldFullPath = null);
 
     private readonly string _syncRootPath;
     private FileSystemWatcher? _watcher;
-    private readonly ConcurrentDictionary<string, ChangeKind> _pending = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, (ChangeKind Kind, string? OldFullPath)> _pending = new(StringComparer.OrdinalIgnoreCase);
     private readonly Timer _debounceTimer;
     private readonly TimeSpan _debounceInterval = TimeSpan.FromSeconds(1);
 
@@ -33,7 +33,7 @@ internal sealed class FileChangeWatcher : IDisposable
 
         _watcher.Created += (_, e) => OnCreated(e.FullPath);
         _watcher.Changed += (_, e) => EnqueueIfNotPlaceholder(e.FullPath, ChangeKind.Modified);
-        _watcher.Renamed += (_, e) => OnCreated(e.FullPath);
+        _watcher.Renamed += (_, e) => OnRenamed(e.FullPath, e.OldFullPath);
 
         _watcher.EnableRaisingEvents = true;
         Console.WriteLine("File change watcher started.");
@@ -58,6 +58,17 @@ internal sealed class FileChangeWatcher : IDisposable
         EnqueueIfNotPlaceholder(path, ChangeKind.Created);
     }
 
+    private void OnRenamed(string fullPath, string oldFullPath)
+    {
+        // Skip directory renames for now
+        if (Directory.Exists(fullPath))
+            return;
+
+        // No placeholder check needed — we just update the server-side name
+        _pending[fullPath] = (ChangeKind.Renamed, oldFullPath);
+        _debounceTimer.Change(_debounceInterval, Timeout.InfiniteTimeSpan);
+    }
+
     private static void StripZoneIdentifier(string path)
     {
         try { File.Delete(path + ":Zone.Identifier"); } catch { }
@@ -71,13 +82,14 @@ internal sealed class FileChangeWatcher : IDisposable
             if (Directory.Exists(path))
                 return;
 
-            // Skip cloud file placeholders (files owned by cfapi).
-            // Recall-on-data-access and recall-on-open are set on placeholders.
+            // Skip dehydrated placeholders (RECALL_ON_DATA_ACCESS means the
+            // data hasn't been fetched yet).  Hydrated placeholders still have
+            // ReparsePoint but no longer have RECALL_ON_DATA_ACCESS — those
+            // should pass through so real edits get uploaded.
             var attrs = File.GetAttributes(path);
-            const FileAttributes placeholderFlags =
-                FileAttributes.ReparsePoint |   // placeholder reparse point
+            const FileAttributes dehydratedFlag =
                 (FileAttributes)0x00400000;     // FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
-            if ((attrs & placeholderFlags) != 0)
+            if ((attrs & dehydratedFlag) != 0)
                 return;
         }
         catch
@@ -86,7 +98,7 @@ internal sealed class FileChangeWatcher : IDisposable
             return;
         }
 
-        _pending[path] = kind;
+        _pending[path] = (kind, null);
         // Reset debounce timer
         _debounceTimer.Change(_debounceInterval, Timeout.InfiniteTimeSpan);
     }
@@ -99,8 +111,8 @@ internal sealed class FileChangeWatcher : IDisposable
         var changes = new List<FileChange>();
         foreach (var key in _pending.Keys.ToArray())
         {
-            if (_pending.TryRemove(key, out var kind))
-                changes.Add(new FileChange(key, kind));
+            if (_pending.TryRemove(key, out var entry))
+                changes.Add(new FileChange(key, entry.Kind, entry.OldFullPath));
         }
 
         if (changes.Count > 0)

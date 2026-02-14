@@ -225,6 +225,32 @@ public class JmapClient : IJmapClient
             throw new InvalidOperationException($"StorageNode/set update failed: {setError.Type} — {setError.Description}");
     }
 
+    public async Task RenameStorageNodeAsync(string nodeId, string newName, CancellationToken ct = default)
+    {
+        var request = JmapRequest.Create(StorageNodeUsing,
+            ("StorageNode/set", new
+            {
+                accountId = AccountId,
+                update = new Dictionary<string, object>
+                {
+                    [nodeId] = new { name = newName },
+                },
+            }, "s0"));
+
+        var response = await CallAsync(request, ct);
+        var (method, _, _) = response.GetResponse(0);
+
+        if (method == "error")
+        {
+            var error = response.GetArgs<JsonElement>(0);
+            throw new InvalidOperationException($"JMAP error: {error}");
+        }
+
+        var setResponse = response.GetArgs<SetResponse>(0);
+        if (setResponse.NotUpdated != null && setResponse.NotUpdated.TryGetValue(nodeId, out var setError))
+            throw new InvalidOperationException($"StorageNode/set rename failed: {setError.Type} — {setError.Description}");
+    }
+
     public void Dispose()
     {
         _http.Dispose();
