@@ -199,15 +199,18 @@ public class JmapClient : IJmapClient
         return created;
     }
 
-    public async Task UpdateStorageNodeBlobAsync(string nodeId, string blobId, CancellationToken ct = default)
+    public async Task<StorageNode> ReplaceStorageNodeBlobAsync(string nodeId, string parentId, string name, string blobId, string? type = null, CancellationToken ct = default)
     {
+        // Content is immutable — destroy old node and create replacement atomically.
+        // Fastmail processes destroys before creates, so no name collision.
         var request = JmapRequest.Create(StorageNodeUsing,
             ("StorageNode/set", new
             {
                 accountId = AccountId,
-                update = new Dictionary<string, object>
+                destroy = new[] { nodeId },
+                create = new Dictionary<string, object>
                 {
-                    [nodeId] = new { blobId },
+                    ["c0"] = new { parentId, blobId, name, type },
                 },
             }, "s0"));
 
@@ -221,8 +224,15 @@ public class JmapClient : IJmapClient
         }
 
         var setResponse = response.GetArgs<SetResponse>(0);
-        if (setResponse.NotUpdated != null && setResponse.NotUpdated.TryGetValue(nodeId, out var setError))
-            throw new InvalidOperationException($"StorageNode/set update failed: {setError.Type} — {setError.Description}");
+        if (setResponse.NotDestroyed != null && setResponse.NotDestroyed.TryGetValue(nodeId, out var destroyError))
+            throw new InvalidOperationException($"StorageNode/set destroy failed: {destroyError.Type} — {destroyError.Description}");
+        if (setResponse.NotCreated != null && setResponse.NotCreated.TryGetValue("c0", out var createError))
+            throw new InvalidOperationException($"StorageNode/set create failed: {createError.Type} — {createError.Description}");
+
+        if (setResponse.Created == null || !setResponse.Created.TryGetValue("c0", out var created))
+            throw new InvalidOperationException("StorageNode/set create returned no result");
+
+        return created;
     }
 
     public async Task RenameStorageNodeAsync(string nodeId, string newName, CancellationToken ct = default)

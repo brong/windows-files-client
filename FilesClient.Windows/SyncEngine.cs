@@ -281,14 +281,26 @@ public class SyncEngine : IDisposable
                 return;
             }
 
-            // Modified existing file — upload new blob and update the StorageNode
+            // Modified existing file — content is immutable, so destroy+create atomically
+            var parentId = ResolveParentNodeId(parentDir);
+            if (parentId == null)
+            {
+                Console.Error.WriteLine($"Cannot update {fileName}: parent folder not mapped");
+                return;
+            }
+
             Console.WriteLine($"Uploading modified file: {fileName}");
             using var stream = new FileStream(change.FullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
             var blobId = await _jmapClient.UploadBlobAsync(stream, contentType);
-            await _jmapClient.UpdateStorageNodeBlobAsync(existingNodeId, blobId);
+            var newNode = await _jmapClient.ReplaceStorageNodeBlobAsync(existingNodeId, parentId, fileName, blobId, contentType);
+
+            // Update cfapi placeholder identity with new node ID
+            UpdatePlaceholderIdentity(change.FullPath, newNode.Id);
+            _nodeIdToPath.TryRemove(existingNodeId, out _);
+            _pathToNodeId[change.FullPath] = newNode.Id;
+            _nodeIdToPath[newNode.Id] = change.FullPath;
             StripZoneIdentifier(change.FullPath);
-            SetInSync(change.FullPath);
-            Console.WriteLine($"Updated: {fileName} → blob {blobId}");
+            Console.WriteLine($"Updated: {fileName} → node {newNode.Id} (blob {blobId})");
         }
         else
         {
@@ -404,6 +416,27 @@ public class SyncEngine : IDisposable
                 pIdentity,
                 (uint)identityBytes.Length,
                 CF_CONVERT_FLAGS.CF_CONVERT_FLAG_MARK_IN_SYNC,
+                &usn,
+                null).ThrowOnFailure();
+        }
+    }
+
+    private static unsafe void UpdatePlaceholderIdentity(string filePath, string newNodeId)
+    {
+        var identityBytes = Encoding.UTF8.GetBytes(newNodeId);
+        using var safeHandle = OpenWithRetry(filePath);
+        var handle = new global::Windows.Win32.Foundation.HANDLE(safeHandle.DangerousGetHandle());
+        fixed (byte* pIdentity = identityBytes)
+        {
+            long usn = 0;
+            PInvoke.CfUpdatePlaceholder(
+                handle,
+                null,   // no metadata update
+                pIdentity,
+                (uint)identityBytes.Length,
+                null,   // no dehydrate range
+                0,
+                CF_UPDATE_FLAGS.CF_UPDATE_FLAG_MARK_IN_SYNC,
                 &usn,
                 null).ThrowOnFailure();
         }

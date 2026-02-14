@@ -94,17 +94,25 @@ public class StubJmapClient : IJmapClient
         return Task.FromResult(node);
     }
 
-    public Task UpdateStorageNodeBlobAsync(string nodeId, string blobId, CancellationToken ct = default)
+    public Task<StorageNode> ReplaceStorageNodeBlobAsync(string nodeId, string parentId, string name, string blobId, string? type = null, CancellationToken ct = default)
     {
-        if (_nodes.TryGetValue(nodeId, out var node))
+        _nodes.Remove(nodeId);
+        var newId = $"stub-file-{_nextId++}";
+        var size = _blobs.TryGetValue(blobId, out var data) ? data.Length : 0;
+        var newNode = new StorageNode
         {
-            node.BlobId = blobId;
-            node.Modified = DateTime.UtcNow;
-            if (_blobs.TryGetValue(blobId, out var data))
-                node.Size = data.Length;
-            Console.WriteLine($"[Stub] Updated StorageNode {nodeId} blob to {blobId}");
-        }
-        return Task.CompletedTask;
+            Id = newId,
+            ParentId = parentId,
+            BlobId = blobId,
+            Name = name,
+            Type = type,
+            Size = size,
+            Created = DateTime.UtcNow,
+            Modified = DateTime.UtcNow,
+        };
+        _nodes[newId] = newNode;
+        Console.WriteLine($"[Stub] Replaced StorageNode {nodeId} → {newId}: {name} (blob {blobId})");
+        return Task.FromResult(newNode);
     }
 
     public Task RenameStorageNodeAsync(string nodeId, string newName, CancellationToken ct = default)
