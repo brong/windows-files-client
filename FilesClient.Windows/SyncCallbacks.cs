@@ -29,13 +29,19 @@ internal class SyncCallbacks
     public unsafe (CF_CALLBACK_REGISTRATION[] registrations, CF_CALLBACK[] delegates) CreateCallbackRegistrations()
     {
         // Must keep delegate references alive to prevent GC
+        CF_CALLBACK fetchPlaceholdersDelegate = new(FetchPlaceholdersCallback);
         CF_CALLBACK fetchDataDelegate = new(FetchDataCallback);
         CF_CALLBACK renameCompletionDelegate = new(RenameCompletionCallback);
 
-        var delegates = new CF_CALLBACK[] { fetchDataDelegate, renameCompletionDelegate };
+        var delegates = new CF_CALLBACK[] { fetchPlaceholdersDelegate, fetchDataDelegate, renameCompletionDelegate };
 
         var registrations = new CF_CALLBACK_REGISTRATION[]
         {
+            new()
+            {
+                Type = CF_CALLBACK_TYPE.CF_CALLBACK_TYPE_FETCH_PLACEHOLDERS,
+                Callback = fetchPlaceholdersDelegate,
+            },
             new()
             {
                 Type = CF_CALLBACK_TYPE.CF_CALLBACK_TYPE_FETCH_DATA,
@@ -54,6 +60,46 @@ internal class SyncCallbacks
         };
 
         return (registrations, delegates);
+    }
+
+    private unsafe void FetchPlaceholdersCallback(CF_CALLBACK_INFO* callbackInfo, CF_CALLBACK_PARAMETERS* callbackParameters)
+    {
+        try
+        {
+            // All placeholders are created upfront during PopulateAsync and kept
+            // in sync by PollChangesAsync.  Just acknowledge so cfapi marks the
+            // directory as populated — enabling pin hydration of its children.
+            string? nodeId = null;
+            if (callbackInfo->FileIdentity != null && callbackInfo->FileIdentityLength > 0)
+            {
+                nodeId = Encoding.UTF8.GetString(
+                    new ReadOnlySpan<byte>(callbackInfo->FileIdentity, (int)callbackInfo->FileIdentityLength));
+            }
+            Console.WriteLine($"FETCH_PLACEHOLDERS: node={nodeId}, path={callbackInfo->NormalizedPath}");
+
+            var opInfo = new CF_OPERATION_INFO
+            {
+                StructSize = (uint)sizeof(CF_OPERATION_INFO),
+                Type = CF_OPERATION_TYPE.CF_OPERATION_TYPE_TRANSFER_PLACEHOLDERS,
+                ConnectionKey = callbackInfo->ConnectionKey,
+                TransferKey = callbackInfo->TransferKey,
+                RequestKey = callbackInfo->RequestKey,
+            };
+
+            var opParams = new CF_OPERATION_PARAMETERS();
+            opParams.ParamSize = (uint)sizeof(CF_OPERATION_PARAMETERS);
+            opParams.Anonymous.TransferPlaceholders.CompletionStatus = new NTSTATUS(0); // STATUS_SUCCESS
+            opParams.Anonymous.TransferPlaceholders.PlaceholderArray = null;
+            opParams.Anonymous.TransferPlaceholders.PlaceholderCount = 0;
+            opParams.Anonymous.TransferPlaceholders.PlaceholderTotalCount = 0;
+            opParams.Anonymous.TransferPlaceholders.Flags = CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAGS.CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_NONE;
+
+            PInvoke.CfExecute(in opInfo, ref opParams).ThrowOnFailure();
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"FETCH_PLACEHOLDERS error: {ex.Message}");
+        }
     }
 
     private unsafe void FetchDataCallback(CF_CALLBACK_INFO* callbackInfo, CF_CALLBACK_PARAMETERS* callbackParameters)
