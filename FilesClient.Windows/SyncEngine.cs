@@ -451,7 +451,7 @@ public class SyncEngine : IDisposable
         Console.WriteLine($"Creating folder on server: {folderName}");
         var node = await _jmapClient.CreateStorageNodeAsync(parentId, null, folderName);
 
-        ConvertToPlaceholder(change.FullPath, node.Id);
+        ConvertToPlaceholder(change.FullPath, node.Id, isDirectory: true);
         _pathToNodeId[change.FullPath] = node.Id;
         _nodeIdToPath[node.Id] = change.FullPath;
         Console.WriteLine($"Created folder: {folderName} → node {node.Id}");
@@ -545,10 +545,10 @@ public class SyncEngine : IDisposable
         }
     }
 
-    private static unsafe void ConvertToPlaceholder(string filePath, string nodeId)
+    private static unsafe void ConvertToPlaceholder(string filePath, string nodeId, bool isDirectory = false)
     {
         var identityBytes = Encoding.UTF8.GetBytes(nodeId);
-        using var safeHandle = OpenWithRetry(filePath);
+        using var safeHandle = OpenWithRetry(filePath, isDirectory);
         var handle = new global::Windows.Win32.Foundation.HANDLE(safeHandle.DangerousGetHandle());
         fixed (byte* pIdentity = identityBytes)
         {
@@ -676,15 +676,17 @@ public class SyncEngine : IDisposable
         try { File.Delete(filePath + ":Zone.Identifier"); } catch { }
     }
 
-    private static Microsoft.Win32.SafeHandles.SafeFileHandle OpenWithRetry(string filePath)
+    private static Microsoft.Win32.SafeHandles.SafeFileHandle OpenWithRetry(string filePath, bool isDirectory = false)
     {
         const int maxRetries = 5;
+        // FILE_FLAG_BACKUP_SEMANTICS is required to open a directory handle
+        var options = isDirectory ? (FileOptions)0x02000000 : FileOptions.None;
         for (int attempt = 0; ; attempt++)
         {
             try
             {
                 return File.OpenHandle(filePath, FileMode.Open, FileAccess.ReadWrite,
-                    FileShare.ReadWrite | FileShare.Delete);
+                    FileShare.ReadWrite | FileShare.Delete, options);
             }
             catch (IOException) when (attempt < maxRetries - 1)
             {
