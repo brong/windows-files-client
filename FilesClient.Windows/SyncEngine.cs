@@ -599,8 +599,9 @@ public class SyncEngine : IDisposable
     {
         try
         {
+            var options = Directory.Exists(path) ? (FileOptions)0x02000000 : FileOptions.None;
             using var safeHandle = File.OpenHandle(path, FileMode.Open, FileAccess.Read,
-                FileShare.ReadWrite | FileShare.Delete);
+                FileShare.ReadWrite | FileShare.Delete, options);
             var handle = new global::Windows.Win32.Foundation.HANDLE(safeHandle.DangerousGetHandle());
 
             var buffer = new byte[256];
