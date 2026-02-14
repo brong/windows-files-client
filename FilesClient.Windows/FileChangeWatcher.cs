@@ -16,6 +16,17 @@ internal sealed class FileChangeWatcher : IDisposable
 
     public event Action<FileChange[]>? OnChanges;
 
+    /// <summary>
+    /// Fired when a directory's FILE_ATTRIBUTE_PINNED is detected (user selected
+    /// "Always keep on this device").
+    /// </summary>
+    public event Action<string>? OnDirectoryPinned;
+
+    /// <summary>
+    /// Fired when an individual file's FILE_ATTRIBUTE_PINNED is detected.
+    /// </summary>
+    public event Action<string>? OnFilePinned;
+
     public FileChangeWatcher(string syncRootPath)
     {
         _syncRootPath = syncRootPath;
@@ -28,11 +39,12 @@ internal sealed class FileChangeWatcher : IDisposable
         {
             IncludeSubdirectories = true,
             NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName
-                | NotifyFilters.LastWrite | NotifyFilters.Size,
+                | NotifyFilters.LastWrite | NotifyFilters.Size
+                | NotifyFilters.Attributes,
         };
 
         _watcher.Created += (_, e) => OnCreated(e.FullPath);
-        _watcher.Changed += (_, e) => EnqueueIfNotPlaceholder(e.FullPath, ChangeKind.Modified);
+        _watcher.Changed += (_, e) => OnChanged(e.FullPath);
         _watcher.Renamed += (_, e) => OnRenamed(e.FullPath, e.OldFullPath);
         _watcher.Deleted += (_, e) => OnDeleted(e.FullPath);
 
@@ -45,6 +57,29 @@ internal sealed class FileChangeWatcher : IDisposable
         if (_watcher != null)
             _watcher.EnableRaisingEvents = false;
         _debounceTimer.Change(Timeout.Infinite, Timeout.Infinite);
+    }
+
+    private void OnChanged(string path)
+    {
+        const FileAttributes pinnedFlag = (FileAttributes)0x00080000; // FILE_ATTRIBUTE_PINNED
+        try
+        {
+            var attrs = File.GetAttributes(path);
+            if ((attrs & pinnedFlag) != 0)
+            {
+                if (Directory.Exists(path))
+                    OnDirectoryPinned?.Invoke(path);
+                else
+                    OnFilePinned?.Invoke(path);
+                return;
+            }
+
+            if (Directory.Exists(path))
+                return; // directories don't need upload processing
+        }
+        catch { return; }
+
+        EnqueueIfNotPlaceholder(path, ChangeKind.Modified);
     }
 
     private void OnCreated(string path)

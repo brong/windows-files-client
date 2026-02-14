@@ -16,12 +16,13 @@ public class SyncEngine : IDisposable
     private readonly PlaceholderManager _placeholderManager;
     private readonly SyncCallbacks _syncCallbacks;
     private readonly FileChangeWatcher _fileChangeWatcher;
-    private readonly CancellationTokenSource _hydrationCts = new();
 
     // Maps local file path → StorageNode ID (populated during sync)
     private readonly ConcurrentDictionary<string, string> _pathToNodeId = new(StringComparer.OrdinalIgnoreCase);
     // Reverse mapping: StorageNode ID → local file path (needed for delete handling)
     private readonly ConcurrentDictionary<string, string> _nodeIdToPath = new();
+    // Directories the user has pinned ("Always keep on this device")
+    private readonly ConcurrentDictionary<string, byte> _pinnedDirectories = new(StringComparer.OrdinalIgnoreCase);
 
     public string SyncRootPath => _syncRootPath;
 
@@ -36,6 +37,8 @@ public class SyncEngine : IDisposable
         _syncCallbacks.OnDirectoryPopulated += OnDirectoryPopulated;
         _fileChangeWatcher = new FileChangeWatcher(syncRootPath);
         _fileChangeWatcher.OnChanges += OnLocalFileChanges;
+        _fileChangeWatcher.OnDirectoryPinned += OnDirectoryPinned;
+        _fileChangeWatcher.OnFilePinned += OnFilePinned;
     }
 
     public async Task RegisterAndConnectAsync(string displayName, string accountId, string? iconPath = null)
@@ -46,7 +49,6 @@ public class SyncEngine : IDisposable
         _syncRoot.Connect(registrations, delegates);
 
         _fileChangeWatcher.Start();
-        _ = Task.Run(() => HydrationMonitorLoop(_hydrationCts.Token));
     }
 
     public async Task<string> PopulateAsync(CancellationToken ct)
@@ -93,6 +95,40 @@ public class SyncEngine : IDisposable
                 continue;
             try { MarkDirectoryAlwaysFull(localParentPath); }
             catch { /* directory might not be a placeholder */ }
+        }
+
+        // Phase 4: Detect directories that were pinned while the app was stopped
+        // and hydrate their contents now.
+        const FileAttributes pinnedFlag = (FileAttributes)0x00080000;
+        foreach (var (_, localParentPath, _) in tree)
+        {
+            try
+            {
+                var attrs = File.GetAttributes(localParentPath);
+                if ((attrs & pinnedFlag) != 0)
+                    _pinnedDirectories.TryAdd(localParentPath, 0);
+            }
+            catch { }
+        }
+        if (!_pinnedDirectories.IsEmpty)
+        {
+            Console.WriteLine($"Found {_pinnedDirectories.Count} pinned directories, hydrating...");
+            _ = Task.Run(() =>
+            {
+                foreach (var dir in _pinnedDirectories.Keys)
+                {
+                    try
+                    {
+                        int count = HydrateDehydratedFiles(dir);
+                        if (count > 0)
+                            Console.WriteLine($"Hydrated {count} files in pinned directory: {dir}");
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.Error.WriteLine($"Pin hydration error for {dir}: {ex.Message}");
+                    }
+                }
+            });
         }
 
         return await _jmapClient.GetStateAsync(ct);
@@ -212,7 +248,19 @@ public class SyncEngine : IDisposable
                 _pathToNodeId[childPath] = node.Id;
                 _nodeIdToPath[node.Id] = childPath;
                 if (!Path.Exists(childPath))
+                {
                     _placeholderManager.CreatePlaceholders(parentPath, [node]);
+
+                    // If this file was created under a pinned directory, hydrate it
+                    if (!node.IsFolder && IsUnderPinnedDirectory(childPath))
+                    {
+                        try { HydratePlaceholder(childPath); }
+                        catch (Exception ex)
+                        {
+                            Console.Error.WriteLine($"  Auto-hydration failed for {node.Name}: {ex.Message}");
+                        }
+                    }
+                }
                 else
                 {
                     try { SetInSync(childPath); }
@@ -545,59 +593,102 @@ public class SyncEngine : IDisposable
 
     private void OnDirectoryPopulated(SyncCallbacks.DirectoryPopulatedInfo info)
     {
-        _ = Task.Run(async () =>
+        // If this directory or any ancestor is pinned, hydrate its children
+        if (IsUnderPinnedDirectory(info.DirectoryPath) || _pinnedDirectories.ContainsKey(info.DirectoryPath))
+        {
+            _ = Task.Run(() =>
+            {
+                try
+                {
+                    int count = HydrateDehydratedFiles(info.DirectoryPath);
+                    if (count > 0)
+                        Console.WriteLine($"Hydrated {count} files after directory populated: {info.DirectoryPath}");
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"Hydration error for {info.DirectoryPath}: {ex.Message}");
+                }
+            });
+        }
+    }
+
+    private void OnDirectoryPinned(string directoryPath)
+    {
+        if (_pinnedDirectories.TryAdd(directoryPath, 0))
+        {
+            Console.WriteLine($"Directory pinned: {directoryPath}");
+            _ = Task.Run(() =>
+            {
+                try
+                {
+                    int count = HydrateDehydratedFiles(directoryPath);
+                    if (count > 0)
+                        Console.WriteLine($"Hydrated {count} files in {directoryPath}");
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"Pin hydration error for {directoryPath}: {ex.Message}");
+                }
+            });
+        }
+    }
+
+    private void OnFilePinned(string filePath)
+    {
+        _ = Task.Run(() =>
         {
             try
             {
-                // Brief delay for pin state to propagate from parent to children
-                await Task.Delay(500);
-                HydratePinnedFiles(info.DirectoryPath);
+                const FileAttributes dehydratedFlag = (FileAttributes)0x00400000;
+                var attrs = File.GetAttributes(filePath);
+                if ((attrs & dehydratedFlag) == 0)
+                    return; // Already hydrated
+
+                Console.WriteLine($"Hydrating pinned file: {Path.GetFileName(filePath)}");
+                HydratePlaceholder(filePath);
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"Hydration scan error for {info.DirectoryPath}: {ex.Message}");
+                Console.Error.WriteLine($"File pin hydration error for {Path.GetFileName(filePath)}: {ex.Message}");
             }
         });
     }
 
-    private async Task HydrationMonitorLoop(CancellationToken ct)
+    /// <summary>
+    /// Check whether any ancestor directory of the given path is pinned,
+    /// meaning new files created here should be hydrated immediately.
+    /// </summary>
+    private bool IsUnderPinnedDirectory(string path)
     {
-        // Wait for initial population to complete before scanning
-        await Task.Delay(TimeSpan.FromSeconds(10), ct);
-
-        while (!ct.IsCancellationRequested)
+        var dir = Path.GetDirectoryName(path);
+        while (dir != null && dir.Length >= _syncRootPath.Length)
         {
-            try
-            {
-                int hydrated = ScanAndHydratePinnedFiles();
-                if (hydrated > 0)
-                    Console.WriteLine($"Hydration scan: hydrated {hydrated} pinned files");
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                Console.Error.WriteLine($"Hydration monitor error: {ex.Message}");
-            }
-
-            await Task.Delay(TimeSpan.FromSeconds(5), ct);
+            if (_pinnedDirectories.ContainsKey(dir))
+                return true;
+            dir = Path.GetDirectoryName(dir);
         }
+        return false;
     }
 
-    private int ScanAndHydratePinnedFiles()
+    /// <summary>
+    /// Hydrate all dehydrated files in a directory (recursively).
+    /// Returns the number of files hydrated.
+    /// </summary>
+    private int HydrateDehydratedFiles(string directoryPath)
     {
+        if (!Directory.Exists(directoryPath))
+            return 0;
+
         const FileAttributes dehydratedFlag = (FileAttributes)0x00400000; // FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
         int count = 0;
 
-        foreach (var filePath in Directory.EnumerateFiles(_syncRootPath, "*", SearchOption.AllDirectories))
+        foreach (var filePath in Directory.EnumerateFiles(directoryPath))
         {
             try
             {
                 var attrs = File.GetAttributes(filePath);
                 if ((attrs & dehydratedFlag) == 0)
                     continue; // Already hydrated
-
-                var pinState = ReadPinState(filePath);
-                if (pinState != 1) // CF_PIN_STATE_PINNED
-                    continue;
 
                 Console.WriteLine($"Hydrating pinned file: {Path.GetFileName(filePath)}");
                 HydratePlaceholder(filePath);
@@ -605,72 +696,18 @@ public class SyncEngine : IDisposable
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"  Hydration error for {Path.GetFileName(filePath)}: {ex.Message}");
-            }
-        }
-        return count;
-    }
-
-    private void HydratePinnedFiles(string directoryPath)
-    {
-        if (!Directory.Exists(directoryPath))
-            return;
-
-        // Check if this directory is pinned
-        var dirPinState = ReadPinState(directoryPath);
-        if (dirPinState != 1) // CF_PIN_STATE_PINNED
-            return;
-
-        const FileAttributes dehydratedFlag = (FileAttributes)0x00400000; // FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
-
-        foreach (var filePath in Directory.GetFiles(directoryPath))
-        {
-            try
-            {
-                var attrs = File.GetAttributes(filePath);
-                if ((attrs & dehydratedFlag) == 0)
-                    continue; // Already hydrated
-
-                Console.WriteLine($"Hydrating pinned file: {Path.GetFileName(filePath)}");
-                HydratePlaceholder(filePath);
-            }
-            catch (Exception ex)
-            {
                 Console.Error.WriteLine($"  Hydration failed for {Path.GetFileName(filePath)}: {ex.Message}");
             }
         }
-    }
 
-    private static unsafe int ReadPinState(string path)
-    {
-        try
+        // Recurse into subdirectories — they inherit the pin from the parent
+        foreach (var subDir in Directory.EnumerateDirectories(directoryPath))
         {
-            var options = Directory.Exists(path) ? (FileOptions)0x02000000 : FileOptions.None;
-            using var safeHandle = File.OpenHandle(path, FileMode.Open, FileAccess.Read,
-                FileShare.ReadWrite | FileShare.Delete, options);
-            var handle = new global::Windows.Win32.Foundation.HANDLE(safeHandle.DangerousGetHandle());
-
-            var buffer = new byte[256];
-            fixed (byte* pBuffer = buffer)
-            {
-                uint returnedLen;
-                var hr = PInvoke.CfGetPlaceholderInfo(
-                    handle,
-                    CF_PLACEHOLDER_INFO_CLASS.CF_PLACEHOLDER_INFO_BASIC,
-                    pBuffer,
-                    (uint)buffer.Length,
-                    &returnedLen);
-
-                if (hr.Failed || returnedLen < 4)
-                    return 0; // Unknown
-
-                return *(int*)pBuffer; // PinState at offset 0
-            }
+            _pinnedDirectories.TryAdd(subDir, 0);
+            count += HydrateDehydratedFiles(subDir);
         }
-        catch
-        {
-            return 0;
-        }
+
+        return count;
     }
 
     private static unsafe void HydratePlaceholder(string filePath)
@@ -913,8 +950,6 @@ public class SyncEngine : IDisposable
 
     public void Dispose()
     {
-        _hydrationCts.Cancel();
-        _hydrationCts.Dispose();
         _fileChangeWatcher.Dispose();
         _syncRoot.Dispose();
     }
