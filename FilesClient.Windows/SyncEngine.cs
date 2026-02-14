@@ -31,6 +31,7 @@ public class SyncEngine : IDisposable
         _syncRoot = new SyncRoot(syncRootPath);
         _placeholderManager = new PlaceholderManager(syncRootPath);
         _syncCallbacks = new SyncCallbacks(jmapClient);
+        _syncCallbacks.OnRenameCompleted += OnPlaceholderRenamed;
         _fileChangeWatcher = new FileChangeWatcher(syncRootPath);
         _fileChangeWatcher.OnChanges += OnLocalFileChanges;
     }
@@ -355,9 +356,17 @@ public class SyncEngine : IDisposable
         }
 
         var newName = Path.GetFileName(change.FullPath);
-        Console.WriteLine($"Renaming node {nodeId}: {Path.GetFileName(change.OldFullPath)} → {newName}");
+        var parentDir = Path.GetDirectoryName(change.FullPath)!;
+        var parentId = ResolveParentNodeId(parentDir);
+        if (parentId == null)
+        {
+            Console.Error.WriteLine($"Rename: cannot resolve parent for {change.FullPath}");
+            return;
+        }
 
-        await _jmapClient.RenameStorageNodeAsync(nodeId, newName);
+        Console.WriteLine($"Moving node {nodeId}: {Path.GetFileName(change.OldFullPath)} → {parentId}/{newName}");
+
+        await _jmapClient.MoveStorageNodeAsync(nodeId, parentId, newName);
 
         // Update descendant mappings first if this is a directory
         if (Directory.Exists(change.FullPath))
@@ -369,6 +378,62 @@ public class SyncEngine : IDisposable
         _nodeIdToPath[nodeId] = change.FullPath;
 
         Console.WriteLine($"Renamed: {newName} (node {nodeId})");
+    }
+
+    private void OnPlaceholderRenamed(SyncCallbacks.RenameCompletedInfo info)
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                if (info.NodeId == null)
+                {
+                    Console.Error.WriteLine($"RENAME_COMPLETION: no node ID for {info.OldFullPath} → {info.NewFullPath}");
+                    return;
+                }
+
+                // Echo check: if mappings already point to the new path, this rename
+                // was initiated by PollChangesAsync — skip the server call
+                if (_nodeIdToPath.TryGetValue(info.NodeId, out var mappedPath) &&
+                    string.Equals(mappedPath, info.NewFullPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    Console.WriteLine($"RENAME_COMPLETION: skipping echo for {info.NodeId}");
+                    return;
+                }
+
+                // Moves out of the sync root are not supported yet
+                if (!info.NewFullPath.StartsWith(_syncRootPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    Console.Error.WriteLine($"RENAME_COMPLETION: moved out of sync root, skipping: {info.NewFullPath}");
+                    return;
+                }
+
+                var parentDir = Path.GetDirectoryName(info.NewFullPath)!;
+                var parentId = ResolveParentNodeId(parentDir);
+                if (parentId == null)
+                {
+                    Console.Error.WriteLine($"RENAME_COMPLETION: cannot resolve parent for {info.NewFullPath}");
+                    return;
+                }
+
+                var newName = Path.GetFileName(info.NewFullPath);
+                Console.WriteLine($"RENAME_COMPLETION: moving node {info.NodeId} → {parentId}/{newName}");
+                await _jmapClient.MoveStorageNodeAsync(info.NodeId, parentId, newName);
+
+                // Update descendant mappings if this is a directory
+                if (Directory.Exists(info.NewFullPath))
+                    UpdateDescendantMappings(info.OldFullPath, info.NewFullPath);
+
+                // Update the renamed item's own mapping
+                _pathToNodeId.TryRemove(info.OldFullPath, out _);
+                _pathToNodeId[info.NewFullPath] = info.NodeId;
+                _nodeIdToPath[info.NodeId] = info.NewFullPath;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"RENAME_COMPLETION error: {ex.Message}");
+            }
+        });
     }
 
     private string? ResolveParentNodeId(string localPath)

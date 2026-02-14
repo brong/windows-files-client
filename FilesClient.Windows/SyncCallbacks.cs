@@ -18,6 +18,9 @@ internal class SyncCallbacks
     /// </summary>
     public ConcurrentDictionary<string, byte> RecentlyHydrated { get; } = new();
 
+    public record RenameCompletedInfo(string? NodeId, string OldFullPath, string NewFullPath);
+    public event Action<RenameCompletedInfo>? OnRenameCompleted;
+
     public SyncCallbacks(IJmapClient jmapClient)
     {
         _jmapClient = jmapClient;
@@ -27,8 +30,9 @@ internal class SyncCallbacks
     {
         // Must keep delegate references alive to prevent GC
         CF_CALLBACK fetchDataDelegate = new(FetchDataCallback);
+        CF_CALLBACK renameCompletionDelegate = new(RenameCompletionCallback);
 
-        var delegates = new CF_CALLBACK[] { fetchDataDelegate };
+        var delegates = new CF_CALLBACK[] { fetchDataDelegate, renameCompletionDelegate };
 
         var registrations = new CF_CALLBACK_REGISTRATION[]
         {
@@ -36,6 +40,11 @@ internal class SyncCallbacks
             {
                 Type = CF_CALLBACK_TYPE.CF_CALLBACK_TYPE_FETCH_DATA,
                 Callback = fetchDataDelegate,
+            },
+            new()
+            {
+                Type = CF_CALLBACK_TYPE.CF_CALLBACK_TYPE_NOTIFY_RENAME_COMPLETION,
+                Callback = renameCompletionDelegate,
             },
             // Sentinel entry to mark end of array
             new()
@@ -89,6 +98,41 @@ internal class SyncCallbacks
         {
             Console.Error.WriteLine($"FETCH_DATA error: {ex.Message}");
             TransferError(*callbackInfo, new NTSTATUS(unchecked((int)0xC0000001))); // STATUS_UNSUCCESSFUL
+        }
+    }
+
+    private unsafe void RenameCompletionCallback(CF_CALLBACK_INFO* callbackInfo, CF_CALLBACK_PARAMETERS* callbackParameters)
+    {
+        try
+        {
+            // Extract the StorageNode ID from the file identity blob
+            string? nodeId = null;
+            if (callbackInfo->FileIdentity != null && callbackInfo->FileIdentityLength > 0)
+            {
+                nodeId = Encoding.UTF8.GetString(
+                    new ReadOnlySpan<byte>(callbackInfo->FileIdentity, (int)callbackInfo->FileIdentityLength));
+            }
+
+            var renameParams = callbackParameters->Anonymous.RenameCompletion;
+
+            // New path: VolumeDosName + NormalizedPath
+            var newPath = callbackInfo->VolumeDosName.ToString() + callbackInfo->NormalizedPath.ToString();
+            // Old path: VolumeDosName + SourcePath from rename completion params
+            var oldPath = callbackInfo->VolumeDosName.ToString() + renameParams.SourcePath.ToString();
+
+            // Strip \\?\ prefix if present
+            if (newPath.StartsWith(@"\\?\"))
+                newPath = newPath.Substring(4);
+            if (oldPath.StartsWith(@"\\?\"))
+                oldPath = oldPath.Substring(4);
+
+            Console.WriteLine($"RENAME_COMPLETION: node={nodeId}, {oldPath} → {newPath}");
+
+            OnRenameCompleted?.Invoke(new RenameCompletedInfo(nodeId, oldPath, newPath));
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"RENAME_COMPLETION error: {ex.Message}");
         }
     }
 

@@ -115,13 +115,14 @@ public class StubJmapClient : IJmapClient
         return Task.FromResult(newNode);
     }
 
-    public Task RenameStorageNodeAsync(string nodeId, string newName, CancellationToken ct = default)
+    public Task MoveStorageNodeAsync(string nodeId, string parentId, string newName, CancellationToken ct = default)
     {
         if (_nodes.TryGetValue(nodeId, out var node))
         {
+            node.ParentId = parentId;
             node.Name = newName;
             node.Modified = DateTime.UtcNow;
-            Console.WriteLine($"[Stub] Renamed StorageNode {nodeId} to {newName}");
+            Console.WriteLine($"[Stub] Moved StorageNode {nodeId} to {parentId}/{newName}");
         }
         return Task.CompletedTask;
     }

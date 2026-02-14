@@ -235,7 +235,7 @@ public class JmapClient : IJmapClient
         return created;
     }
 
-    public async Task RenameStorageNodeAsync(string nodeId, string newName, CancellationToken ct = default)
+    public async Task MoveStorageNodeAsync(string nodeId, string parentId, string newName, CancellationToken ct = default)
     {
         var request = JmapRequest.Create(StorageNodeUsing,
             ("StorageNode/set", new
@@ -243,7 +243,7 @@ public class JmapClient : IJmapClient
                 accountId = AccountId,
                 update = new Dictionary<string, object>
                 {
-                    [nodeId] = new { name = newName },
+                    [nodeId] = new { parentId, name = newName },
                 },
             }, "s0"));
 
@@ -258,7 +258,7 @@ public class JmapClient : IJmapClient
 
         var setResponse = response.GetArgs<SetResponse>(0);
         if (setResponse.NotUpdated != null && setResponse.NotUpdated.TryGetValue(nodeId, out var setError))
-            throw new InvalidOperationException($"StorageNode/set rename failed: {setError.Type} — {setError.Description}");
+            throw new InvalidOperationException($"StorageNode/set move failed: {setError.Type} — {setError.Description}");
     }
 
     public void Dispose()
