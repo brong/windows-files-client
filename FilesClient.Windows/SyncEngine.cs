@@ -571,12 +571,16 @@ public class SyncEngine : IDisposable
         var handle = new global::Windows.Win32.Foundation.HANDLE(safeHandle.DangerousGetHandle());
         fixed (byte* pIdentity = identityBytes)
         {
+            var flags = CF_CONVERT_FLAGS.CF_CONVERT_FLAG_MARK_IN_SYNC;
+            if (isDirectory)
+                flags |= CF_CONVERT_FLAGS.CF_CONVERT_FLAG_ALWAYS_FULL;
+
             long usn = 0;
             PInvoke.CfConvertToPlaceholder(
                 handle,
                 pIdentity,
                 (uint)identityBytes.Length,
-                CF_CONVERT_FLAGS.CF_CONVERT_FLAG_MARK_IN_SYNC,
+                flags,
                 &usn,
                 null).ThrowOnFailure();
         }
