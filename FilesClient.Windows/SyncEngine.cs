@@ -80,6 +80,18 @@ public class SyncEngine : IDisposable
             }
         }
 
+        // Phase 3: Mark populated directories as ALWAYS_FULL so cfapi can
+        // recursively hydrate pinned folders.  Each tree entry's localParentPath
+        // has had all its children created, so it's safe to mark it now.
+        // Skip the sync root itself (not a placeholder).
+        foreach (var (_, localParentPath, _) in tree)
+        {
+            if (string.Equals(localParentPath, _syncRootPath, StringComparison.OrdinalIgnoreCase))
+                continue;
+            try { MarkDirectoryAlwaysFull(localParentPath); }
+            catch { /* directory might not be a placeholder */ }
+        }
+
         return await _jmapClient.GetStateAsync(ct);
     }
 
@@ -605,6 +617,23 @@ public class SyncEngine : IDisposable
                 &usn,
                 null).ThrowOnFailure();
         }
+    }
+
+    private static unsafe void MarkDirectoryAlwaysFull(string dirPath)
+    {
+        using var safeHandle = OpenWithRetry(dirPath, isDirectory: true);
+        var handle = new global::Windows.Win32.Foundation.HANDLE(safeHandle.DangerousGetHandle());
+        long usn = 0;
+        PInvoke.CfUpdatePlaceholder(
+            handle,
+            null,   // no metadata update
+            null,   // keep existing identity
+            0,
+            null,   // no dehydrate range
+            0,
+            CF_UPDATE_FLAGS.CF_UPDATE_FLAG_MARK_IN_SYNC | CF_UPDATE_FLAGS.CF_UPDATE_FLAG_ALWAYS_FULL,
+            &usn,
+            null).ThrowOnFailure();
     }
 
     private static unsafe void SetInSync(string path)
