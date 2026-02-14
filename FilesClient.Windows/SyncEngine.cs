@@ -70,6 +70,13 @@ public class SyncEngine : IDisposable
                 var childPath = Path.Combine(localParentPath, PlaceholderManager.SanitizeName(child.Name));
                 _pathToNodeId[childPath] = child.Id;
                 _nodeIdToPath[child.Id] = childPath;
+
+                // Mark pre-existing items as in-sync (handles stale state from previous runs)
+                if (Path.Exists(childPath) && !newChildren.Contains(child))
+                {
+                    try { SetInSync(childPath); }
+                    catch { /* not a placeholder — ignore */ }
+                }
             }
         }
 
@@ -156,6 +163,8 @@ public class SyncEngine : IDisposable
                             File.Move(oldPath, newPath);
                             Console.WriteLine($"  Renamed file: {oldPath} → {newPath}");
                         }
+                        // Re-mark as in-sync after move (cfapi may clear in-sync on rename)
+                        SetInSync(newPath);
                     }
                     catch (Exception ex)
                     {
@@ -169,6 +178,11 @@ public class SyncEngine : IDisposable
                     _nodeIdToPath[node.Id] = newPath;
                     if (!Path.Exists(newPath))
                         _placeholderManager.CreatePlaceholders(parentPath, [node]);
+                    else
+                    {
+                        try { SetInSync(newPath); }
+                        catch { /* not a placeholder — ignore */ }
+                    }
                 }
             }
 
@@ -188,6 +202,11 @@ public class SyncEngine : IDisposable
                 _nodeIdToPath[node.Id] = childPath;
                 if (!Path.Exists(childPath))
                     _placeholderManager.CreatePlaceholders(parentPath, [node]);
+                else
+                {
+                    try { SetInSync(childPath); }
+                    catch { /* not a placeholder — ignore */ }
+                }
             }
         }
 
@@ -584,9 +603,10 @@ public class SyncEngine : IDisposable
         }
     }
 
-    private static unsafe void SetInSync(string filePath)
+    private static unsafe void SetInSync(string path)
     {
-        using var safeHandle = OpenWithRetry(filePath);
+        var isDirectory = Directory.Exists(path);
+        using var safeHandle = OpenWithRetry(path, isDirectory);
         var handle = new global::Windows.Win32.Foundation.HANDLE(safeHandle.DangerousGetHandle());
         PInvoke.CfSetInSyncState(
             handle,
