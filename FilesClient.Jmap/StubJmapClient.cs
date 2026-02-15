@@ -65,6 +65,18 @@ public class StubJmapClient : IJmapClient
         throw new InvalidOperationException($"Unknown blob: {blobId}");
     }
 
+    public Task<(Stream data, bool isPartial)> DownloadBlobRangeAsync(string blobId, long offset, long length, string? type = null, string? name = null, CancellationToken ct = default)
+    {
+        if (_blobs.TryGetValue(blobId, out var data))
+        {
+            int start = (int)Math.Min(offset, data.Length);
+            int count = (int)Math.Min(length, data.Length - start);
+            var slice = new MemoryStream(data, start, count);
+            return Task.FromResult<(Stream, bool)>((slice, true));
+        }
+        throw new InvalidOperationException($"Unknown blob: {blobId}");
+    }
+
     public Task<string> UploadBlobAsync(Stream data, string contentType, CancellationToken ct = default)
     {
         using var ms = new MemoryStream();

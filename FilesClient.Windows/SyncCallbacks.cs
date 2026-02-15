@@ -25,6 +25,12 @@ internal class SyncCallbacks
     private readonly ConcurrentDictionary<long, CancellationTokenSource> _inFlightFetches = new();
 
     /// <summary>
+    /// Whether the server supports HTTP Range requests. Set to false after
+    /// a non-206 response or error, disabling range requests for the session.
+    /// </summary>
+    private volatile bool _rangeRequestsSupported = true;
+
+    /// <summary>
     /// Called before a delete completes. Return true to allow, false to veto.
     /// Parameters: (nodeId, fullPath)
     /// </summary>
@@ -176,10 +182,11 @@ internal class SyncCallbacks
             // Download blob data asynchronously, then transfer to cfapi
             // synchronously on the callback thread (CfExecute requires
             // the callback thread context for the transfer key to be valid).
-            var (data, totalSize) = FetchBlobDataAsync(nodeId, cts.Token)
+            var (data, dataStartOffset, totalSize) = FetchBlobDataAsync(nodeId, requiredOffset, requiredLength, cts.Token)
                 .GetAwaiter().GetResult();
 
-            TransferData(*callbackInfo, data, requiredOffset, requiredLength, totalSize, cts.Token);
+            int sourceOffset = (int)(requiredOffset - dataStartOffset);
+            TransferData(*callbackInfo, data, sourceOffset, requiredOffset, requiredLength, totalSize, cts.Token);
 
             // Record that we just hydrated this file so SyncEngine doesn't
             // re-upload it when FileSystemWatcher fires a Changed event.
@@ -376,38 +383,73 @@ internal class SyncCallbacks
 
     /// <summary>
     /// Download blob data asynchronously (can run on any thread).
-    /// Returns the full blob contents and the file size.
+    /// Returns the data bytes, the file offset where data starts, and total file size.
+    /// Attempts a range download when supported; falls back to full download.
     /// </summary>
-    private async Task<(byte[] data, long totalSize)> FetchBlobDataAsync(string nodeId, CancellationToken ct)
+    private async Task<(byte[] data, long dataStartOffset, long totalSize)> FetchBlobDataAsync(
+        string nodeId, long requiredOffset, long requiredLength, CancellationToken ct)
     {
         var nodes = await _jmapClient.GetStorageNodesAsync([nodeId], ct);
         if (nodes.Length == 0 || nodes[0].BlobId == null)
             throw new FileNotFoundException($"Node {nodeId} not found or has no blob");
 
         var node = nodes[0];
+
+        // Try range download if supported and this is a partial request
+        if (_rangeRequestsSupported && (requiredOffset > 0 || requiredLength < node.Size))
+        {
+            try
+            {
+                var (rangeStream, isPartial) = await _jmapClient.DownloadBlobRangeAsync(
+                    node.BlobId!, requiredOffset, requiredLength, node.Type, node.Name, ct);
+                using (rangeStream)
+                {
+                    using var ms = new MemoryStream();
+                    await rangeStream.CopyToAsync(ms, ct);
+                    var rangeBytes = ms.ToArray();
+
+                    if (isPartial)
+                        return (rangeBytes, requiredOffset, node.Size);
+
+                    // Server returned 200 (full content) — disable range requests
+                    _rangeRequestsSupported = false;
+                    Console.WriteLine("Range requests not supported by server, falling back to full downloads");
+                    return (rangeBytes, 0, node.Size);
+                }
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex)
+            {
+                _rangeRequestsSupported = false;
+                Console.Error.WriteLine($"Range request failed, falling back to full download: {ex.Message}");
+            }
+        }
+
+        // Full download fallback
         using var stream = await _jmapClient.DownloadBlobAsync(node.BlobId!, node.Type, node.Name, ct);
-        using var ms = new MemoryStream();
-        await stream.CopyToAsync(ms, ct);
-        return (ms.ToArray(), node.Size);
+        using var fullMs = new MemoryStream();
+        await stream.CopyToAsync(fullMs, ct);
+        return (fullMs.ToArray(), 0, node.Size);
     }
 
     /// <summary>
     /// Transfer downloaded data to cfapi. Must run on the callback thread.
+    /// <paramref name="sourceOffset"/> is the index into <paramref name="data"/> where the requested range starts.
+    /// <paramref name="fileOffset"/> is the offset within the cloud file where data should be written.
     /// </summary>
-    private static void TransferData(CF_CALLBACK_INFO callbackInfo, byte[] data, long offset, long length, long totalSize, CancellationToken ct)
+    private static void TransferData(CF_CALLBACK_INFO callbackInfo, byte[] data,
+        int sourceOffset, long fileOffset, long length, long totalSize, CancellationToken ct)
     {
         const int chunkSize = 4 * 1024 * 1024; // 4MB
         long totalTransferred = 0;
 
-        // Transfer the requested range
-        long dataOffset = offset; // offset within the file where data starts
-        long remaining = Math.Min(length, data.Length - offset);
+        long remaining = Math.Min(length, data.Length - sourceOffset);
         while (remaining > 0)
         {
             ct.ThrowIfCancellationRequested();
 
             int chunkLen = (int)Math.Min(chunkSize, remaining);
-            TransferChunk(callbackInfo, data, (int)(offset + totalTransferred), dataOffset + totalTransferred, chunkLen);
+            TransferChunk(callbackInfo, data, (int)(sourceOffset + totalTransferred), fileOffset + totalTransferred, chunkLen);
             totalTransferred += chunkLen;
             remaining -= chunkLen;
 

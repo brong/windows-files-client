@@ -156,6 +156,20 @@ public class JmapClient : IJmapClient
         return await response.Content.ReadAsStreamAsync(ct);
     }
 
+    public async Task<(Stream data, bool isPartial)> DownloadBlobRangeAsync(string blobId, long offset, long length, string? type = null, string? name = null, CancellationToken ct = default)
+    {
+        var url = Session.GetDownloadUrl(AccountId, blobId, type, name);
+        var request = new HttpRequestMessage(HttpMethod.Get, url);
+        request.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(offset, offset + length - 1);
+
+        var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+        response.EnsureSuccessStatusCode();
+
+        var stream = await response.Content.ReadAsStreamAsync(ct);
+        bool isPartial = response.StatusCode == System.Net.HttpStatusCode.PartialContent;
+        return (stream, isPartial);
+    }
+
     public async Task<string> UploadBlobAsync(Stream data, string contentType, CancellationToken ct = default)
     {
         var url = Session.GetUploadUrl(AccountId);
