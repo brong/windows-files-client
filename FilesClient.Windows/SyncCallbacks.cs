@@ -19,6 +19,12 @@ internal class SyncCallbacks
     public ConcurrentDictionary<string, byte> RecentlyHydrated { get; } = new();
 
     /// <summary>
+    /// In-flight hydration requests keyed by TransferKey, so CANCEL_FETCH_DATA
+    /// can cancel the corresponding download.
+    /// </summary>
+    private readonly ConcurrentDictionary<long, CancellationTokenSource> _inFlightFetches = new();
+
+    /// <summary>
     /// Called before a delete completes. Return true to allow, false to veto.
     /// Parameters: (nodeId, fullPath)
     /// </summary>
@@ -45,8 +51,9 @@ internal class SyncCallbacks
         CF_CALLBACK fetchDataDelegate = new(FetchDataCallback);
         CF_CALLBACK notifyDeleteDelegate = new(NotifyDeleteCallback);
         CF_CALLBACK notifyRenameDelegate = new(NotifyRenameCallback);
+        CF_CALLBACK cancelFetchDataDelegate = new(CancelFetchDataCallback);
 
-        var delegates = new CF_CALLBACK[] { fetchPlaceholdersDelegate, fetchDataDelegate, notifyDeleteDelegate, notifyRenameDelegate };
+        var delegates = new CF_CALLBACK[] { fetchPlaceholdersDelegate, fetchDataDelegate, notifyDeleteDelegate, notifyRenameDelegate, cancelFetchDataDelegate };
 
         var registrations = new CF_CALLBACK_REGISTRATION[]
         {
@@ -59,6 +66,11 @@ internal class SyncCallbacks
             {
                 Type = CF_CALLBACK_TYPE.CF_CALLBACK_TYPE_FETCH_DATA,
                 Callback = fetchDataDelegate,
+            },
+            new()
+            {
+                Type = CF_CALLBACK_TYPE.CF_CALLBACK_TYPE_CANCEL_FETCH_DATA,
+                Callback = cancelFetchDataDelegate,
             },
             new()
             {
@@ -121,6 +133,10 @@ internal class SyncCallbacks
 
     private unsafe void FetchDataCallback(CF_CALLBACK_INFO* callbackInfo, CF_CALLBACK_PARAMETERS* callbackParameters)
     {
+        var transferKey = callbackInfo->TransferKey;
+        var cts = new CancellationTokenSource();
+        _inFlightFetches[transferKey] = cts;
+
         try
         {
             var fetchParams = callbackParameters->Anonymous.FetchData;
@@ -142,20 +158,29 @@ internal class SyncCallbacks
             // Download blob data asynchronously, then transfer to cfapi
             // synchronously on the callback thread (CfExecute requires
             // the callback thread context for the transfer key to be valid).
-            var (data, totalSize) = FetchBlobDataAsync(nodeId)
+            var (data, totalSize) = FetchBlobDataAsync(nodeId, cts.Token)
                 .GetAwaiter().GetResult();
 
-            TransferData(*callbackInfo, data, requiredOffset, requiredLength, totalSize);
+            TransferData(*callbackInfo, data, requiredOffset, requiredLength, totalSize, cts.Token);
 
             // Record that we just hydrated this file so SyncEngine doesn't
             // re-upload it when FileSystemWatcher fires a Changed event.
             if (nodeId != null)
                 RecentlyHydrated[nodeId] = 0;
         }
+        catch (OperationCanceledException)
+        {
+            Console.WriteLine($"FETCH_DATA cancelled: transferKey={transferKey}");
+        }
         catch (Exception ex)
         {
             Console.Error.WriteLine($"FETCH_DATA error: {ex.Message}");
             TransferError(*callbackInfo, new NTSTATUS(unchecked((int)0xC0000001))); // STATUS_UNSUCCESSFUL
+        }
+        finally
+        {
+            _inFlightFetches.TryRemove(transferKey, out _);
+            cts.Dispose();
         }
     }
 
@@ -206,6 +231,16 @@ internal class SyncCallbacks
             allowed = false;
         }
         AckRename(callbackInfo, allowed);
+    }
+
+    private unsafe void CancelFetchDataCallback(CF_CALLBACK_INFO* callbackInfo, CF_CALLBACK_PARAMETERS* callbackParameters)
+    {
+        var transferKey = callbackInfo->TransferKey;
+        var nodeId = ExtractNodeId(callbackInfo);
+        Console.WriteLine($"CANCEL_FETCH_DATA: node={nodeId}, transferKey={transferKey}");
+
+        if (_inFlightFetches.TryGetValue(transferKey, out var cts))
+            cts.Cancel();
     }
 
     private static unsafe string? ExtractNodeId(CF_CALLBACK_INFO* callbackInfo)
@@ -270,23 +305,23 @@ internal class SyncCallbacks
     /// Download blob data asynchronously (can run on any thread).
     /// Returns the full blob contents and the file size.
     /// </summary>
-    private async Task<(byte[] data, long totalSize)> FetchBlobDataAsync(string nodeId)
+    private async Task<(byte[] data, long totalSize)> FetchBlobDataAsync(string nodeId, CancellationToken ct)
     {
-        var nodes = await _jmapClient.GetStorageNodesAsync([nodeId]);
+        var nodes = await _jmapClient.GetStorageNodesAsync([nodeId], ct);
         if (nodes.Length == 0 || nodes[0].BlobId == null)
             throw new FileNotFoundException($"Node {nodeId} not found or has no blob");
 
         var node = nodes[0];
-        using var stream = await _jmapClient.DownloadBlobAsync(node.BlobId!, node.Type, node.Name);
+        using var stream = await _jmapClient.DownloadBlobAsync(node.BlobId!, node.Type, node.Name, ct);
         using var ms = new MemoryStream();
-        await stream.CopyToAsync(ms);
+        await stream.CopyToAsync(ms, ct);
         return (ms.ToArray(), node.Size);
     }
 
     /// <summary>
     /// Transfer downloaded data to cfapi. Must run on the callback thread.
     /// </summary>
-    private static void TransferData(CF_CALLBACK_INFO callbackInfo, byte[] data, long offset, long length, long totalSize)
+    private static void TransferData(CF_CALLBACK_INFO callbackInfo, byte[] data, long offset, long length, long totalSize, CancellationToken ct)
     {
         const int chunkSize = 4 * 1024 * 1024; // 4MB
         long totalTransferred = 0;
@@ -296,6 +331,8 @@ internal class SyncCallbacks
         long remaining = Math.Min(length, data.Length - offset);
         while (remaining > 0)
         {
+            ct.ThrowIfCancellationRequested();
+
             int chunkLen = (int)Math.Min(chunkSize, remaining);
             TransferChunk(callbackInfo, data, (int)(offset + totalTransferred), dataOffset + totalTransferred, chunkLen);
             totalTransferred += chunkLen;
