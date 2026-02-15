@@ -27,6 +27,12 @@ internal sealed class FileChangeWatcher : IDisposable
     /// </summary>
     public event Action<string>? OnFilePinned;
 
+    /// <summary>
+    /// Fired when FILE_ATTRIBUTE_UNPINNED is detected on a file or directory
+    /// (user selected "Free up space").
+    /// </summary>
+    public event Action<string>? OnFileUnpinned;
+
     public FileChangeWatcher(string syncRootPath)
     {
         _syncRootPath = syncRootPath;
@@ -60,6 +66,7 @@ internal sealed class FileChangeWatcher : IDisposable
     private void OnChanged(string path)
     {
         const FileAttributes pinnedFlag = (FileAttributes)0x00080000; // FILE_ATTRIBUTE_PINNED
+        const FileAttributes unpinnedFlag = (FileAttributes)0x00100000; // FILE_ATTRIBUTE_UNPINNED
         try
         {
             var attrs = File.GetAttributes(path);
@@ -69,6 +76,12 @@ internal sealed class FileChangeWatcher : IDisposable
                     OnDirectoryPinned?.Invoke(path);
                 else
                     OnFilePinned?.Invoke(path);
+                return;
+            }
+
+            if ((attrs & unpinnedFlag) != 0)
+            {
+                OnFileUnpinned?.Invoke(path);
                 return;
             }
 

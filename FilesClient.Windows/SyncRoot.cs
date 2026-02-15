@@ -57,7 +57,7 @@ internal class SyncRoot : IDisposable
         info.DisplayNameResource = displayName;
         info.IconResource = iconResource;
         info.HydrationPolicy = StorageProviderHydrationPolicy.Full;
-        info.HydrationPolicyModifier = StorageProviderHydrationPolicyModifier.None;
+        info.HydrationPolicyModifier = StorageProviderHydrationPolicyModifier.AutoDehydrationAllowed;
         info.PopulationPolicy = StorageProviderPopulationPolicy.AlwaysFull;
         info.InSyncPolicy = StorageProviderInSyncPolicy.FileLastWriteTime
             | StorageProviderInSyncPolicy.DirectoryLastWriteTime;

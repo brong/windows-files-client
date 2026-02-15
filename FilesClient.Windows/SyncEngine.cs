@@ -43,11 +43,13 @@ public class SyncEngine : IDisposable
         _syncCallbacks = new SyncCallbacks(jmapClient);
         _syncCallbacks.OnDeleteRequested = HandleDeleteRequestAsync;
         _syncCallbacks.OnRenameRequested = HandleRenameRequestAsync;
+        _syncCallbacks.OnDehydrateRequested = HandleDehydrateRequestAsync;
         _syncCallbacks.OnDirectoryPopulated += OnDirectoryPopulated;
         _fileChangeWatcher = new FileChangeWatcher(syncRootPath);
         _fileChangeWatcher.OnChanges += OnLocalFileChanges;
         _fileChangeWatcher.OnDirectoryPinned += OnDirectoryPinned;
         _fileChangeWatcher.OnFilePinned += OnFilePinned;
+        _fileChangeWatcher.OnFileUnpinned += OnFileUnpinned;
     }
 
     public async Task RegisterAndConnectAsync(string displayName, string accountId, string? iconPath = null)
@@ -597,6 +599,82 @@ public class SyncEngine : IDisposable
                 Console.Error.WriteLine($"File pin hydration error for {Path.GetFileName(filePath)}: {ex.Message}");
             }
         });
+    }
+
+    private Task<bool> HandleDehydrateRequestAsync(string? nodeId, string path)
+    {
+        Console.WriteLine($"Allowing OS-initiated dehydration: node={nodeId}, path={path}");
+        return Task.FromResult(true);
+    }
+
+    private void OnFileUnpinned(string path)
+    {
+        // Remove from pinned directories if it was tracked
+        if (Directory.Exists(path))
+            _pinnedDirectories.TryRemove(path, out _);
+
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                if (Directory.Exists(path))
+                {
+                    int count = DehydrateDehydratedFiles(path);
+                    if (count > 0)
+                        Console.WriteLine($"Dehydrated {count} files in {path}");
+                }
+                else if (File.Exists(path))
+                {
+                    DehydratePlaceholder(path);
+                    Console.WriteLine($"Dehydrated: {Path.GetFileName(path)}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Dehydration error for {path}: {ex.Message}");
+            }
+        });
+    }
+
+    private int DehydrateDehydratedFiles(string directoryPath)
+    {
+        if (!Directory.Exists(directoryPath))
+            return 0;
+
+        int count = 0;
+        foreach (var filePath in Directory.EnumerateFiles(directoryPath))
+        {
+            try
+            {
+                DehydratePlaceholder(filePath);
+                count++;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"  Dehydration failed for {Path.GetFileName(filePath)}: {ex.Message}");
+            }
+        }
+
+        foreach (var subDir in Directory.EnumerateDirectories(directoryPath))
+        {
+            _pinnedDirectories.TryRemove(subDir, out _);
+            count += DehydrateDehydratedFiles(subDir);
+        }
+
+        return count;
+    }
+
+    private static unsafe void DehydratePlaceholder(string filePath)
+    {
+        using var safeHandle = OpenWithRetry(filePath);
+        var handle = new global::Windows.Win32.Foundation.HANDLE(safeHandle.DangerousGetHandle());
+        PInvoke.CfDehydratePlaceholder(
+            handle,
+            0,      // start offset
+            -1,     // entire file
+            CF_DEHYDRATE_FLAGS.CF_DEHYDRATE_FLAG_NONE,
+            null    // synchronous
+        ).ThrowOnFailure();
     }
 
     /// <summary>

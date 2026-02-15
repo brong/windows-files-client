@@ -36,6 +36,12 @@ internal class SyncCallbacks
     /// </summary>
     public Func<string?, string, string, bool, Task<bool>>? OnRenameRequested;
 
+    /// <summary>
+    /// Called when the OS requests dehydration (Storage Sense, low disk).
+    /// Return true to allow, false to veto. Parameters: (nodeId, fullPath)
+    /// </summary>
+    public Func<string?, string, Task<bool>>? OnDehydrateRequested;
+
     public record DirectoryPopulatedInfo(string DirectoryPath);
     public event Action<DirectoryPopulatedInfo>? OnDirectoryPopulated;
 
@@ -52,8 +58,10 @@ internal class SyncCallbacks
         CF_CALLBACK notifyDeleteDelegate = new(NotifyDeleteCallback);
         CF_CALLBACK notifyRenameDelegate = new(NotifyRenameCallback);
         CF_CALLBACK cancelFetchDataDelegate = new(CancelFetchDataCallback);
+        CF_CALLBACK notifyDehydrateDelegate = new(NotifyDehydrateCallback);
+        CF_CALLBACK notifyDehydrateCompletionDelegate = new(NotifyDehydrateCompletionCallback);
 
-        var delegates = new CF_CALLBACK[] { fetchPlaceholdersDelegate, fetchDataDelegate, notifyDeleteDelegate, notifyRenameDelegate, cancelFetchDataDelegate };
+        var delegates = new CF_CALLBACK[] { fetchPlaceholdersDelegate, fetchDataDelegate, notifyDeleteDelegate, notifyRenameDelegate, cancelFetchDataDelegate, notifyDehydrateDelegate, notifyDehydrateCompletionDelegate };
 
         var registrations = new CF_CALLBACK_REGISTRATION[]
         {
@@ -81,6 +89,16 @@ internal class SyncCallbacks
             {
                 Type = CF_CALLBACK_TYPE.CF_CALLBACK_TYPE_NOTIFY_RENAME,
                 Callback = notifyRenameDelegate,
+            },
+            new()
+            {
+                Type = CF_CALLBACK_TYPE.CF_CALLBACK_TYPE_NOTIFY_DEHYDRATE,
+                Callback = notifyDehydrateDelegate,
+            },
+            new()
+            {
+                Type = CF_CALLBACK_TYPE.CF_CALLBACK_TYPE_NOTIFY_DEHYDRATE_COMPLETION,
+                Callback = notifyDehydrateCompletionDelegate,
             },
             // Sentinel entry to mark end of array
             new()
@@ -241,6 +259,61 @@ internal class SyncCallbacks
 
         if (_inFlightFetches.TryGetValue(transferKey, out var cts))
             cts.Cancel();
+    }
+
+    private unsafe void NotifyDehydrateCallback(CF_CALLBACK_INFO* callbackInfo, CF_CALLBACK_PARAMETERS* callbackParameters)
+    {
+        bool allowed = true;
+        try
+        {
+            var nodeId = ExtractNodeId(callbackInfo);
+            var fullPath = ExtractFullPath(callbackInfo);
+
+            Console.WriteLine($"NOTIFY_DEHYDRATE: node={nodeId}, path={fullPath}");
+
+            if (OnDehydrateRequested != null)
+                allowed = OnDehydrateRequested(nodeId, fullPath).GetAwaiter().GetResult();
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"NOTIFY_DEHYDRATE error: {ex.Message}");
+            allowed = false;
+        }
+        AckDehydrate(callbackInfo, allowed);
+    }
+
+    private unsafe void NotifyDehydrateCompletionCallback(CF_CALLBACK_INFO* callbackInfo, CF_CALLBACK_PARAMETERS* callbackParameters)
+    {
+        try
+        {
+            var nodeId = ExtractNodeId(callbackInfo);
+            var fullPath = ExtractFullPath(callbackInfo);
+            Console.WriteLine($"NOTIFY_DEHYDRATE_COMPLETION: node={nodeId}, path={fullPath}");
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"NOTIFY_DEHYDRATE_COMPLETION error: {ex.Message}");
+        }
+    }
+
+    private static unsafe void AckDehydrate(CF_CALLBACK_INFO* callbackInfo, bool allow)
+    {
+        var opInfo = new CF_OPERATION_INFO
+        {
+            StructSize = (uint)sizeof(CF_OPERATION_INFO),
+            Type = CF_OPERATION_TYPE.CF_OPERATION_TYPE_ACK_DEHYDRATE,
+            ConnectionKey = callbackInfo->ConnectionKey,
+            TransferKey = callbackInfo->TransferKey,
+            RequestKey = callbackInfo->RequestKey,
+        };
+
+        var opParams = new CF_OPERATION_PARAMETERS();
+        opParams.ParamSize = (uint)sizeof(CF_OPERATION_PARAMETERS);
+        opParams.Anonymous.AckDehydrate.CompletionStatus = allow
+            ? new NTSTATUS(0)  // STATUS_SUCCESS
+            : new NTSTATUS(unchecked((int)0xC0000001));  // STATUS_UNSUCCESSFUL
+
+        PInvoke.CfExecute(in opInfo, ref opParams).ThrowOnFailure();
     }
 
     private static unsafe string? ExtractNodeId(CF_CALLBACK_INFO* callbackInfo)
