@@ -126,16 +126,19 @@ class Program
                     }
                     // Stream ended normally — reconnect after brief delay
                     Console.WriteLine("Push connection closed, reconnecting...");
+                    engine.ReportConnectivityLost();
                 }
                 catch (OperationCanceledException) { break; }
                 catch (Exception ex)
                 {
                     Console.Error.WriteLine($"Push error: {ex.Message}");
+                    engine.ReportConnectivityLost();
                 }
                 // Brief delay before reconnect, plus one poll to catch anything missed
                 try
                 {
                     await Task.Delay(TimeSpan.FromSeconds(5), cts.Token);
+                    engine.ReportConnectivityRestored();
                     currentState = await engine.PollChangesAsync(currentState, cts.Token);
                 }
                 catch (OperationCanceledException) { break; }

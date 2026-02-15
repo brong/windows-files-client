@@ -95,6 +95,12 @@ internal class SyncRoot : IDisposable
 
     internal CF_CONNECTION_KEY GetConnectionKey() => _connectionKey;
 
+    internal void UpdateProviderStatus(CF_SYNC_PROVIDER_STATUS status)
+    {
+        if (_connected)
+            PInvoke.CfUpdateSyncProviderStatus(_connectionKey, status);
+    }
+
     public void Disconnect()
     {
         if (_connected)

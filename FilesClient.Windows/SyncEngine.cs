@@ -26,6 +26,14 @@ public class SyncEngine : IDisposable
 
     public string SyncRootPath => _syncRootPath;
 
+    private void ReportStatus(CF_SYNC_PROVIDER_STATUS status)
+    {
+        _syncRoot.UpdateProviderStatus(status);
+    }
+
+    public void ReportConnectivityLost() => ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_CONNECTIVITY_LOST);
+    public void ReportConnectivityRestored() => ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_IDLE);
+
     public SyncEngine(string syncRootPath, IJmapClient jmapClient)
     {
         _syncRootPath = syncRootPath;
@@ -49,10 +57,13 @@ public class SyncEngine : IDisposable
         _syncRoot.Connect(registrations, delegates);
 
         _fileChangeWatcher.Start();
+        ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_IDLE);
     }
 
     public async Task<string> PopulateAsync(CancellationToken ct)
     {
+        ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_POPULATE_NAMESPACE);
+
         // Phase 1: Fetch the entire tree from the server
         Console.WriteLine("Fetching directory tree...");
         var tree = new List<(string parentId, string localParentPath, StorageNode[] children)>();
@@ -131,6 +142,7 @@ public class SyncEngine : IDisposable
             });
         }
 
+        ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_IDLE);
         return await _jmapClient.GetStateAsync(ct);
     }
 
@@ -154,7 +166,12 @@ public class SyncEngine : IDisposable
         var changes = await _jmapClient.GetChangesAsync(sinceState, ct);
 
         if (changes.Created.Length == 0 && changes.Updated.Length == 0 && changes.Destroyed.Length == 0)
+        {
+            ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_IDLE);
             return changes.NewState;
+        }
+
+        ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_SYNC_INCREMENTAL);
 
         Console.WriteLine($"Changes: +{changes.Created.Length} ~{changes.Updated.Length} -{changes.Destroyed.Length}");
 
@@ -285,6 +302,7 @@ public class SyncEngine : IDisposable
         if (changes.HasMoreChanges)
             return await PollChangesAsync(changes.NewState, ct);
 
+        ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_IDLE);
         return changes.NewState;
     }
 
@@ -950,6 +968,7 @@ public class SyncEngine : IDisposable
 
     public void Dispose()
     {
+        ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_DISCONNECTED);
         _fileChangeWatcher.Dispose();
         _syncRoot.Dispose();
     }
