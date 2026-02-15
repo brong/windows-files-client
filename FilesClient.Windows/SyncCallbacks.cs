@@ -18,8 +18,17 @@ internal class SyncCallbacks
     /// </summary>
     public ConcurrentDictionary<string, byte> RecentlyHydrated { get; } = new();
 
-    public record RenameCompletedInfo(string? NodeId, string OldFullPath, string NewFullPath);
-    public event Action<RenameCompletedInfo>? OnRenameCompleted;
+    /// <summary>
+    /// Called before a delete completes. Return true to allow, false to veto.
+    /// Parameters: (nodeId, fullPath)
+    /// </summary>
+    public Func<string?, string, Task<bool>>? OnDeleteRequested;
+
+    /// <summary>
+    /// Called before a rename completes. Return true to allow, false to veto.
+    /// Parameters: (nodeId, sourcePath, targetPath, targetInScope)
+    /// </summary>
+    public Func<string?, string, string, bool, Task<bool>>? OnRenameRequested;
 
     public record DirectoryPopulatedInfo(string DirectoryPath);
     public event Action<DirectoryPopulatedInfo>? OnDirectoryPopulated;
@@ -34,9 +43,10 @@ internal class SyncCallbacks
         // Must keep delegate references alive to prevent GC
         CF_CALLBACK fetchPlaceholdersDelegate = new(FetchPlaceholdersCallback);
         CF_CALLBACK fetchDataDelegate = new(FetchDataCallback);
-        CF_CALLBACK renameCompletionDelegate = new(RenameCompletionCallback);
+        CF_CALLBACK notifyDeleteDelegate = new(NotifyDeleteCallback);
+        CF_CALLBACK notifyRenameDelegate = new(NotifyRenameCallback);
 
-        var delegates = new CF_CALLBACK[] { fetchPlaceholdersDelegate, fetchDataDelegate, renameCompletionDelegate };
+        var delegates = new CF_CALLBACK[] { fetchPlaceholdersDelegate, fetchDataDelegate, notifyDeleteDelegate, notifyRenameDelegate };
 
         var registrations = new CF_CALLBACK_REGISTRATION[]
         {
@@ -52,8 +62,13 @@ internal class SyncCallbacks
             },
             new()
             {
-                Type = CF_CALLBACK_TYPE.CF_CALLBACK_TYPE_NOTIFY_RENAME_COMPLETION,
-                Callback = renameCompletionDelegate,
+                Type = CF_CALLBACK_TYPE.CF_CALLBACK_TYPE_NOTIFY_DELETE,
+                Callback = notifyDeleteDelegate,
+            },
+            new()
+            {
+                Type = CF_CALLBACK_TYPE.CF_CALLBACK_TYPE_NOTIFY_RENAME,
+                Callback = notifyRenameDelegate,
             },
             // Sentinel entry to mark end of array
             new()
@@ -72,12 +87,7 @@ internal class SyncCallbacks
             // All placeholders are created upfront during PopulateAsync and kept
             // in sync by PollChangesAsync.  Just acknowledge so cfapi marks the
             // directory as populated — enabling pin hydration of its children.
-            string? nodeId = null;
-            if (callbackInfo->FileIdentity != null && callbackInfo->FileIdentityLength > 0)
-            {
-                nodeId = Encoding.UTF8.GetString(
-                    new ReadOnlySpan<byte>(callbackInfo->FileIdentity, (int)callbackInfo->FileIdentityLength));
-            }
+            var nodeId = ExtractNodeId(callbackInfo);
             Console.WriteLine($"FETCH_PLACEHOLDERS: node={nodeId}, path={callbackInfo->NormalizedPath}");
 
             var opInfo = new CF_OPERATION_INFO
@@ -100,9 +110,7 @@ internal class SyncCallbacks
             PInvoke.CfExecute(in opInfo, ref opParams).ThrowOnFailure();
 
             // Notify SyncEngine so it can hydrate pinned files in this directory
-            var dirPath = callbackInfo->VolumeDosName.ToString() + callbackInfo->NormalizedPath.ToString();
-            if (dirPath.StartsWith(@"\\?\"))
-                dirPath = dirPath.Substring(4);
+            var dirPath = ExtractFullPath(callbackInfo);
             OnDirectoryPopulated?.Invoke(new DirectoryPopulatedInfo(dirPath));
         }
         catch (Exception ex)
@@ -120,12 +128,7 @@ internal class SyncCallbacks
             long requiredLength = fetchParams.RequiredLength;
 
             // Extract the StorageNode ID from the file identity blob
-            string? nodeId = null;
-            if (callbackInfo->FileIdentity != null && callbackInfo->FileIdentityLength > 0)
-            {
-                nodeId = Encoding.UTF8.GetString(
-                    new ReadOnlySpan<byte>(callbackInfo->FileIdentity, (int)callbackInfo->FileIdentityLength));
-            }
+            var nodeId = ExtractNodeId(callbackInfo);
 
             if (string.IsNullOrEmpty(nodeId))
             {
@@ -156,39 +159,111 @@ internal class SyncCallbacks
         }
     }
 
-    private unsafe void RenameCompletionCallback(CF_CALLBACK_INFO* callbackInfo, CF_CALLBACK_PARAMETERS* callbackParameters)
+    private unsafe void NotifyDeleteCallback(CF_CALLBACK_INFO* callbackInfo, CF_CALLBACK_PARAMETERS* callbackParameters)
     {
+        bool allowed = true;
         try
         {
-            // Extract the StorageNode ID from the file identity blob
-            string? nodeId = null;
-            if (callbackInfo->FileIdentity != null && callbackInfo->FileIdentityLength > 0)
-            {
-                nodeId = Encoding.UTF8.GetString(
-                    new ReadOnlySpan<byte>(callbackInfo->FileIdentity, (int)callbackInfo->FileIdentityLength));
-            }
+            var nodeId = ExtractNodeId(callbackInfo);
+            var fullPath = ExtractFullPath(callbackInfo);
 
-            var renameParams = callbackParameters->Anonymous.RenameCompletion;
+            Console.WriteLine($"NOTIFY_DELETE: node={nodeId}, path={fullPath}");
 
-            // New path: VolumeDosName + NormalizedPath
-            var newPath = callbackInfo->VolumeDosName.ToString() + callbackInfo->NormalizedPath.ToString();
-            // Old path: VolumeDosName + SourcePath from rename completion params
-            var oldPath = callbackInfo->VolumeDosName.ToString() + renameParams.SourcePath.ToString();
-
-            // Strip \\?\ prefix if present
-            if (newPath.StartsWith(@"\\?\"))
-                newPath = newPath.Substring(4);
-            if (oldPath.StartsWith(@"\\?\"))
-                oldPath = oldPath.Substring(4);
-
-            Console.WriteLine($"RENAME_COMPLETION: node={nodeId}, {oldPath} → {newPath}");
-
-            OnRenameCompleted?.Invoke(new RenameCompletedInfo(nodeId, oldPath, newPath));
+            if (OnDeleteRequested != null)
+                allowed = OnDeleteRequested(nodeId, fullPath).GetAwaiter().GetResult();
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"RENAME_COMPLETION error: {ex.Message}");
+            Console.Error.WriteLine($"NOTIFY_DELETE error: {ex.Message}");
+            allowed = false;
         }
+        AckDelete(callbackInfo, allowed);
+    }
+
+    private unsafe void NotifyRenameCallback(CF_CALLBACK_INFO* callbackInfo, CF_CALLBACK_PARAMETERS* callbackParameters)
+    {
+        bool allowed = true;
+        try
+        {
+            var nodeId = ExtractNodeId(callbackInfo);
+            var sourcePath = ExtractFullPath(callbackInfo);
+
+            var renameParams = callbackParameters->Anonymous.Rename;
+            var targetPath = callbackInfo->VolumeDosName.ToString() + renameParams.TargetPath.ToString();
+            if (targetPath.StartsWith(@"\\?\"))
+                targetPath = targetPath.Substring(4);
+
+            bool targetInScope = ((uint)renameParams.Flags & 0x1) != 0; // CF_CALLBACK_RENAME_FLAG_TARGET_IN_SCOPE
+
+            Console.WriteLine($"NOTIFY_RENAME: node={nodeId}, {sourcePath} → {targetPath} (inScope={targetInScope})");
+
+            if (OnRenameRequested != null)
+                allowed = OnRenameRequested(nodeId, sourcePath, targetPath, targetInScope).GetAwaiter().GetResult();
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"NOTIFY_RENAME error: {ex.Message}");
+            allowed = false;
+        }
+        AckRename(callbackInfo, allowed);
+    }
+
+    private static unsafe string? ExtractNodeId(CF_CALLBACK_INFO* callbackInfo)
+    {
+        if (callbackInfo->FileIdentity != null && callbackInfo->FileIdentityLength > 0)
+        {
+            return Encoding.UTF8.GetString(
+                new ReadOnlySpan<byte>(callbackInfo->FileIdentity, (int)callbackInfo->FileIdentityLength));
+        }
+        return null;
+    }
+
+    private static unsafe string ExtractFullPath(CF_CALLBACK_INFO* callbackInfo)
+    {
+        var path = callbackInfo->VolumeDosName.ToString() + callbackInfo->NormalizedPath.ToString();
+        if (path.StartsWith(@"\\?\"))
+            path = path.Substring(4);
+        return path;
+    }
+
+    private static unsafe void AckDelete(CF_CALLBACK_INFO* callbackInfo, bool allow)
+    {
+        var opInfo = new CF_OPERATION_INFO
+        {
+            StructSize = (uint)sizeof(CF_OPERATION_INFO),
+            Type = CF_OPERATION_TYPE.CF_OPERATION_TYPE_ACK_DELETE,
+            ConnectionKey = callbackInfo->ConnectionKey,
+            TransferKey = callbackInfo->TransferKey,
+            RequestKey = callbackInfo->RequestKey,
+        };
+
+        var opParams = new CF_OPERATION_PARAMETERS();
+        opParams.ParamSize = (uint)sizeof(CF_OPERATION_PARAMETERS);
+        opParams.Anonymous.AckDelete.CompletionStatus = allow
+            ? new NTSTATUS(0)  // STATUS_SUCCESS
+            : new NTSTATUS(unchecked((int)0xC0000001));  // STATUS_UNSUCCESSFUL
+
+        PInvoke.CfExecute(in opInfo, ref opParams).ThrowOnFailure();
+    }
+
+    private static unsafe void AckRename(CF_CALLBACK_INFO* callbackInfo, bool allow)
+    {
+        var opInfo = new CF_OPERATION_INFO
+        {
+            StructSize = (uint)sizeof(CF_OPERATION_INFO),
+            Type = CF_OPERATION_TYPE.CF_OPERATION_TYPE_ACK_RENAME,
+            ConnectionKey = callbackInfo->ConnectionKey,
+            TransferKey = callbackInfo->TransferKey,
+            RequestKey = callbackInfo->RequestKey,
+        };
+
+        var opParams = new CF_OPERATION_PARAMETERS();
+        opParams.ParamSize = (uint)sizeof(CF_OPERATION_PARAMETERS);
+        opParams.Anonymous.AckRename.CompletionStatus = allow
+            ? new NTSTATUS(0)  // STATUS_SUCCESS
+            : new NTSTATUS(unchecked((int)0xC0000001));  // STATUS_UNSUCCESSFUL
+
+        PInvoke.CfExecute(in opInfo, ref opParams).ThrowOnFailure();
     }
 
     /// <summary>

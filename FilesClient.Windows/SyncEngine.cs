@@ -41,7 +41,8 @@ public class SyncEngine : IDisposable
         _syncRoot = new SyncRoot(syncRootPath);
         _placeholderManager = new PlaceholderManager(syncRootPath);
         _syncCallbacks = new SyncCallbacks(jmapClient);
-        _syncCallbacks.OnRenameCompleted += OnPlaceholderRenamed;
+        _syncCallbacks.OnDeleteRequested = HandleDeleteRequestAsync;
+        _syncCallbacks.OnRenameRequested = HandleRenameRequestAsync;
         _syncCallbacks.OnDirectoryPopulated += OnDirectoryPopulated;
         _fileChangeWatcher = new FileChangeWatcher(syncRootPath);
         _fileChangeWatcher.OnChanges += OnLocalFileChanges;
@@ -311,25 +312,7 @@ public class SyncEngine : IDisposable
         // Process uploads on a background thread (fire-and-forget from the timer callback)
         _ = Task.Run(async () =>
         {
-            // Sort renames shallowest-first (by depth of old path) to handle
-            // parent renames before children
-            var renames = changes
-                .Where(c => c.Kind == FileChangeWatcher.ChangeKind.Renamed)
-                .OrderBy(c => c.OldFullPath?.Count(ch => ch == Path.DirectorySeparatorChar) ?? 0)
-                .ToList();
-            // Creates and modifies in original order
-            var createsAndModifies = changes
-                .Where(c => c.Kind == FileChangeWatcher.ChangeKind.Created
-                          || c.Kind == FileChangeWatcher.ChangeKind.Modified)
-                .ToList();
-            // Deletes deepest-first so children are destroyed before parents
-            var deletes = changes
-                .Where(c => c.Kind == FileChangeWatcher.ChangeKind.Deleted)
-                .OrderByDescending(c => c.FullPath.Count(ch => ch == Path.DirectorySeparatorChar))
-                .ToList();
-
-            // Process renames first, then creates/modifies, then deletes
-            foreach (var change in renames.Concat(createsAndModifies).Concat(deletes))
+            foreach (var change in changes)
             {
                 try
                 {
@@ -345,20 +328,6 @@ public class SyncEngine : IDisposable
 
     private async Task ProcessLocalChangeAsync(FileChangeWatcher.FileChange change)
     {
-        // Handle renames separately — the file may still be a placeholder
-        if (change.Kind == FileChangeWatcher.ChangeKind.Renamed)
-        {
-            await ProcessRenameAsync(change);
-            return;
-        }
-
-        // Handle deletes
-        if (change.Kind == FileChangeWatcher.ChangeKind.Deleted)
-        {
-            await ProcessDeleteAsync(change);
-            return;
-        }
-
         // Handle new directories
         if (Directory.Exists(change.FullPath))
         {
@@ -445,87 +414,6 @@ public class SyncEngine : IDisposable
         }
     }
 
-    private async Task ProcessRenameAsync(FileChangeWatcher.FileChange change)
-    {
-        if (change.OldFullPath == null)
-            return;
-
-        // Primary lookup: old path in our dictionary
-        string? nodeId = null;
-        if (!_pathToNodeId.TryGetValue(change.OldFullPath, out nodeId))
-        {
-            // Fallback: read the node ID from cfapi placeholder identity on the new path
-            nodeId = ReadPlaceholderNodeId(change.FullPath);
-            if (nodeId == null)
-            {
-                Console.Error.WriteLine($"Rename: cannot resolve node ID for: {change.OldFullPath}");
-                return;
-            }
-        }
-
-        // Echo check: if this rename was initiated by PollChangesAsync,
-        // the mapping already points to the new path — skip the server call
-        if (_nodeIdToPath.TryGetValue(nodeId, out var mappedPath) &&
-            string.Equals(mappedPath, change.FullPath, StringComparison.OrdinalIgnoreCase))
-        {
-            Console.WriteLine($"Rename: skipping echo for {Path.GetFileName(change.FullPath)} (node {nodeId})");
-            return;
-        }
-
-        var newName = Path.GetFileName(change.FullPath);
-        var parentDir = Path.GetDirectoryName(change.FullPath)!;
-        var parentId = ResolveParentNodeId(parentDir);
-        if (parentId == null)
-        {
-            Console.Error.WriteLine($"Rename: cannot resolve parent for {change.FullPath}");
-            return;
-        }
-
-        Console.WriteLine($"Moving node {nodeId}: {Path.GetFileName(change.OldFullPath)} → {parentId}/{newName}");
-
-        await _jmapClient.MoveStorageNodeAsync(nodeId, parentId, newName);
-
-        // Update descendant mappings first if this is a directory
-        if (Directory.Exists(change.FullPath))
-            UpdateDescendantMappings(change.OldFullPath, change.FullPath);
-
-        // Update the renamed item's own mapping
-        _pathToNodeId.TryRemove(change.OldFullPath, out _);
-        _pathToNodeId[change.FullPath] = nodeId;
-        _nodeIdToPath[nodeId] = change.FullPath;
-
-        Console.WriteLine($"Renamed: {newName} (node {nodeId})");
-    }
-
-    private async Task ProcessDeleteAsync(FileChangeWatcher.FileChange change)
-    {
-        // Look up the node ID for this path; if not found, it's an echo from
-        // a server-side destroy (PollChangesAsync already removed the mapping)
-        // or a file we never knew about
-        if (!_pathToNodeId.TryGetValue(change.FullPath, out var nodeId))
-        {
-            Console.WriteLine($"Delete: skipping unknown or echo path: {change.FullPath}");
-            return;
-        }
-
-        Console.WriteLine($"Destroying node {nodeId} for deleted path: {change.FullPath}");
-        await _jmapClient.DestroyStorageNodeAsync(nodeId);
-
-        // Clean up descendant mappings if this was a directory
-        var prefix = change.FullPath + Path.DirectorySeparatorChar;
-        var descendants = _pathToNodeId
-            .Where(kvp => kvp.Key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-            .ToList();
-        foreach (var (descPath, descNodeId) in descendants)
-        {
-            _pathToNodeId.TryRemove(descPath, out _);
-            _nodeIdToPath.TryRemove(descNodeId, out _);
-        }
-
-        _pathToNodeId.TryRemove(change.FullPath, out _);
-        _nodeIdToPath.TryRemove(nodeId, out _);
-    }
-
     private async Task ProcessNewFolderAsync(FileChangeWatcher.FileChange change)
     {
         // If already mapped, this is an echo from a server-side create
@@ -553,60 +441,99 @@ public class SyncEngine : IDisposable
         Console.WriteLine($"Created folder: {folderName} → node {node.Id}");
     }
 
-    private void OnPlaceholderRenamed(SyncCallbacks.RenameCompletedInfo info)
+    private async Task<bool> HandleDeleteRequestAsync(string? nodeId, string path)
     {
-        _ = Task.Run(async () =>
+        // No node ID or path not in our mappings → not a tracked placeholder,
+        // or an echo from PollChangesAsync which already removed the mapping.
+        // Allow the delete to proceed without a server call.
+        if (nodeId == null || !_pathToNodeId.ContainsKey(path))
         {
-            try
+            Console.WriteLine($"NOTIFY_DELETE: allowing untracked/echo delete: {path}");
+            return true;
+        }
+
+        try
+        {
+            Console.WriteLine($"NOTIFY_DELETE: destroying node {nodeId} for {path}");
+            await _jmapClient.DestroyStorageNodeAsync(nodeId);
+
+            // Clean up descendant mappings if this was a directory
+            var prefix = path + Path.DirectorySeparatorChar;
+            var descendants = _pathToNodeId
+                .Where(kvp => kvp.Key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            foreach (var (descPath, descNodeId) in descendants)
             {
-                if (info.NodeId == null)
-                {
-                    Console.Error.WriteLine($"RENAME_COMPLETION: no node ID for {info.OldFullPath} → {info.NewFullPath}");
-                    return;
-                }
-
-                // Echo check: if mappings already point to the new path, this rename
-                // was initiated by PollChangesAsync — skip the server call
-                if (_nodeIdToPath.TryGetValue(info.NodeId, out var mappedPath) &&
-                    string.Equals(mappedPath, info.NewFullPath, StringComparison.OrdinalIgnoreCase))
-                {
-                    Console.WriteLine($"RENAME_COMPLETION: skipping echo for {info.NodeId}");
-                    return;
-                }
-
-                // Moves out of the sync root are not supported yet
-                if (!info.NewFullPath.StartsWith(_syncRootPath, StringComparison.OrdinalIgnoreCase))
-                {
-                    Console.Error.WriteLine($"RENAME_COMPLETION: moved out of sync root, skipping: {info.NewFullPath}");
-                    return;
-                }
-
-                var parentDir = Path.GetDirectoryName(info.NewFullPath)!;
-                var parentId = ResolveParentNodeId(parentDir);
-                if (parentId == null)
-                {
-                    Console.Error.WriteLine($"RENAME_COMPLETION: cannot resolve parent for {info.NewFullPath}");
-                    return;
-                }
-
-                var newName = Path.GetFileName(info.NewFullPath);
-                Console.WriteLine($"RENAME_COMPLETION: moving node {info.NodeId} → {parentId}/{newName}");
-                await _jmapClient.MoveStorageNodeAsync(info.NodeId, parentId, newName);
-
-                // Update descendant mappings if this is a directory
-                if (Directory.Exists(info.NewFullPath))
-                    UpdateDescendantMappings(info.OldFullPath, info.NewFullPath);
-
-                // Update the renamed item's own mapping
-                _pathToNodeId.TryRemove(info.OldFullPath, out _);
-                _pathToNodeId[info.NewFullPath] = info.NodeId;
-                _nodeIdToPath[info.NodeId] = info.NewFullPath;
+                _pathToNodeId.TryRemove(descPath, out _);
+                _nodeIdToPath.TryRemove(descNodeId, out _);
             }
-            catch (Exception ex)
+
+            _pathToNodeId.TryRemove(path, out _);
+            _nodeIdToPath.TryRemove(nodeId, out _);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"NOTIFY_DELETE: server call failed, vetoing delete: {ex.Message}");
+            return false;
+        }
+    }
+
+    private async Task<bool> HandleRenameRequestAsync(string? nodeId, string source, string target, bool targetInScope)
+    {
+        // No node ID → not a tracked placeholder, allow
+        if (nodeId == null)
+        {
+            Console.WriteLine($"NOTIFY_RENAME: allowing untracked rename: {source} → {target}");
+            return true;
+        }
+
+        // Veto moves out of sync root
+        if (!targetInScope)
+        {
+            Console.WriteLine($"NOTIFY_RENAME: vetoing move out of sync root: {source} → {target}");
+            return false;
+        }
+
+        // Echo check: if mappings already point to the target, this rename
+        // was initiated by PollChangesAsync — allow without server call
+        if (_nodeIdToPath.TryGetValue(nodeId, out var mappedPath) &&
+            string.Equals(mappedPath, target, StringComparison.OrdinalIgnoreCase))
+        {
+            Console.WriteLine($"NOTIFY_RENAME: allowing echo for {nodeId}");
+            return true;
+        }
+
+        try
+        {
+            var parentDir = Path.GetDirectoryName(target)!;
+            var parentId = ResolveParentNodeId(parentDir);
+            if (parentId == null)
             {
-                Console.Error.WriteLine($"RENAME_COMPLETION error: {ex.Message}");
+                Console.Error.WriteLine($"NOTIFY_RENAME: cannot resolve parent for {target}");
+                return false;
             }
-        });
+
+            var newName = Path.GetFileName(target);
+            Console.WriteLine($"NOTIFY_RENAME: moving node {nodeId} → {parentId}/{newName}");
+            await _jmapClient.MoveStorageNodeAsync(nodeId, parentId, newName);
+
+            // Update descendant mappings if this is a directory
+            if (_pathToNodeId.TryGetValue(source, out _) && Directory.Exists(source))
+                UpdateDescendantMappings(source, target);
+
+            // Update the renamed item's own mapping
+            _pathToNodeId.TryRemove(source, out _);
+            _pathToNodeId[target] = nodeId;
+            _nodeIdToPath[nodeId] = target;
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"NOTIFY_RENAME: server call failed, vetoing rename: {ex.Message}");
+            return false;
+        }
     }
 
     private void OnDirectoryPopulated(SyncCallbacks.DirectoryPopulatedInfo info)

@@ -4,13 +4,13 @@ namespace FilesClient.Windows;
 
 internal sealed class FileChangeWatcher : IDisposable
 {
-    public enum ChangeKind { Created, Modified, Renamed, Deleted }
+    public enum ChangeKind { Created, Modified }
 
-    public record FileChange(string FullPath, ChangeKind Kind, string? OldFullPath = null);
+    public record FileChange(string FullPath, ChangeKind Kind);
 
     private readonly string _syncRootPath;
     private FileSystemWatcher? _watcher;
-    private readonly ConcurrentDictionary<string, (ChangeKind Kind, string? OldFullPath)> _pending = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, ChangeKind> _pending = new(StringComparer.OrdinalIgnoreCase);
     private readonly Timer _debounceTimer;
     private readonly TimeSpan _debounceInterval = TimeSpan.FromSeconds(1);
 
@@ -45,8 +45,6 @@ internal sealed class FileChangeWatcher : IDisposable
 
         _watcher.Created += (_, e) => OnCreated(e.FullPath);
         _watcher.Changed += (_, e) => OnChanged(e.FullPath);
-        _watcher.Renamed += (_, e) => OnRenamed(e.FullPath, e.OldFullPath);
-        _watcher.Deleted += (_, e) => OnDeleted(e.FullPath);
 
         _watcher.EnableRaisingEvents = true;
         Console.WriteLine("File change watcher started.");
@@ -88,26 +86,12 @@ internal sealed class FileChangeWatcher : IDisposable
         if (Directory.Exists(path))
         {
             StripZoneIdentifier(path);
-            _pending[path] = (ChangeKind.Created, null);
+            _pending[path] = ChangeKind.Created;
             _debounceTimer.Change(_debounceInterval, Timeout.InfiniteTimeSpan);
             return;
         }
 
         EnqueueIfNotPlaceholder(path, ChangeKind.Created);
-    }
-
-    private void OnDeleted(string path)
-    {
-        // File/folder is already gone — no placeholder check possible or needed
-        _pending[path] = (ChangeKind.Deleted, null);
-        _debounceTimer.Change(_debounceInterval, Timeout.InfiniteTimeSpan);
-    }
-
-    private void OnRenamed(string fullPath, string oldFullPath)
-    {
-        // No placeholder check needed — we just update the server-side name
-        _pending[fullPath] = (ChangeKind.Renamed, oldFullPath);
-        _debounceTimer.Change(_debounceInterval, Timeout.InfiniteTimeSpan);
     }
 
     private static void StripZoneIdentifier(string path)
@@ -139,7 +123,7 @@ internal sealed class FileChangeWatcher : IDisposable
             return;
         }
 
-        _pending[path] = (kind, null);
+        _pending[path] = kind;
         // Reset debounce timer
         _debounceTimer.Change(_debounceInterval, Timeout.InfiniteTimeSpan);
     }
@@ -152,8 +136,8 @@ internal sealed class FileChangeWatcher : IDisposable
         var changes = new List<FileChange>();
         foreach (var key in _pending.Keys.ToArray())
         {
-            if (_pending.TryRemove(key, out var entry))
-                changes.Add(new FileChange(key, entry.Kind, entry.OldFullPath));
+            if (_pending.TryRemove(key, out var kind))
+                changes.Add(new FileChange(key, kind));
         }
 
         if (changes.Count > 0)
