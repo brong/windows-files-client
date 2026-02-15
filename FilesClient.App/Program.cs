@@ -108,6 +108,8 @@ class Program
             // 3. Sync loop — EventSource push notifications with polling fallback
             Console.WriteLine("Watching for changes (Ctrl+C to stop)...");
             string currentState = state;
+            int consecutiveFailures = 0;
+            const int maxRetries = 3;
             while (!cts.Token.IsCancellationRequested)
             {
                 try
@@ -115,6 +117,7 @@ class Program
                     Console.WriteLine("Connecting to push notifications...");
                     await foreach (var newState in jmapClient.WatchForChangesAsync(cts.Token))
                     {
+                        consecutiveFailures = 0;
                         try
                         {
                             currentState = await engine.PollChangesAsync(currentState, cts.Token);
@@ -124,22 +127,32 @@ class Program
                             Console.Error.WriteLine($"Change poll error: {ex.Message}");
                         }
                     }
-                    // Stream ended normally — reconnect after brief delay
-                    Console.WriteLine("Push connection closed, reconnecting...");
-                    engine.ReportConnectivityLost();
+                    // Stream ended normally — count as a failure for reconnect purposes
+                    consecutiveFailures++;
+                    Console.WriteLine($"Push connection closed, reconnecting ({consecutiveFailures}/{maxRetries})...");
                 }
                 catch (OperationCanceledException) { break; }
                 catch (Exception ex)
                 {
-                    Console.Error.WriteLine($"Push error: {ex.Message}");
-                    engine.ReportConnectivityLost();
+                    consecutiveFailures++;
+                    Console.Error.WriteLine($"Push error ({consecutiveFailures}/{maxRetries}): {ex.Message}");
                 }
+
+                if (consecutiveFailures >= maxRetries)
+                {
+                    engine.ReportConnectivityLost();
+                    Console.Error.WriteLine("Connection lost — retries exhausted, will keep trying...");
+                }
+
                 // Brief delay before reconnect, plus one poll to catch anything missed
                 try
                 {
-                    await Task.Delay(TimeSpan.FromSeconds(5), cts.Token);
-                    engine.ReportConnectivityRestored();
+                    await Task.Delay(TimeSpan.FromSeconds(3), cts.Token);
                     currentState = await engine.PollChangesAsync(currentState, cts.Token);
+                    // Poll succeeded — connection is working, clear failure count and status
+                    if (consecutiveFailures >= maxRetries)
+                        engine.ReportConnectivityRestored();
+                    consecutiveFailures = 0;
                 }
                 catch (OperationCanceledException) { break; }
                 catch (Exception ex)
