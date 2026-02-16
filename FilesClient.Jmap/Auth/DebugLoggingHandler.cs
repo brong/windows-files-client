@@ -23,8 +23,17 @@ internal class DebugLoggingHandler : DelegatingHandler
 
         if (request.Content is not null)
         {
-            var body = await request.Content.ReadAsStringAsync(cancellationToken);
-            DumpJson("Request body", body);
+            var reqContentType = request.Content.Headers.ContentType?.MediaType;
+            if (reqContentType is "application/json")
+            {
+                var body = await request.Content.ReadAsStringAsync(cancellationToken);
+                DumpJson("Request body", body);
+            }
+            else
+            {
+                var length = request.Content.Headers.ContentLength;
+                Console.Error.WriteLine($"[JMAP Request body] {reqContentType}, {length} bytes");
+            }
         }
 
         var response = await base.SendAsync(request, cancellationToken);
