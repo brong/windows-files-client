@@ -29,8 +29,6 @@ public class SyncEngine : IDisposable
     // Directories currently being hydrated by HydrateDehydratedFiles — used to
     // suppress duplicate hydration from OnDirectoryPopulated firing concurrently.
     private readonly ConcurrentDictionary<string, byte> _hydratingDirectories = new(StringComparer.OrdinalIgnoreCase);
-    // Node IDs currently being dehydrated — FETCH_DATA for these is rejected
-    // to prevent Explorer/indexer from re-hydrating files during unpin.
     // Files recently uploaded — stores the LastWriteTimeUtc at upload time so we
     // can suppress the FileSystemWatcher echo that fires when
     // ConvertToPlaceholder / UpdatePlaceholderIdentity changes file attributes.
