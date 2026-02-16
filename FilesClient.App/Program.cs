@@ -35,6 +35,19 @@ class Program
                 case "--stub":
                     stub = true;
                     break;
+                case "--token" or "--session-url" or "--sync-root":
+                    Console.Error.WriteLine($"Error: {args[i]} requires a value");
+                    return 1;
+                default:
+                    Console.Error.WriteLine($"Error: unknown option '{args[i]}'");
+                    Console.Error.WriteLine();
+                    Console.Error.WriteLine("Options:");
+                    Console.Error.WriteLine("  --token <token>         Fastmail app password / bearer token");
+                    Console.Error.WriteLine("  --session-url <url>     JMAP session URL (default: Fastmail)");
+                    Console.Error.WriteLine("  --sync-root <path>      Local sync folder path");
+                    Console.Error.WriteLine("  --debug                 Log all JMAP HTTP traffic to stderr");
+                    Console.Error.WriteLine("  --stub                  Use stub JMAP client (single hello.txt file)");
+                    return 1;
             }
         }
 
