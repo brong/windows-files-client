@@ -196,7 +196,7 @@ public class SyncEngine : IDisposable
 
     public async Task<string> PollChangesAsync(string sinceState, CancellationToken ct)
     {
-        var changes = await _jmapClient.GetChangesAsync(sinceState, ct);
+        var (changes, createdNodes, updatedNodes) = await _jmapClient.GetChangesAndNodesAsync(sinceState, ct);
 
         if (changes.Created.Length == 0 && changes.Updated.Length == 0 && changes.Destroyed.Length == 0)
         {
@@ -208,114 +208,105 @@ public class SyncEngine : IDisposable
 
         Console.WriteLine($"Changes: +{changes.Created.Length} ~{changes.Updated.Length} -{changes.Destroyed.Length}");
 
-        var idsToFetch = changes.Created.Concat(changes.Updated).ToArray();
-        if (idsToFetch.Length > 0)
+        // Process updated nodes first — sort shallowest-first by existing path
+        // to handle parent renames before children
+        var sortedUpdatedNodes = updatedNodes
+            .OrderBy(n => _nodeIdToPath.TryGetValue(n.Id, out var p)
+                ? p.Count(ch => ch == Path.DirectorySeparatorChar)
+                : int.MaxValue)
+            .ToList();
+
+        foreach (var node in sortedUpdatedNodes)
         {
-            var nodes = await _jmapClient.GetStorageNodesAsync(idsToFetch, ct);
-            var createdSet = new HashSet<string>(changes.Created);
+            if (node.ParentId == null)
+                continue;
 
-            // Process updated nodes first — sort shallowest-first by existing path
-            // to handle parent renames before children
-            var updatedNodes = nodes
-                .Where(n => !createdSet.Contains(n.Id))
-                .OrderBy(n => _nodeIdToPath.TryGetValue(n.Id, out var p)
-                    ? p.Count(ch => ch == Path.DirectorySeparatorChar)
-                    : int.MaxValue)
-                .ToList();
+            var oldPath = _nodeIdToPath.GetValueOrDefault(node.Id);
+            var parentPath = await ResolveLocalPathAsync(node.ParentId, ct);
+            if (parentPath == null)
+                continue;
 
-            foreach (var node in updatedNodes)
+            var newPath = Path.Combine(parentPath, PlaceholderManager.SanitizeName(node.Name));
+
+            if (oldPath != null && !string.Equals(oldPath, newPath, StringComparison.OrdinalIgnoreCase))
             {
-                if (node.ParentId == null)
-                    continue;
+                // Name or parent changed — rename on disk
+                // Update mappings FIRST so the file watcher echo finds the new path
+                // and skips the redundant server call
+                var isDirectory = Directory.Exists(oldPath);
+                if (isDirectory)
+                    UpdateDescendantMappings(oldPath, newPath);
 
-                var oldPath = _nodeIdToPath.GetValueOrDefault(node.Id);
-                var parentPath = await ResolveLocalPathAsync(node.ParentId, ct);
-                if (parentPath == null)
-                    continue;
+                _pathToNodeId.TryRemove(oldPath, out _);
+                _pathToNodeId[newPath] = node.Id;
+                _nodeIdToPath[node.Id] = newPath;
 
-                var newPath = Path.Combine(parentPath, PlaceholderManager.SanitizeName(node.Name));
-
-                if (oldPath != null && !string.Equals(oldPath, newPath, StringComparison.OrdinalIgnoreCase))
+                try
                 {
-                    // Name or parent changed — rename on disk
-                    // Update mappings FIRST so the file watcher echo finds the new path
-                    // and skips the redundant server call
-                    var isDirectory = Directory.Exists(oldPath);
                     if (isDirectory)
-                        UpdateDescendantMappings(oldPath, newPath);
-
-                    _pathToNodeId.TryRemove(oldPath, out _);
-                    _pathToNodeId[newPath] = node.Id;
-                    _nodeIdToPath[node.Id] = newPath;
-
-                    try
                     {
-                        if (isDirectory)
-                        {
-                            Directory.Move(oldPath, newPath);
-                            Console.WriteLine($"  Renamed folder: {oldPath} → {newPath}");
-                        }
-                        else if (File.Exists(oldPath))
-                        {
-                            File.Move(oldPath, newPath);
-                            Console.WriteLine($"  Renamed file: {oldPath} → {newPath}");
-                        }
-                        // Re-mark as in-sync after move (cfapi may clear in-sync on rename)
-                        SetInSync(newPath);
+                        Directory.Move(oldPath, newPath);
+                        Console.WriteLine($"  Renamed folder: {oldPath} → {newPath}");
                     }
-                    catch (Exception ex)
+                    else if (File.Exists(oldPath))
                     {
-                        Console.Error.WriteLine($"  Failed to rename {oldPath} → {newPath}: {ex.Message}");
+                        File.Move(oldPath, newPath);
+                        Console.WriteLine($"  Renamed file: {oldPath} → {newPath}");
                     }
+                    // Re-mark as in-sync after move (cfapi may clear in-sync on rename)
+                    SetInSync(newPath);
                 }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"  Failed to rename {oldPath} → {newPath}: {ex.Message}");
+                }
+            }
+            else
+            {
+                // No rename — just ensure mappings are up-to-date
+                _pathToNodeId[newPath] = node.Id;
+                _nodeIdToPath[node.Id] = newPath;
+                if (!Path.Exists(newPath))
+                    _placeholderManager.CreatePlaceholders(parentPath, [node]);
                 else
                 {
-                    // No rename — just ensure mappings are up-to-date
-                    _pathToNodeId[newPath] = node.Id;
-                    _nodeIdToPath[node.Id] = newPath;
-                    if (!Path.Exists(newPath))
-                        _placeholderManager.CreatePlaceholders(parentPath, [node]);
-                    else
+                    try { SetInSync(newPath); }
+                    catch { /* not a placeholder — ignore */ }
+                }
+            }
+        }
+
+        // Process created nodes — create placeholders for new items
+        foreach (var node in createdNodes)
+        {
+            if (node.ParentId == null)
+                continue;
+
+            var parentPath = await ResolveLocalPathAsync(node.ParentId, ct);
+            if (parentPath == null)
+                continue;
+
+            var childPath = Path.Combine(parentPath, PlaceholderManager.SanitizeName(node.Name));
+            _pathToNodeId[childPath] = node.Id;
+            _nodeIdToPath[node.Id] = childPath;
+            if (!Path.Exists(childPath))
+            {
+                _placeholderManager.CreatePlaceholders(parentPath, [node]);
+
+                // If this file was created under a pinned directory, hydrate it
+                if (!node.IsFolder && IsUnderPinnedDirectory(childPath))
+                {
+                    try { HydratePlaceholder(childPath); }
+                    catch (Exception ex)
                     {
-                        try { SetInSync(newPath); }
-                        catch { /* not a placeholder — ignore */ }
+                        Console.Error.WriteLine($"  Auto-hydration failed for {node.Name}: {ex.Message}");
                     }
                 }
             }
-
-            // Process created nodes — create placeholders for new items
-            var createdNodes = nodes.Where(n => createdSet.Contains(n.Id));
-            foreach (var node in createdNodes)
+            else
             {
-                if (node.ParentId == null)
-                    continue;
-
-                var parentPath = await ResolveLocalPathAsync(node.ParentId, ct);
-                if (parentPath == null)
-                    continue;
-
-                var childPath = Path.Combine(parentPath, PlaceholderManager.SanitizeName(node.Name));
-                _pathToNodeId[childPath] = node.Id;
-                _nodeIdToPath[node.Id] = childPath;
-                if (!Path.Exists(childPath))
-                {
-                    _placeholderManager.CreatePlaceholders(parentPath, [node]);
-
-                    // If this file was created under a pinned directory, hydrate it
-                    if (!node.IsFolder && IsUnderPinnedDirectory(childPath))
-                    {
-                        try { HydratePlaceholder(childPath); }
-                        catch (Exception ex)
-                        {
-                            Console.Error.WriteLine($"  Auto-hydration failed for {node.Name}: {ex.Message}");
-                        }
-                    }
-                }
-                else
-                {
-                    try { SetInSync(childPath); }
-                    catch { /* not a placeholder — ignore */ }
-                }
+                try { SetInSync(childPath); }
+                catch { /* not a placeholder — ignore */ }
             }
         }
 

@@ -14,6 +14,8 @@ public interface IJmapClient : IDisposable
     Task<StorageNode[]> GetStorageNodesAsync(string[] ids, CancellationToken ct = default);
     Task<StorageNode[]> GetChildrenAsync(string parentId, CancellationToken ct = default);
     Task<ChangesResponse> GetChangesAsync(string sinceState, CancellationToken ct = default);
+    Task<(ChangesResponse Changes, StorageNode[] Created, StorageNode[] Updated)>
+        GetChangesAndNodesAsync(string sinceState, CancellationToken ct = default);
     Task<string> GetStateAsync(CancellationToken ct = default);
     Task<Stream> DownloadBlobAsync(string blobId, string? type = null, string? name = null, CancellationToken ct = default);
     Task<(Stream data, bool isPartial)> DownloadBlobRangeAsync(string blobId, long offset, long length, string? type = null, string? name = null, CancellationToken ct = default);

@@ -55,6 +55,12 @@ public class StubJmapClient : IJmapClient
         return Task.FromResult(new ChangesResponse { NewState = sinceState });
     }
 
+    public Task<(ChangesResponse Changes, StorageNode[] Created, StorageNode[] Updated)>
+        GetChangesAndNodesAsync(string sinceState, CancellationToken ct = default)
+    {
+        return Task.FromResult((new ChangesResponse { NewState = sinceState }, Array.Empty<StorageNode>(), Array.Empty<StorageNode>()));
+    }
+
     public Task<string> GetStateAsync(CancellationToken ct = default)
     {
         return Task.FromResult("stub-state-1");

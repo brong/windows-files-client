@@ -210,6 +210,64 @@ public class JmapClient : IJmapClient
             StorageNodeUsing, "StorageNode/changes", new { accountId = AccountId, sinceState }, ct);
     }
 
+    public async Task<(ChangesResponse Changes, StorageNode[] Created, StorageNode[] Updated)>
+        GetChangesAndNodesAsync(string sinceState, CancellationToken ct = default)
+    {
+        var changesCallId = "c" + Interlocked.Increment(ref _nextCallId);
+        var createdCallId = "c" + Interlocked.Increment(ref _nextCallId);
+        var updatedCallId = "c" + Interlocked.Increment(ref _nextCallId);
+
+        var request = JmapRequest.Create(StorageNodeUsing,
+            ("StorageNode/changes", new { accountId = AccountId, sinceState }, changesCallId),
+            ("StorageNode/get", new Dictionary<string, object>
+            {
+                ["accountId"] = AccountId,
+                ["#ids"] = new { resultOf = changesCallId, name = "StorageNode/changes", path = "/created" },
+            }, createdCallId),
+            ("StorageNode/get", new Dictionary<string, object>
+            {
+                ["accountId"] = AccountId,
+                ["#ids"] = new { resultOf = changesCallId, name = "StorageNode/changes", path = "/updated" },
+            }, updatedCallId));
+
+        var json = JsonSerializer.Serialize(request, JmapSerializerOptions.Default);
+        var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+        var httpResponse = await _http.PostAsync(Session.ApiUrl, content, ct);
+        httpResponse.EnsureSuccessStatusCode();
+        var responseJson = await httpResponse.Content.ReadAsStringAsync(ct);
+        var response = JsonSerializer.Deserialize<JmapResponse>(responseJson, JmapSerializerOptions.Default)
+            ?? throw new InvalidOperationException("Failed to parse JMAP response");
+
+        var responseMap = new Dictionary<string, (string method, JsonElement args)>();
+        foreach (var entry in response.MethodResponses)
+        {
+            var respCallId = entry[2].GetString() ?? "";
+            var respMethod = entry[0].GetString() ?? "";
+            responseMap[respCallId] = (respMethod, entry[1]);
+        }
+
+        var changes = GetValidatedResult<ChangesResponse>(responseMap, changesCallId, "StorageNode/changes");
+        var created = GetValidatedResult<GetResponse<StorageNode>>(responseMap, createdCallId, "StorageNode/get");
+        var updated = GetValidatedResult<GetResponse<StorageNode>>(responseMap, updatedCallId, "StorageNode/get");
+
+        return (changes, created.List, updated.List);
+    }
+
+    private static T GetValidatedResult<T>(
+        Dictionary<string, (string method, JsonElement args)> responseMap,
+        string callId, string expectedMethod)
+    {
+        if (!responseMap.TryGetValue(callId, out var resp))
+            throw new InvalidOperationException($"No response for call ID {callId}");
+        if (resp.method == "error")
+            throw new InvalidOperationException($"JMAP error: {resp.args}");
+        if (resp.method != expectedMethod)
+            throw new InvalidOperationException(
+                $"JMAP method mismatch: expected {expectedMethod}, got {resp.method}");
+        return resp.args.Deserialize<T>(JmapSerializerOptions.Default)
+            ?? throw new InvalidOperationException($"Failed to deserialize {expectedMethod} response");
+    }
+
     public async Task<string> GetStateAsync(CancellationToken ct = default)
     {
         var result = await CallAsync<GetResponse<StorageNode>>(
