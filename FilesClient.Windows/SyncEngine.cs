@@ -821,6 +821,10 @@ public class SyncEngine : IDisposable
                 if ((attrs & dehydratedFlag) != 0)
                     continue; // Already dehydrated
 
+                // Clear the PINNED attribute before dehydrating. When the user
+                // unpins a directory, Windows propagates UNPINNED to children
+                // asynchronously — we may get here before that finishes.
+                ClearPinState(filePath);
                 DehydratePlaceholder(filePath);
                 Console.WriteLine($"Dehydrated: {Path.GetFileName(filePath)}");
                 count++;
@@ -878,6 +882,18 @@ public class SyncEngine : IDisposable
             CancelPinnedDirectory(subDir);
             CollectFilesForDehydration(subDir, result);
         }
+    }
+
+    private static unsafe void ClearPinState(string filePath)
+    {
+        using var safeHandle = OpenWithRetry(filePath);
+        var handle = new global::Windows.Win32.Foundation.HANDLE(safeHandle.DangerousGetHandle());
+        PInvoke.CfSetPinState(
+            handle,
+            CF_PIN_STATE.CF_PIN_STATE_UNSPECIFIED,
+            CF_SET_PIN_FLAGS.CF_SET_PIN_FLAG_NONE,
+            null    // synchronous
+        ).ThrowOnFailure();
     }
 
     private static unsafe void DehydratePlaceholder(string filePath)
