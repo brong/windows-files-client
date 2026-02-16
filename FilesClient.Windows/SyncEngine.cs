@@ -35,6 +35,12 @@ public class SyncEngine : IDisposable
     public string SyncRootPath => _syncRootPath;
 
     public event Action<SyncStatus>? StatusChanged;
+    public event Action<string?>? StatusDetailChanged;
+
+    private readonly ConcurrentDictionary<long, string> _activeDownloads = new();
+    private readonly SemaphoreSlim _uploadLock = new(1, 1);
+    private string? _uploadDetail;
+    private string? _downloadDetail;
 
     /// <summary>
     /// Unregister a previous sync root for the given account and delete all
@@ -64,6 +70,39 @@ public class SyncEngine : IDisposable
     public void ReportConnectivityLost() => ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_CONNECTIVITY_LOST);
     public void ReportConnectivityRestored() => ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_IDLE);
 
+    private void OnDownloadStarted(long transferKey, string fileName)
+    {
+        _activeDownloads[transferKey] = fileName;
+        var count = _activeDownloads.Count;
+        _downloadDetail = count > 1
+            ? $"Downloading {fileName} (and {count - 1} more)"
+            : $"Downloading {fileName}";
+        ReportTransferDetail();
+    }
+
+    private void OnDownloadCompleted(long transferKey)
+    {
+        _activeDownloads.TryRemove(transferKey, out _);
+        if (_activeDownloads.IsEmpty)
+        {
+            _downloadDetail = null;
+        }
+        else
+        {
+            var first = _activeDownloads.First();
+            var count = _activeDownloads.Count;
+            _downloadDetail = count > 1
+                ? $"Downloading {first.Value} (and {count - 1} more)"
+                : $"Downloading {first.Value}";
+        }
+        ReportTransferDetail();
+    }
+
+    private void ReportTransferDetail()
+    {
+        StatusDetailChanged?.Invoke(_downloadDetail ?? _uploadDetail);
+    }
+
     public SyncEngine(string syncRootPath, IJmapClient jmapClient)
     {
         _syncRootPath = syncRootPath;
@@ -74,6 +113,8 @@ public class SyncEngine : IDisposable
         _syncCallbacks.OnDeleteRequested = HandleDeleteRequestAsync;
         _syncCallbacks.OnRenameRequested = HandleRenameRequestAsync;
         _syncCallbacks.OnDehydrateRequested = HandleDehydrateRequestAsync;
+        _syncCallbacks.OnDownloadStarted += OnDownloadStarted;
+        _syncCallbacks.OnDownloadCompleted += OnDownloadCompleted;
         _syncCallbacks.OnDirectoryPopulated += OnDirectoryPopulated;
         _fileChangeWatcher = new FileChangeWatcher(syncRootPath);
         _fileChangeWatcher.OnChanges += OnLocalFileChanges;
@@ -332,31 +373,51 @@ public class SyncEngine : IDisposable
 
     private void OnLocalFileChanges(FileChangeWatcher.FileChange[] changes)
     {
-        // Process uploads on a background thread (fire-and-forget from the timer callback)
+        // Process uploads on a background thread (fire-and-forget from the timer callback).
+        // The semaphore serializes batches so only one runs at a time, preventing
+        // unbounded concurrent HTTP connections to the server.
         _ = Task.Run(async () =>
         {
-            ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_POPULATE_CONTENT);
-
-            // Sort: directories first (shallowest first), then files — ensures parent
-            // directories are created on the server before their children are uploaded.
-            var sorted = changes
-                .OrderBy(c => Directory.Exists(c.FullPath) ? 0 : 1)
-                .ThenBy(c => c.FullPath.Count(ch => ch == Path.DirectorySeparatorChar))
-                .ToArray();
-
-            foreach (var change in sorted)
+            await _uploadLock.WaitAsync();
+            try
             {
-                try
-                {
-                    await ProcessLocalChangeAsync(change);
-                }
-                catch (Exception ex)
-                {
-                    Console.Error.WriteLine($"Upload error for {change.FullPath}: {ex.Message}");
-                }
-            }
+                ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_POPULATE_CONTENT);
 
-            ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_IDLE);
+                // Sort: directories first (shallowest first), then files — ensures parent
+                // directories are created on the server before their children are uploaded.
+                var sorted = changes
+                    .OrderBy(c => Directory.Exists(c.FullPath) ? 0 : 1)
+                    .ThenBy(c => c.FullPath.Count(ch => ch == Path.DirectorySeparatorChar))
+                    .ToArray();
+
+                for (int i = 0; i < sorted.Length; i++)
+                {
+                    var change = sorted[i];
+                    var uploadFileName = Path.GetFileName(change.FullPath);
+                    int remaining = sorted.Length - i - 1;
+                    _uploadDetail = remaining > 0
+                        ? $"Uploading {uploadFileName} (and {remaining} more)"
+                        : $"Uploading {uploadFileName}";
+                    ReportTransferDetail();
+
+                    try
+                    {
+                        await ProcessLocalChangeAsync(change);
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.Error.WriteLine($"Upload error for {change.FullPath}: {ex.Message}");
+                    }
+                }
+
+                _uploadDetail = null;
+                ReportTransferDetail();
+                ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_IDLE);
+            }
+            finally
+            {
+                _uploadLock.Release();
+            }
         });
     }
 
@@ -1038,6 +1099,7 @@ public class SyncEngine : IDisposable
     {
         ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_DISCONNECTED);
         _fileChangeWatcher.Dispose();
+        _uploadLock.Dispose();
         _syncRoot.Dispose();
     }
 }

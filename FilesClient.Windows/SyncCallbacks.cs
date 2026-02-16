@@ -54,6 +54,9 @@ internal class SyncCallbacks
     /// </summary>
     public Func<string?, string, Task<bool>>? OnDehydrateRequested;
 
+    public event Action<long, string>? OnDownloadStarted;   // transferKey, fileName
+    public event Action<long>? OnDownloadCompleted;          // transferKey
+
     public record DirectoryPopulatedInfo(string DirectoryPath);
     public event Action<DirectoryPopulatedInfo>? OnDirectoryPopulated;
 
@@ -167,6 +170,9 @@ internal class SyncCallbacks
         var cts = new CancellationTokenSource();
         _inFlightFetches[transferKey] = cts;
 
+        var fileName = Path.GetFileName(callbackInfo->NormalizedPath.ToString());
+        OnDownloadStarted?.Invoke(transferKey, fileName);
+
         try
         {
             var fetchParams = callbackParameters->Anonymous.FetchData;
@@ -212,6 +218,7 @@ internal class SyncCallbacks
         {
             _inFlightFetches.TryRemove(transferKey, out _);
             cts.Dispose();
+            OnDownloadCompleted?.Invoke(transferKey);
         }
     }
 

@@ -20,6 +20,8 @@ sealed class TrayIcon : IDisposable
     private SynchronizationContext? _syncContext;
     private Icon? _baseIcon;
     private IntPtr _currentHIcon;
+    private SyncStatus _lastStatus;
+    private string? _lastDetail;
     private bool _disposed;
 
     public TrayIcon(CancellationTokenSource cts, string? iconPath, string syncRootPath, string username)
@@ -47,19 +49,42 @@ sealed class TrayIcon : IDisposable
         _syncContext?.Post(_ =>
         {
             if (_notifyIcon == null) return;
-
-            var (color, tooltip) = status switch
-            {
-                SyncStatus.Idle => (Color.LimeGreen, $"{_username} - Up to date"),
-                SyncStatus.Syncing => (Color.DodgerBlue, $"{_username} - Syncing..."),
-                SyncStatus.Error => (Color.Red, $"{_username} - Error"),
-                SyncStatus.Disconnected => (Color.Gray, $"{_username} - Connection lost"),
-                _ => (Color.Gray, _username),
-            };
-
-            _notifyIcon.Text = tooltip;
-            SetIconWithDot(color);
+            _lastStatus = status;
+            RefreshTooltip();
         }, null);
+    }
+
+    public void UpdateStatusDetail(string? detail)
+    {
+        _syncContext?.Post(_ =>
+        {
+            if (_notifyIcon == null) return;
+            _lastDetail = detail;
+            RefreshTooltip();
+        }, null);
+    }
+
+    private void RefreshTooltip()
+    {
+        var (color, defaultTooltip) = _lastStatus switch
+        {
+            SyncStatus.Idle => (Color.LimeGreen, $"{_username} - Up to date"),
+            SyncStatus.Syncing => (Color.DodgerBlue, $"{_username} - Syncing..."),
+            SyncStatus.Error => (Color.Red, $"{_username} - Error"),
+            SyncStatus.Disconnected => (Color.Gray, $"{_username} - Connection lost"),
+            _ => (Color.Gray, _username),
+        };
+
+        var tooltip = _lastDetail != null
+            ? $"{_username} - {_lastDetail}"
+            : defaultTooltip;
+
+        // NotifyIcon.Text has a 127-character limit
+        if (tooltip.Length > 127)
+            tooltip = tooltip.Substring(0, 127);
+
+        _notifyIcon!.Text = tooltip;
+        SetIconWithDot(color);
     }
 
     private void RunMessageLoop()

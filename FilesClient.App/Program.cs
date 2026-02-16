@@ -125,6 +125,7 @@ class Program
             // 1. Set up sync engine (register + connect callbacks)
             using var engine = new SyncEngine(syncRootPath, jmapClient);
             engine.StatusChanged += trayIcon.UpdateStatus;
+            engine.StatusDetailChanged += trayIcon.UpdateStatusDetail;
             Console.WriteLine("Registering sync root...");
             await engine.RegisterAndConnectAsync(displayName, jmapClient.AccountId, iconPath);
 
