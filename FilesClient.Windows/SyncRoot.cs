@@ -128,4 +128,37 @@ internal class SyncRoot : IDisposable
         Disconnect();
         Unregister();
     }
+
+    /// <summary>
+    /// Unregister the sync root for the given account and delete all local files.
+    /// This removes cfapi tracking first so that placeholder files can be deleted
+    /// without error 0x8007016A ("cloud provider is not running").
+    /// </summary>
+    public static void Clean(string syncRootPath, string accountId)
+    {
+        var userSid = WindowsIdentity.GetCurrent().User?.Value ?? "S-1-0-0";
+        var syncRootId = $"{ProviderName}!{userSid}!{accountId}";
+
+        // Unregister the sync root so the cloud filter driver releases the files
+        try
+        {
+            StorageProviderSyncRootManager.Unregister(syncRootId);
+            Console.WriteLine($"Unregistered sync root: {syncRootId}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Sync root not registered (or already cleaned): {ex.Message}");
+        }
+
+        // Delete all local files in the sync root directory
+        if (Directory.Exists(syncRootPath))
+        {
+            Directory.Delete(syncRootPath, recursive: true);
+            Console.WriteLine($"Deleted sync root directory: {syncRootPath}");
+        }
+        else
+        {
+            Console.WriteLine($"Sync root directory does not exist: {syncRootPath}");
+        }
+    }
 }

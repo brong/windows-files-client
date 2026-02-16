@@ -26,6 +26,13 @@ public class SyncEngine : IDisposable
 
     public string SyncRootPath => _syncRootPath;
 
+    /// <summary>
+    /// Unregister a previous sync root for the given account and delete all
+    /// local files.  Call before creating a SyncEngine instance to start fresh.
+    /// </summary>
+    public static void Clean(string syncRootPath, string accountId)
+        => SyncRoot.Clean(syncRootPath, accountId);
+
     private void ReportStatus(CF_SYNC_PROVIDER_STATUS status)
     {
         _syncRoot.UpdateProviderStatus(status);

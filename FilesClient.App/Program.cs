@@ -15,6 +15,7 @@ class Program
         string? syncRootPath = null;
         bool debug = false;
         bool stub = false;
+        bool clean = false;
 
         for (int i = 0; i < args.Length; i++)
         {
@@ -35,6 +36,9 @@ class Program
                 case "--stub":
                     stub = true;
                     break;
+                case "--clean":
+                    clean = true;
+                    break;
                 case "--token" or "--session-url" or "--sync-root":
                     Console.Error.WriteLine($"Error: {args[i]} requires a value");
                     return 1;
@@ -47,6 +51,7 @@ class Program
                     Console.Error.WriteLine("  --sync-root <path>      Local sync folder path");
                     Console.Error.WriteLine("  --debug                 Log all JMAP HTTP traffic to stderr");
                     Console.Error.WriteLine("  --stub                  Use stub JMAP client (single hello.txt file)");
+                    Console.Error.WriteLine("  --clean                 Unregister sync root and delete local files before syncing");
                     return 1;
             }
         }
@@ -99,6 +104,13 @@ class Program
 
         Console.WriteLine($"Sync root: {syncRootPath}");
         Console.WriteLine();
+
+        if (clean)
+        {
+            Console.WriteLine("Cleaning previous sync state...");
+            SyncEngine.Clean(syncRootPath, jmapClient.AccountId);
+            Console.WriteLine();
+        }
 
         // Download Fastmail favicon for use as sync root icon
         var iconPath = await DownloadIconAsync(cts.Token);
