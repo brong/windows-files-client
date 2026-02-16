@@ -10,23 +10,6 @@ public class JmapResponse
 
     [JsonPropertyName("sessionState")]
     public string SessionState { get; set; } = "";
-
-    public (string method, JsonElement args, string callId) GetResponse(int index)
-    {
-        var entry = MethodResponses[index];
-        return (
-            entry[0].GetString() ?? "",
-            entry[1],
-            entry[2].GetString() ?? ""
-        );
-    }
-
-    public T GetArgs<T>(int index)
-    {
-        var (_, args, _) = GetResponse(index);
-        return args.Deserialize<T>(JmapSerializerOptions.Default)
-            ?? throw new InvalidOperationException($"Failed to deserialize response at index {index}");
-    }
 }
 
 public class GetResponse<T>

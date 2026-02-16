@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using FilesClient.Jmap.Auth;
@@ -9,6 +10,16 @@ public class JmapClient : IJmapClient
 {
     private readonly HttpClient _http;
     private JmapSession? _session;
+    private int _nextCallId;
+    private readonly ConcurrentQueue<PendingCall> _pendingCalls = new();
+    private readonly SemaphoreSlim _batchLock = new(1, 1);
+
+    private sealed record PendingCall(
+        string[] Capabilities,
+        string Method,
+        object Args,
+        string CallId,
+        TaskCompletionSource<JsonElement> Tcs);
 
     // Fastmail uses "https://www.fastmailusercontent.com/jmap/api/" but we
     // discover it via the session resource.
@@ -61,76 +72,132 @@ public class JmapClient : IJmapClient
             ?? throw new InvalidOperationException("Failed to parse JMAP session");
     }
 
-    public async Task<JmapResponse> CallAsync(JmapRequest request, CancellationToken ct = default)
+    private async Task<JsonElement> CallAsync(string[] capabilities, string method, object args, CancellationToken ct)
     {
-        var json = JsonSerializer.Serialize(request, JmapSerializerOptions.Default);
-        var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
-        var response = await _http.PostAsync(Session.ApiUrl, content, ct);
-        response.EnsureSuccessStatusCode();
-        var responseJson = await response.Content.ReadAsStringAsync(ct);
-        return JsonSerializer.Deserialize<JmapResponse>(responseJson, JmapSerializerOptions.Default)
-            ?? throw new InvalidOperationException("Failed to parse JMAP response");
+        var callId = "c" + Interlocked.Increment(ref _nextCallId);
+        var tcs = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var ctr = ct.Register(() => tcs.TrySetCanceled(ct));
+
+        _pendingCalls.Enqueue(new PendingCall(capabilities, method, args, callId, tcs));
+
+        await _batchLock.WaitAsync(ct);
+        try
+        {
+            if (!tcs.Task.IsCompleted)
+            {
+                // We are the batch leader — drain the queue
+                var batch = new List<PendingCall>();
+                while (_pendingCalls.TryDequeue(out var pending))
+                {
+                    if (!pending.Tcs.Task.IsCompleted)
+                        batch.Add(pending);
+                }
+                if (batch.Count > 0)
+                    await ExecuteBatchAsync(batch);
+            }
+        }
+        finally
+        {
+            _batchLock.Release();
+        }
+
+        ctr.Dispose();
+        return await tcs.Task;
+    }
+
+    private async Task<T> CallAsync<T>(string[] capabilities, string method, object args, CancellationToken ct)
+    {
+        var result = await CallAsync(capabilities, method, args, ct);
+        return result.Deserialize<T>(JmapSerializerOptions.Default)
+            ?? throw new InvalidOperationException($"Failed to deserialize {method} response");
+    }
+
+    private async Task ExecuteBatchAsync(List<PendingCall> batch)
+    {
+        try
+        {
+            // Merge capabilities from all batch items
+            var allCapabilities = new HashSet<string>();
+            var calls = new (string method, object args, string callId)[batch.Count];
+            for (int i = 0; i < batch.Count; i++)
+            {
+                foreach (var cap in batch[i].Capabilities)
+                    allCapabilities.Add(cap);
+                calls[i] = (batch[i].Method, batch[i].Args, batch[i].CallId);
+            }
+
+            var request = JmapRequest.Create(allCapabilities.ToArray(), calls);
+            var json = JsonSerializer.Serialize(request, JmapSerializerOptions.Default);
+            var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+            var httpResponse = await _http.PostAsync(Session.ApiUrl, content);
+            httpResponse.EnsureSuccessStatusCode();
+            var responseJson = await httpResponse.Content.ReadAsStringAsync();
+            var response = JsonSerializer.Deserialize<JmapResponse>(responseJson, JmapSerializerOptions.Default)
+                ?? throw new InvalidOperationException("Failed to parse JMAP response");
+
+            // Build lookup by call ID
+            var responseMap = new Dictionary<string, (string method, JsonElement args)>();
+            foreach (var entry in response.MethodResponses)
+            {
+                var respCallId = entry[2].GetString() ?? "";
+                var respMethod = entry[0].GetString() ?? "";
+                responseMap[respCallId] = (respMethod, entry[1]);
+            }
+
+            // Route responses to pending calls
+            foreach (var pending in batch)
+            {
+                if (!responseMap.TryGetValue(pending.CallId, out var resp))
+                {
+                    pending.Tcs.TrySetException(
+                        new InvalidOperationException($"No response for call ID {pending.CallId}"));
+                }
+                else if (resp.method == "error")
+                {
+                    pending.Tcs.TrySetException(
+                        new InvalidOperationException($"JMAP error: {resp.args}"));
+                }
+                else if (resp.method != pending.Method)
+                {
+                    pending.Tcs.TrySetException(
+                        new InvalidOperationException(
+                            $"JMAP method mismatch: expected {pending.Method}, got {resp.method}"));
+                }
+                else
+                {
+                    pending.Tcs.TrySetResult(resp.args);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            // If the HTTP call itself fails, set exception on all pending calls
+            foreach (var pending in batch)
+                pending.Tcs.TrySetException(ex);
+        }
     }
 
     public async Task<StorageNode[]> GetStorageNodesAsync(string[] ids, CancellationToken ct = default)
     {
-        var request = JmapRequest.Create(StorageNodeUsing,
-            ("StorageNode/get", new { accountId = AccountId, ids }, "g0"));
-
-        var response = await CallAsync(request, ct);
-        var (method, _, _) = response.GetResponse(0);
-
-        if (method == "error")
-        {
-            var error = response.GetArgs<JsonElement>(0);
-            throw new InvalidOperationException($"JMAP error: {error}");
-        }
-
-        var getResponse = response.GetArgs<GetResponse<StorageNode>>(0);
-        return getResponse.List;
+        var result = await CallAsync<GetResponse<StorageNode>>(
+            StorageNodeUsing, "StorageNode/get", new { accountId = AccountId, ids }, ct);
+        return result.List;
     }
 
     public async Task<string[]> QueryChildrenAsync(string parentId, CancellationToken ct = default)
     {
-        var request = JmapRequest.Create(StorageNodeUsing,
-            ("StorageNode/query", new
+        var result = await CallAsync<QueryResponse>(
+            StorageNodeUsing, "StorageNode/query", new
             {
                 accountId = AccountId,
                 filter = new { parentId },
                 sort = new[] { new { property = "name", isAscending = true } },
-            }, "q0"));
-
-        var response = await CallAsync(request, ct);
-        var (method, _, _) = response.GetResponse(0);
-
-        if (method == "error")
-        {
-            var error = response.GetArgs<JsonElement>(0);
-            throw new InvalidOperationException($"JMAP error: {error}");
-        }
-
-        return response.GetArgs<QueryResponse>(0).Ids;
+            }, ct);
+        return result.Ids;
     }
 
     public async Task<StorageNode[]> GetChildrenAsync(string parentId, CancellationToken ct = default)
     {
-        // Query + Get in a single round-trip using back-references
-        var request = JmapRequest.Create(StorageNodeUsing,
-            ("StorageNode/query", new
-            {
-                accountId = AccountId,
-                filter = new { parentId },
-                sort = new[] { new { property = "name", isAscending = true } },
-            }, "q0"),
-            ("StorageNode/get", new
-            {
-                accountId = AccountId,
-                ids = (object?)null, // will be replaced by back-reference
-                __back_ref = new { ids = new { resultOf = "q0", name = "StorageNode/query", path = "/ids" } },
-            }, "g0"));
-
-        // Actually, JMAP back-references use a special "#" syntax.
-        // Let's use two separate calls for clarity in the PoC.
         var ids = await QueryChildrenAsync(parentId, ct);
         if (ids.Length == 0)
             return [];
@@ -139,32 +206,15 @@ public class JmapClient : IJmapClient
 
     public async Task<ChangesResponse> GetChangesAsync(string sinceState, CancellationToken ct = default)
     {
-        var request = JmapRequest.Create(StorageNodeUsing,
-            ("StorageNode/changes", new
-            {
-                accountId = AccountId,
-                sinceState,
-            }, "c0"));
-
-        var response = await CallAsync(request, ct);
-        var (method, _, _) = response.GetResponse(0);
-
-        if (method == "error")
-        {
-            var error = response.GetArgs<JsonElement>(0);
-            throw new InvalidOperationException($"JMAP error: {error}");
-        }
-
-        return response.GetArgs<ChangesResponse>(0);
+        return await CallAsync<ChangesResponse>(
+            StorageNodeUsing, "StorageNode/changes", new { accountId = AccountId, sinceState }, ct);
     }
 
     public async Task<string> GetStateAsync(CancellationToken ct = default)
     {
-        var request = JmapRequest.Create(StorageNodeUsing,
-            ("StorageNode/get", new { accountId = AccountId, ids = new[] { "root" } }, "s0"));
-
-        var response = await CallAsync(request, ct);
-        return response.GetArgs<GetResponse<StorageNode>>(0).State;
+        var result = await CallAsync<GetResponse<StorageNode>>(
+            StorageNodeUsing, "StorageNode/get", new { accountId = AccountId, ids = new[] { "root" } }, ct);
+        return result.State;
     }
 
     public async Task<Stream> DownloadBlobAsync(string blobId, string? type = null, string? name = null, CancellationToken ct = default)
@@ -204,26 +254,16 @@ public class JmapClient : IJmapClient
 
     public async Task<StorageNode> CreateStorageNodeAsync(string parentId, string? blobId, string name, string? type = null, CancellationToken ct = default)
     {
-        var request = JmapRequest.Create(StorageNodeUsing,
-            ("StorageNode/set", new
+        var setResponse = await CallAsync<SetResponse>(
+            StorageNodeUsing, "StorageNode/set", new
             {
                 accountId = AccountId,
                 create = new Dictionary<string, object>
                 {
                     ["c0"] = new { parentId, blobId, name, type },
                 },
-            }, "s0"));
+            }, ct);
 
-        var response = await CallAsync(request, ct);
-        var (method, _, _) = response.GetResponse(0);
-
-        if (method == "error")
-        {
-            var error = response.GetArgs<JsonElement>(0);
-            throw new InvalidOperationException($"JMAP error: {error}");
-        }
-
-        var setResponse = response.GetArgs<SetResponse>(0);
         if (setResponse.NotCreated != null && setResponse.NotCreated.TryGetValue("c0", out var setError))
             throw new InvalidOperationException($"StorageNode/set create failed: {setError.Type} — {setError.Description}");
 
@@ -237,8 +277,8 @@ public class JmapClient : IJmapClient
     {
         // Content is immutable — destroy old node and create replacement atomically.
         // Fastmail processes destroys before creates, so no name collision.
-        var request = JmapRequest.Create(StorageNodeUsing,
-            ("StorageNode/set", new
+        var setResponse = await CallAsync<SetResponse>(
+            StorageNodeUsing, "StorageNode/set", new
             {
                 accountId = AccountId,
                 destroy = new[] { nodeId },
@@ -246,18 +286,8 @@ public class JmapClient : IJmapClient
                 {
                     ["c0"] = new { parentId, blobId, name, type },
                 },
-            }, "s0"));
+            }, ct);
 
-        var response = await CallAsync(request, ct);
-        var (method, _, _) = response.GetResponse(0);
-
-        if (method == "error")
-        {
-            var error = response.GetArgs<JsonElement>(0);
-            throw new InvalidOperationException($"JMAP error: {error}");
-        }
-
-        var setResponse = response.GetArgs<SetResponse>(0);
         if (setResponse.NotDestroyed != null && setResponse.NotDestroyed.TryGetValue(nodeId, out var destroyError))
             throw new InvalidOperationException($"StorageNode/set destroy failed: {destroyError.Type} — {destroyError.Description}");
         if (setResponse.NotCreated != null && setResponse.NotCreated.TryGetValue("c0", out var createError))
@@ -271,49 +301,29 @@ public class JmapClient : IJmapClient
 
     public async Task MoveStorageNodeAsync(string nodeId, string parentId, string newName, CancellationToken ct = default)
     {
-        var request = JmapRequest.Create(StorageNodeUsing,
-            ("StorageNode/set", new
+        var setResponse = await CallAsync<SetResponse>(
+            StorageNodeUsing, "StorageNode/set", new
             {
                 accountId = AccountId,
                 update = new Dictionary<string, object>
                 {
                     [nodeId] = new { parentId, name = newName },
                 },
-            }, "s0"));
+            }, ct);
 
-        var response = await CallAsync(request, ct);
-        var (method, _, _) = response.GetResponse(0);
-
-        if (method == "error")
-        {
-            var error = response.GetArgs<JsonElement>(0);
-            throw new InvalidOperationException($"JMAP error: {error}");
-        }
-
-        var setResponse = response.GetArgs<SetResponse>(0);
         if (setResponse.NotUpdated != null && setResponse.NotUpdated.TryGetValue(nodeId, out var setError))
             throw new InvalidOperationException($"StorageNode/set move failed: {setError.Type} — {setError.Description}");
     }
 
     public async Task DestroyStorageNodeAsync(string nodeId, CancellationToken ct = default)
     {
-        var request = JmapRequest.Create(StorageNodeUsing,
-            ("StorageNode/set", new
+        var setResponse = await CallAsync<SetResponse>(
+            StorageNodeUsing, "StorageNode/set", new
             {
                 accountId = AccountId,
                 destroy = new[] { nodeId },
-            }, "d0"));
+            }, ct);
 
-        var response = await CallAsync(request, ct);
-        var (method, _, _) = response.GetResponse(0);
-
-        if (method == "error")
-        {
-            var error = response.GetArgs<JsonElement>(0);
-            throw new InvalidOperationException($"JMAP error: {error}");
-        }
-
-        var setResponse = response.GetArgs<SetResponse>(0);
         if (setResponse.NotDestroyed != null && setResponse.NotDestroyed.TryGetValue(nodeId, out var setError))
             throw new InvalidOperationException($"StorageNode/set destroy failed: {setError.Type} — {setError.Description}");
     }
@@ -401,17 +411,7 @@ public class JmapClient : IJmapClient
         if (length.HasValue)
             blobArgs["length"] = length.Value;
 
-        var request = JmapRequest.Create(BlobUsing, ("Blob/get", blobArgs, "b0"));
-        var response = await CallAsync(request, ct);
-        var (method, _, _) = response.GetResponse(0);
-
-        if (method == "error")
-        {
-            var error = response.GetArgs<JsonElement>(0);
-            throw new InvalidOperationException($"JMAP error: {error}");
-        }
-
-        var blobResponse = response.GetArgs<BlobGetResponse>(0);
+        var blobResponse = await CallAsync<BlobGetResponse>(BlobUsing, "Blob/get", blobArgs, ct);
         if (blobResponse.NotFound.Length > 0)
             throw new FileNotFoundException($"Blob not found: {blobId}");
         if (blobResponse.List.Length == 0)
