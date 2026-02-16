@@ -344,6 +344,8 @@ public class SyncEngine : IDisposable
         // Process uploads on a background thread (fire-and-forget from the timer callback)
         _ = Task.Run(async () =>
         {
+            ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_POPULATE_CONTENT);
+
             // Sort: directories first (shallowest first), then files — ensures parent
             // directories are created on the server before their children are uploaded.
             var sorted = changes
@@ -362,6 +364,8 @@ public class SyncEngine : IDisposable
                     Console.Error.WriteLine($"Upload error for {change.FullPath}: {ex.Message}");
                 }
             }
+
+            ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_IDLE);
         });
     }
 
