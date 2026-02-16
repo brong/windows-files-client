@@ -82,11 +82,9 @@ Opens files with proper opportunistic locks, preventing conflicts during sync op
 
 Feature detection for version-specific capabilities (integration number check).
 
-### 17. Progressive hydration policy
+### ~~17. Progressive hydration policy~~ ✓ Done
 
-Switch from `Full` to `Progressive` so large file opens complete as soon as the needed byte range arrives, with background download continuing.
-
-**Requires spec support:** see [Spec Dependencies](#spec-dependencies) below.
+Implemented: switched from `Full` to `Progressive` hydration policy with HTTP Range request support. `FetchDataCallback` now attempts byte-range downloads via `DownloadBlobRangeAsync` and falls back to full downloads if the server returns 200 instead of 206 or on error (session-level fallback).
 
 ### 18. Per-operation sync status
 
@@ -134,9 +132,9 @@ The "View online" URI handler (`IStorageProviderUriSource`) and "Open in browser
 }
 ```
 
-### Range downloads (blocks: Progressive hydration)
+### ~~Range downloads~~ ✓ Resolved (Progressive hydration implemented)
 
-Switching from `Full` to `Progressive` hydration policy requires the server to support HTTP Range requests on the blob download endpoint — returning `206 Partial Content` for byte-range requests. This isn't a JMAP method per se, but the spec should mandate Range header support on the download URL.
+Client-side range request support is implemented with automatic fallback. The spec should still mandate Range header support on the download URL for optimal performance, but it's no longer blocking.
 
 ### Content hash (improves: conflict detection)
 
@@ -153,7 +151,7 @@ Explorer can display storage quota in the nav pane and folder properties. The sp
 | Thumbnail downloads | High | Thumbnail provider (#5) |
 | Web URL per node | High | URI Source (#14), Context menus (#6) |
 | RecycleBin URL | Medium | RecycleBinUri (#8) |
-| Range downloads | Medium | Progressive hydration (#17) |
+| ~~Range downloads~~ | ~~Medium~~ | ~~Progressive hydration (#17)~~ ✓ |
 | Content hash | Medium | — (improves conflict detection) |
 | Quota | Low | — (improves Explorer display) |
 
