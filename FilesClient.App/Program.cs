@@ -115,7 +115,7 @@ class Program
         // Download Fastmail favicon for use as sync root icon
         var iconPath = await DownloadIconAsync(cts.Token);
 
-        using var trayIcon = new TrayIcon(cts, iconPath, syncRootPath);
+        using var trayIcon = new TrayIcon(cts, iconPath, syncRootPath, jmapClient.Username);
         trayIcon.Start();
 
         using var _ = jmapClient;

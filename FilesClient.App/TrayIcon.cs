@@ -13,6 +13,7 @@ sealed class TrayIcon : IDisposable
     private readonly CancellationTokenSource _cts;
     private readonly string? _iconPath;
     private readonly string _syncRootPath;
+    private readonly string _username;
     private readonly ManualResetEventSlim _ready = new();
     private Thread? _thread;
     private NotifyIcon? _notifyIcon;
@@ -21,11 +22,12 @@ sealed class TrayIcon : IDisposable
     private IntPtr _currentHIcon;
     private bool _disposed;
 
-    public TrayIcon(CancellationTokenSource cts, string? iconPath, string syncRootPath)
+    public TrayIcon(CancellationTokenSource cts, string? iconPath, string syncRootPath, string username)
     {
         _cts = cts;
         _iconPath = iconPath;
         _syncRootPath = syncRootPath;
+        _username = username;
     }
 
     public void Start()
@@ -48,11 +50,11 @@ sealed class TrayIcon : IDisposable
 
             var (color, tooltip) = status switch
             {
-                SyncStatus.Idle => (Color.LimeGreen, "Fastmail Files - Up to date"),
-                SyncStatus.Syncing => (Color.DodgerBlue, "Fastmail Files - Syncing..."),
-                SyncStatus.Error => (Color.Red, "Fastmail Files - Error"),
-                SyncStatus.Disconnected => (Color.Gray, "Fastmail Files - Connection lost"),
-                _ => (Color.Gray, "Fastmail Files"),
+                SyncStatus.Idle => (Color.LimeGreen, $"{_username} - Up to date"),
+                SyncStatus.Syncing => (Color.DodgerBlue, $"{_username} - Syncing..."),
+                SyncStatus.Error => (Color.Red, $"{_username} - Error"),
+                SyncStatus.Disconnected => (Color.Gray, $"{_username} - Connection lost"),
+                _ => (Color.Gray, _username),
             };
 
             _notifyIcon.Text = tooltip;
@@ -69,7 +71,7 @@ sealed class TrayIcon : IDisposable
         _notifyIcon = new NotifyIcon
         {
             Visible = true,
-            Text = "Fastmail Files - Starting...",
+            Text = $"{_username} - Starting...",
             ContextMenuStrip = BuildContextMenu(),
         };
 
