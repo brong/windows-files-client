@@ -126,14 +126,20 @@ class Program
             using var engine = new SyncEngine(syncRootPath, jmapClient);
             engine.StatusChanged += trayIcon.UpdateStatus;
             engine.StatusDetailChanged += trayIcon.UpdateStatusDetail;
-            Console.WriteLine("Registering sync root...");
-            await engine.RegisterAndConnectAsync(displayName, jmapClient.AccountId, iconPath);
 
-            // 2. Initial population
+            // 1a. Register sync root (but don't connect yet — no callbacks active)
+            Console.WriteLine("Registering sync root...");
+            await engine.RegisterAsync(displayName, jmapClient.AccountId, iconPath);
+
+            // 2. Create placeholders while disconnected so Explorer/indexer
+            //    can't trigger FETCH_DATA downloads during initial population.
             Console.WriteLine("Populating placeholders...");
             var state = await engine.PopulateAsync(cts.Token);
             Console.WriteLine($"Initial sync complete. State: {state}");
             Console.WriteLine();
+
+            // 1b. Now connect — enables callbacks for user-initiated reads
+            engine.Connect();
 
             // 3. Sync loop — EventSource push notifications with polling fallback
             Console.WriteLine("Watching for changes (Ctrl+C to stop)...");

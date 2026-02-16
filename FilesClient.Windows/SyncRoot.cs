@@ -85,7 +85,8 @@ internal class SyncRoot : IDisposable
             _syncRootPath,
             callbacks,
             null,
-            CF_CONNECT_FLAGS.CF_CONNECT_FLAG_NONE,
+            CF_CONNECT_FLAGS.CF_CONNECT_FLAG_REQUIRE_PROCESS_INFO
+                | CF_CONNECT_FLAGS.CF_CONNECT_FLAG_REQUIRE_FULL_FILE_PATH,
             &key).ThrowOnFailure();
 
         _connectionKey = key;
@@ -139,7 +140,7 @@ internal class SyncRoot : IDisposable
         var userSid = WindowsIdentity.GetCurrent().User?.Value ?? "S-1-0-0";
         var syncRootId = $"{ProviderName}!{userSid}!{accountId}";
 
-        // Unregister the sync root so the cloud filter driver releases the files
+        // 1. Unregister the sync root (WinRT layer)
         try
         {
             StorageProviderSyncRootManager.Unregister(syncRootId);
@@ -150,15 +151,109 @@ internal class SyncRoot : IDisposable
             Console.WriteLine($"Sync root not registered (or already cleaned): {ex.Message}");
         }
 
-        // Delete all local files in the sync root directory
+        // 2. Clean up NavPane / shell registry entries
+        NavPaneIntegration.CleanupStaleEntries(ProviderId);
+
+        // 3. Brief delay for the cloud filter driver to release handles after unregister
+        Thread.Sleep(1000);
+
+        // 4. Delete all local files in the sync root directory.
+        //    After unregistering, cloud placeholder files still have reparse points that
+        //    cause normal file operations to fail with ERROR_CLOUD_FILE_PROVIDER_NOT_RUNNING.
+        //    We open each file with FILE_FLAG_OPEN_REPARSE_POINT to bypass the cloud filter
+        //    driver, then delete via FILE_FLAG_DELETE_ON_CLOSE.
         if (Directory.Exists(syncRootPath))
         {
-            Directory.Delete(syncRootPath, recursive: true);
-            Console.WriteLine($"Deleted sync root directory: {syncRootPath}");
+            DeleteCloudFilesRecursive(syncRootPath);
+
+            // Verify deletion — if anything remains, retry after a longer delay
+            if (Directory.Exists(syncRootPath))
+            {
+                Console.WriteLine("  Some files remain, retrying after delay...");
+                Thread.Sleep(3000);
+                DeleteCloudFilesRecursive(syncRootPath);
+            }
+
+            if (Directory.Exists(syncRootPath))
+                Console.Error.WriteLine($"  WARNING: Could not fully delete {syncRootPath}");
+            else
+                Console.WriteLine($"Deleted sync root directory: {syncRootPath}");
         }
         else
         {
             Console.WriteLine($"Sync root directory does not exist: {syncRootPath}");
+        }
+    }
+
+    private const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
+    private const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
+    private const uint FILE_FLAG_DELETE_ON_CLOSE = 0x04000000;
+    private const uint DELETE_ACCESS = 0x00010000; // DELETE access right
+
+    /// <summary>
+    /// Recursively deletes a directory containing cloud file placeholders.
+    /// Uses CreateFileW with FILE_FLAG_OPEN_REPARSE_POINT to bypass the cloud filter
+    /// driver, then FILE_FLAG_DELETE_ON_CLOSE to delete the file when the handle closes.
+    /// </summary>
+    private static void DeleteCloudFilesRecursive(string path)
+    {
+        var files = Directory.EnumerateFiles(path).ToList();
+        var dirs = Directory.EnumerateDirectories(path).ToList();
+        Console.WriteLine($"  Deleting {files.Count} files and {dirs.Count} dirs in {Path.GetFileName(path)}/");
+
+        foreach (var file in files)
+            DeleteWithReparseBypass(file, isDirectory: false);
+
+        foreach (var dir in dirs)
+            DeleteCloudFilesRecursive(dir);
+
+        // Verify files are gone before trying to delete the directory
+        var remaining = Directory.EnumerateFileSystemEntries(path).ToList();
+        if (remaining.Count > 0)
+            Console.Error.WriteLine($"  {remaining.Count} items remain in {Path.GetFileName(path)}/: {string.Join(", ", remaining.Select(Path.GetFileName))}");
+
+        DeleteWithReparseBypass(path, isDirectory: true);
+    }
+
+    private static void DeleteWithReparseBypass(string path, bool isDirectory)
+    {
+        try
+        {
+            var flags = FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_DELETE_ON_CLOSE;
+            if (isDirectory)
+                flags |= FILE_FLAG_BACKUP_SEMANTICS;
+
+            using var handle = PInvoke.CreateFile(
+                path,
+                DELETE_ACCESS,
+                global::Windows.Win32.Storage.FileSystem.FILE_SHARE_MODE.FILE_SHARE_DELETE
+                    | global::Windows.Win32.Storage.FileSystem.FILE_SHARE_MODE.FILE_SHARE_READ
+                    | global::Windows.Win32.Storage.FileSystem.FILE_SHARE_MODE.FILE_SHARE_WRITE,
+                null,
+                global::Windows.Win32.Storage.FileSystem.FILE_CREATION_DISPOSITION.OPEN_EXISTING,
+                (global::Windows.Win32.Storage.FileSystem.FILE_FLAGS_AND_ATTRIBUTES)flags,
+                null);
+
+            if (handle.IsInvalid)
+            {
+                var err = Marshal.GetLastWin32Error();
+                Console.Error.WriteLine($"  Failed to open for delete (err={err}): {Path.GetFileName(path)}");
+            }
+            // File/directory is deleted when handle is disposed (DELETE_ON_CLOSE)
+            // Check if file still exists after handle disposal happens at end of using block
+        }
+        catch (Exception ex)
+        {
+            // Fall back to normal delete
+            try
+            {
+                if (isDirectory) Directory.Delete(path);
+                else File.Delete(path);
+            }
+            catch
+            {
+                Console.Error.WriteLine($"  Failed to delete {(isDirectory ? "directory " : "")}{path}: {ex.Message}");
+            }
         }
     }
 }

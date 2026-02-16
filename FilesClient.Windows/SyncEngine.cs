@@ -24,7 +24,13 @@ public class SyncEngine : IDisposable
     // Reverse mapping: StorageNode ID → local file path (needed for delete handling)
     private readonly ConcurrentDictionary<string, string> _nodeIdToPath = new();
     // Directories the user has pinned ("Always keep on this device")
-    private readonly ConcurrentDictionary<string, byte> _pinnedDirectories = new(StringComparer.OrdinalIgnoreCase);
+    // Value is a CancellationTokenSource used to cancel in-progress hydration when unpinned.
+    private readonly ConcurrentDictionary<string, CancellationTokenSource> _pinnedDirectories = new(StringComparer.OrdinalIgnoreCase);
+    // Directories currently being hydrated by HydrateDehydratedFiles — used to
+    // suppress duplicate hydration from OnDirectoryPopulated firing concurrently.
+    private readonly ConcurrentDictionary<string, byte> _hydratingDirectories = new(StringComparer.OrdinalIgnoreCase);
+    // Node IDs currently being dehydrated — FETCH_DATA for these is rejected
+    // to prevent Explorer/indexer from re-hydrating files during unpin.
     // Files recently uploaded — stores the LastWriteTimeUtc at upload time so we
     // can suppress the FileSystemWatcher echo that fires when
     // ConvertToPlaceholder / UpdatePlaceholderIdentity changes file attributes.
@@ -123,10 +129,13 @@ public class SyncEngine : IDisposable
         _fileChangeWatcher.OnFileUnpinned += OnFileUnpinned;
     }
 
-    public async Task RegisterAndConnectAsync(string displayName, string accountId, string? iconPath = null)
+    public async Task RegisterAsync(string displayName, string accountId, string? iconPath = null)
     {
         await _syncRoot.RegisterAsync(displayName, "1.0", accountId, iconPath);
+    }
 
+    public void Connect()
+    {
         var (registrations, delegates) = _syncCallbacks.CreateCallbackRegistrations();
         _syncRoot.Connect(registrations, delegates);
 
@@ -191,7 +200,7 @@ public class SyncEngine : IDisposable
             {
                 var attrs = File.GetAttributes(localParentPath);
                 if ((attrs & pinnedFlag) != 0)
-                    _pinnedDirectories.TryAdd(localParentPath, 0);
+                    _pinnedDirectories.TryAdd(localParentPath, new CancellationTokenSource());
             }
             catch { }
         }
@@ -200,17 +209,23 @@ public class SyncEngine : IDisposable
             Console.WriteLine($"Found {_pinnedDirectories.Count} pinned directories, hydrating...");
             _ = Task.Run(() =>
             {
-                foreach (var dir in _pinnedDirectories.Keys)
+                foreach (var kvp in _pinnedDirectories)
                 {
                     try
                     {
-                        int count = HydrateDehydratedFiles(dir);
+                        int count = HydrateDehydratedFiles(kvp.Key, kvp.Value.Token);
                         if (count > 0)
-                            Console.WriteLine($"Hydrated {count} files in pinned directory: {dir}");
+                            Console.WriteLine($"Hydrated {count} files in pinned directory: {kvp.Key}");
+                        try { SetInSync(kvp.Key); }
+                        catch { /* directory might not be a placeholder */ }
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        Console.WriteLine($"Hydration cancelled for pinned directory: {kvp.Key}");
                     }
                     catch (Exception ex)
                     {
-                        Console.Error.WriteLine($"Pin hydration error for {dir}: {ex.Message}");
+                        Console.Error.WriteLine($"Pin hydration error for {kvp.Key}: {ex.Message}");
                     }
                 }
             });
@@ -626,16 +641,28 @@ public class SyncEngine : IDisposable
 
     private void OnDirectoryPopulated(SyncCallbacks.DirectoryPopulatedInfo info)
     {
+        // Skip if HydrateDehydratedFiles is already processing this directory
+        // (it recurses into subdirs, so the populated callback would duplicate work)
+        if (_hydratingDirectories.ContainsKey(info.DirectoryPath))
+            return;
+
         // If this directory or any ancestor is pinned, hydrate its children
-        if (IsUnderPinnedDirectory(info.DirectoryPath) || _pinnedDirectories.ContainsKey(info.DirectoryPath))
+        var cts = FindPinnedAncestorCts(info.DirectoryPath);
+        if (cts != null)
         {
             _ = Task.Run(() =>
             {
                 try
                 {
-                    int count = HydrateDehydratedFiles(info.DirectoryPath);
+                    int count = HydrateDehydratedFiles(info.DirectoryPath, cts.Token);
                     if (count > 0)
                         Console.WriteLine($"Hydrated {count} files after directory populated: {info.DirectoryPath}");
+                    try { SetInSync(info.DirectoryPath); }
+                    catch { /* directory might not be a placeholder */ }
+                }
+                catch (OperationCanceledException)
+                {
+                    Console.WriteLine($"Hydration cancelled for populated directory: {info.DirectoryPath}");
                 }
                 catch (Exception ex)
                 {
@@ -647,16 +674,23 @@ public class SyncEngine : IDisposable
 
     private void OnDirectoryPinned(string directoryPath)
     {
-        if (_pinnedDirectories.TryAdd(directoryPath, 0))
+        var cts = new CancellationTokenSource();
+        if (_pinnedDirectories.TryAdd(directoryPath, cts))
         {
             Console.WriteLine($"Directory pinned: {directoryPath}");
             _ = Task.Run(() =>
             {
                 try
                 {
-                    int count = HydrateDehydratedFiles(directoryPath);
+                    int count = HydrateDehydratedFiles(directoryPath, cts.Token);
                     if (count > 0)
                         Console.WriteLine($"Hydrated {count} files in {directoryPath}");
+                    try { SetInSync(directoryPath); }
+                    catch { /* directory might not be a placeholder */ }
+                }
+                catch (OperationCanceledException)
+                {
+                    Console.WriteLine($"Hydration cancelled for {directoryPath}");
                 }
                 catch (Exception ex)
                 {
@@ -664,10 +698,21 @@ public class SyncEngine : IDisposable
                 }
             });
         }
+        else
+        {
+            cts.Dispose();
+        }
     }
 
     private void OnFilePinned(string filePath)
     {
+        // If the file is inside a pinned directory, the directory's
+        // HydrateDehydratedFiles loop will handle it sequentially.
+        // Processing it here too causes concurrent CfHydratePlaceholder calls
+        // which starve the thread pool and slow everything down.
+        if (IsUnderPinnedDirectory(filePath))
+            return;
+
         _ = Task.Run(() =>
         {
             try
@@ -693,74 +738,205 @@ public class SyncEngine : IDisposable
         return Task.FromResult(true);
     }
 
+
+    /// <summary>
+    /// Directories currently being dehydrated. Prevents the FileSystemWatcher
+    /// feedback loop: dehydrate changes attributes → UNPINNED still set →
+    /// OnFileUnpinned fires again → infinite loop.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, byte> _dehydratingPaths = new(StringComparer.OrdinalIgnoreCase);
+
     private void OnFileUnpinned(string path)
     {
-        // Remove from pinned directories if it was tracked
         if (Directory.Exists(path))
-            _pinnedDirectories.TryRemove(path, out _);
-
-        _ = Task.Run(() =>
         {
-            try
+            // Guard against FileSystemWatcher feedback loop — every attribute
+            // change on a file with UNPINNED set re-fires this handler.
+            if (!_dehydratingPaths.TryAdd(path, 0))
+                return;
+
+            // 1. Cancel any in-progress hydration loop for this directory
+            CancelPinnedDirectory(path);
+
+            // 2. Collect all files under this directory (with their nodeIds)
+            var filesToDehydrate = new List<(string FilePath, string NodeId)>();
+            CollectFilesForDehydration(path, filesToDehydrate);
+
+            // 3. Cancel in-flight downloads for exactly these files
+            var nodeIdSet = new HashSet<string>(filesToDehydrate.Select(f => f.NodeId));
+            _syncCallbacks.CancelFetchesWhere(nodeId => nodeIdSet.Contains(nodeId));
+
+            Console.WriteLine($"Unpinned directory: {path} ({filesToDehydrate.Count} files to dehydrate)");
+
+            // 4. Dehydrate each file. Don't reject FETCH_DATA — Explorer's
+            //    thumbnail handler will re-download some files for thumbnails.
+            //    After a delay (thumbnails cached), dehydrate again.
+            _ = Task.Run(async () =>
             {
-                if (Directory.Exists(path))
+                try
                 {
-                    int count = DehydrateDehydratedFiles(path);
-                    if (count > 0)
-                        Console.WriteLine($"Dehydrated {count} files in {path}");
+                    DehydrateFiles(filesToDehydrate, "pass 1");
+
+                    // Wait for Explorer to finish thumbnail generation.
+                    // During this time Explorer may re-hydrate some files
+                    // via FETCH_DATA — that's OK, we'll dehydrate them again.
+                    Console.WriteLine($"Waiting for Explorer thumbnail caching...");
+                    await Task.Delay(15_000);
+
+                    DehydrateFiles(filesToDehydrate, "pass 2");
                 }
-                else if (File.Exists(path))
+                finally
                 {
-                    DehydratePlaceholder(path);
+                    _dehydratingPaths.TryRemove(path, out _);
+                }
+            });
+        }
+        else if (File.Exists(path))
+        {
+            // Skip if this file is under a directory already being dehydrated,
+            // or if we're already dehydrating this specific file.
+            var dir = Path.GetDirectoryName(path);
+            if (dir != null && _dehydratingPaths.ContainsKey(dir))
+                return;
+            if (!_dehydratingPaths.TryAdd(path, 0))
+                return;
+
+            _ = Task.Run(() =>
+            {
+                try
+                {
+                    DehydratePlaceholderWithRetry(path);
                     Console.WriteLine($"Dehydrated: {Path.GetFileName(path)}");
                 }
-            }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine($"Dehydration error for {path}: {ex.Message}");
-            }
-        });
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"Dehydration error for {path}: {ex.Message}");
+                }
+                finally
+                {
+                    _dehydratingPaths.TryRemove(path, out _);
+                }
+            });
+        }
     }
 
-    private int DehydrateDehydratedFiles(string directoryPath)
+    private static void DehydrateFiles(List<(string FilePath, string NodeId)> files, string label)
     {
-        if (!Directory.Exists(directoryPath))
-            return 0;
-
+        const FileAttributes dehydratedFlag = (FileAttributes)0x00400000;
         int count = 0;
-        foreach (var filePath in Directory.EnumerateFiles(directoryPath))
+        var failed = new List<(string FilePath, string NodeId)>();
+
+        foreach (var (filePath, nodeId) in files)
         {
             try
             {
+                var attrs = File.GetAttributes(filePath);
+                if ((attrs & dehydratedFlag) != 0)
+                    continue; // Already dehydrated
+
                 DehydratePlaceholder(filePath);
+                Console.WriteLine($"Dehydrated ({label}): {Path.GetFileName(filePath)}");
                 count++;
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"  Dehydration failed for {Path.GetFileName(filePath)}: {ex.Message}");
+                Console.Error.WriteLine($"  Dehydrate failed ({label}): {Path.GetFileName(filePath)}: {ex.Message}");
+                failed.Add((filePath, nodeId));
             }
         }
 
-        foreach (var subDir in Directory.EnumerateDirectories(directoryPath))
+        // Retry failed files (e.g. 0x80070187 "cloud files in use" during concurrent hydration)
+        for (int retry = 1; retry <= 5 && failed.Count > 0; retry++)
         {
-            _pinnedDirectories.TryRemove(subDir, out _);
-            count += DehydrateDehydratedFiles(subDir);
+            Thread.Sleep(1000);
+            var stillFailed = new List<(string FilePath, string NodeId)>();
+            foreach (var (filePath, nodeId) in failed)
+            {
+                try
+                {
+                    var attrs = File.GetAttributes(filePath);
+                    if ((attrs & dehydratedFlag) != 0)
+                        continue; // Dehydrated by another path
+
+                    DehydratePlaceholder(filePath);
+                    Console.WriteLine($"Dehydrated ({label} retry {retry}): {Path.GetFileName(filePath)}");
+                    count++;
+                }
+                catch (Exception ex)
+                {
+                    if (retry == 5)
+                        Console.Error.WriteLine($"  Dehydrate failed after retries ({label}): {Path.GetFileName(filePath)}: {ex.Message}");
+                    stillFailed.Add((filePath, nodeId));
+                }
+            }
+            failed = stillFailed;
         }
 
-        return count;
+        Console.WriteLine($"Dehydrated {count}/{files.Count} files ({label})");
+    }
+
+    /// <summary>
+    /// Recursively collect all files under a directory that have known nodeIds.
+    /// Also cancels pinned state for subdirectories.
+    /// </summary>
+    private void CollectFilesForDehydration(string directoryPath, List<(string FilePath, string NodeId)> result)
+    {
+        foreach (var filePath in Directory.EnumerateFiles(directoryPath))
+        {
+            if (_pathToNodeId.TryGetValue(filePath, out var nodeId))
+                result.Add((filePath, nodeId));
+        }
+        foreach (var subDir in Directory.EnumerateDirectories(directoryPath))
+        {
+            CancelPinnedDirectory(subDir);
+            CollectFilesForDehydration(subDir, result);
+        }
     }
 
     private static unsafe void DehydratePlaceholder(string filePath)
     {
         using var safeHandle = OpenWithRetry(filePath);
         var handle = new global::Windows.Win32.Foundation.HANDLE(safeHandle.DangerousGetHandle());
-        PInvoke.CfDehydratePlaceholder(
+        // Use CfUpdatePlaceholder with DEHYDRATE + MARK_IN_SYNC so the file
+        // is atomically dehydrated and marked in-sync in one call. This avoids
+        // the window where a dehydrated-but-not-in-sync file triggers Explorer
+        // to send FETCH_DATA, and avoids TransferError marking it not-in-sync.
+        long usn = 0;
+        PInvoke.CfUpdatePlaceholder(
             handle,
-            0,      // start offset
-            -1,     // entire file
-            CF_DEHYDRATE_FLAGS.CF_DEHYDRATE_FLAG_NONE,
+            null,   // no metadata update
+            null,   // keep existing identity
+            0,
+            null,   // no dehydrate range (dehydrate whole file)
+            0,
+            CF_UPDATE_FLAGS.CF_UPDATE_FLAG_DEHYDRATE
+                | CF_UPDATE_FLAGS.CF_UPDATE_FLAG_MARK_IN_SYNC,
+            &usn,
             null    // synchronous
         ).ThrowOnFailure();
+    }
+
+    /// <summary>
+    /// Dehydrate a single file, retrying up to 5 times with 1-second delays
+    /// for transient failures (e.g. 0x80070187 "cloud files in use").
+    /// </summary>
+    private static void DehydratePlaceholderWithRetry(string filePath)
+    {
+        const int maxRetries = 5;
+        for (int attempt = 0; ; attempt++)
+        {
+            try
+            {
+                DehydratePlaceholder(filePath);
+                if (attempt > 0)
+                    Console.WriteLine($"  Dehydration retry {attempt} succeeded for {Path.GetFileName(filePath)}");
+                return;
+            }
+            catch when (attempt < maxRetries - 1)
+            {
+                Thread.Sleep(1000);
+            }
+        }
     }
 
     /// <summary>
@@ -780,43 +956,130 @@ public class SyncEngine : IDisposable
     }
 
     /// <summary>
-    /// Hydrate all dehydrated files in a directory (recursively).
-    /// Returns the number of files hydrated.
+    /// Find the CancellationTokenSource for the given path or its nearest
+    /// pinned ancestor.  Returns null if no ancestor is pinned.
     /// </summary>
-    private int HydrateDehydratedFiles(string directoryPath)
+    private CancellationTokenSource? FindPinnedAncestorCts(string path)
+    {
+        // Check the path itself first, then walk up
+        var dir = path;
+        while (dir != null && dir.Length >= _syncRootPath.Length)
+        {
+            if (_pinnedDirectories.TryGetValue(dir, out var cts))
+                return cts;
+            dir = Path.GetDirectoryName(dir);
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Remove a directory from <see cref="_pinnedDirectories"/> and cancel its
+    /// CTS.  Safe to call on subdirectories that share a parent's CTS —
+    /// CancellationTokenSource.Cancel and Dispose are idempotent.
+    /// </summary>
+    private void CancelPinnedDirectory(string path)
+    {
+        if (_pinnedDirectories.TryRemove(path, out var cts))
+        {
+            try { cts.Cancel(); } catch (ObjectDisposedException) { }
+            // Don't dispose here — parent's OnFileUnpinned owns the CTS lifetime
+            // for shared instances.  Orphan CTSes get cleaned up in Dispose().
+        }
+    }
+
+    /// <summary>
+    /// Hydrate all dehydrated files in a directory (recursively).
+    /// Returns the number of files hydrated.  Throws OperationCanceledException
+    /// if the cancellation token fires (e.g. directory was unpinned).
+    /// </summary>
+    private int HydrateDehydratedFiles(string directoryPath, CancellationToken ct)
     {
         if (!Directory.Exists(directoryPath))
             return 0;
 
-        const FileAttributes dehydratedFlag = (FileAttributes)0x00400000; // FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
-        int count = 0;
-
-        foreach (var filePath in Directory.EnumerateFiles(directoryPath))
+        _hydratingDirectories.TryAdd(directoryPath, 0);
+        try
         {
-            try
-            {
-                var attrs = File.GetAttributes(filePath);
-                if ((attrs & dehydratedFlag) == 0)
-                    continue; // Already hydrated
+            const FileAttributes dehydratedFlag = (FileAttributes)0x00400000; // FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
+            int count = 0;
+            var failed = new List<string>();
 
-                Console.WriteLine($"Hydrating pinned file: {Path.GetFileName(filePath)}");
-                HydratePlaceholder(filePath);
-                count++;
-            }
-            catch (Exception ex)
+            foreach (var filePath in Directory.EnumerateFiles(directoryPath))
             {
-                Console.Error.WriteLine($"  Hydration failed for {Path.GetFileName(filePath)}: {ex.Message}");
+                ct.ThrowIfCancellationRequested();
+                try
+                {
+                    var attrs = File.GetAttributes(filePath);
+                    if ((attrs & dehydratedFlag) == 0)
+                        continue; // Already hydrated
+
+                    Console.WriteLine($"Hydrating pinned file: {Path.GetFileName(filePath)}");
+                    HydratePlaceholder(filePath);
+                    count++;
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    Console.Error.WriteLine($"  Hydration failed for {Path.GetFileName(filePath)}: {ex.Message}");
+                    failed.Add(filePath);
+                }
             }
+
+            // Retry failed hydrations (e.g. transient network errors)
+            for (int retry = 1; retry <= 3 && failed.Count > 0; retry++)
+            {
+                ct.ThrowIfCancellationRequested();
+                Console.WriteLine($"Retrying {failed.Count} failed hydrations (attempt {retry})...");
+                Thread.Sleep(2000 * retry);
+
+                var stillFailed = new List<string>();
+                foreach (var filePath in failed)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    try
+                    {
+                        var attrs = File.GetAttributes(filePath);
+                        if ((attrs & dehydratedFlag) == 0)
+                            continue; // Hydrated by another path
+
+                        Console.WriteLine($"Hydrating pinned file (retry {retry}): {Path.GetFileName(filePath)}");
+                        HydratePlaceholder(filePath);
+                        count++;
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        if (retry == 3)
+                            Console.Error.WriteLine($"  Hydration failed after retries for {Path.GetFileName(filePath)}: {ex.Message}");
+                        stillFailed.Add(filePath);
+                    }
+                }
+                failed = stillFailed;
+            }
+
+            // Mark successfully-hydrated files as in-sync so they don't show "syncing"
+            // (TransferError during a failed FETCH_DATA marks the placeholder not-in-sync)
+            foreach (var filePath in Directory.EnumerateFiles(directoryPath))
+            {
+                try { SetInSync(filePath); }
+                catch { /* not a placeholder — ignore */ }
+            }
+
+            // Recurse into subdirectories — they inherit the pin from the parent.
+            // Store the parent's CTS so IsUnderPinnedDirectory / OnDirectoryPopulated
+            // can find it for these subdirectories.
+            foreach (var subDir in Directory.EnumerateDirectories(directoryPath))
+            {
+                ct.ThrowIfCancellationRequested();
+                if (_pinnedDirectories.TryGetValue(directoryPath, out var parentCts))
+                    _pinnedDirectories.TryAdd(subDir, parentCts);
+                count += HydrateDehydratedFiles(subDir, ct);
+            }
+
+            return count;
         }
-
-        // Recurse into subdirectories — they inherit the pin from the parent
-        foreach (var subDir in Directory.EnumerateDirectories(directoryPath))
+        finally
         {
-            _pinnedDirectories.TryAdd(subDir, 0);
-            count += HydrateDehydratedFiles(subDir);
+            _hydratingDirectories.TryRemove(directoryPath, out _);
         }
-
-        return count;
     }
 
     private static unsafe void HydratePlaceholder(string filePath)
@@ -965,13 +1228,30 @@ public class SyncEngine : IDisposable
             null).ThrowOnFailure();
     }
 
+    private const uint FILE_WRITE_ATTRIBUTES = 0x100;
+    private const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
+
     private static unsafe void SetInSync(string path)
     {
+        // Use FILE_WRITE_ATTRIBUTES to avoid triggering hydration on dehydrated
+        // files. GENERIC_READ/GENERIC_WRITE would cause cfapi to send FETCH_DATA.
         var isDirectory = Directory.Exists(path);
-        using var safeHandle = OpenWithRetry(path, isDirectory);
-        var handle = new global::Windows.Win32.Foundation.HANDLE(safeHandle.DangerousGetHandle());
+        var flags = isDirectory ? FILE_FLAG_BACKUP_SEMANTICS : 0u;
+
+        using var handle = PInvoke.CreateFile(
+            path,
+            FILE_WRITE_ATTRIBUTES,
+            global::Windows.Win32.Storage.FileSystem.FILE_SHARE_MODE.FILE_SHARE_READ
+                | global::Windows.Win32.Storage.FileSystem.FILE_SHARE_MODE.FILE_SHARE_WRITE
+                | global::Windows.Win32.Storage.FileSystem.FILE_SHARE_MODE.FILE_SHARE_DELETE,
+            null,
+            global::Windows.Win32.Storage.FileSystem.FILE_CREATION_DISPOSITION.OPEN_EXISTING,
+            (global::Windows.Win32.Storage.FileSystem.FILE_FLAGS_AND_ATTRIBUTES)flags,
+            null);
+
+        var cfHandle = new global::Windows.Win32.Foundation.HANDLE(handle.DangerousGetHandle());
         PInvoke.CfSetInSyncState(
-            handle,
+            cfHandle,
             CF_IN_SYNC_STATE.CF_IN_SYNC_STATE_IN_SYNC,
             CF_SET_IN_SYNC_FLAGS.CF_SET_IN_SYNC_FLAG_NONE,
             null).ThrowOnFailure();
@@ -1059,17 +1339,39 @@ public class SyncEngine : IDisposable
         try { File.Delete(filePath + ":Zone.Identifier"); } catch { }
     }
 
-    private static Microsoft.Win32.SafeHandles.SafeFileHandle OpenWithRetry(string filePath, bool isDirectory = false)
+    private const uint GENERIC_WRITE = 0x40000000;
+
+    /// <summary>
+    /// Open a file handle suitable for cfapi operations (CfUpdatePlaceholder,
+    /// CfConvertToPlaceholder, etc.) WITHOUT triggering hydration on dehydrated
+    /// placeholders.  Uses GENERIC_WRITE (not GENERIC_READ | GENERIC_WRITE)
+    /// because GENERIC_READ on a dehydrated placeholder triggers FETCH_DATA.
+    /// </summary>
+    private static unsafe Microsoft.Win32.SafeHandles.SafeFileHandle OpenWithRetry(string filePath, bool isDirectory = false)
     {
         const int maxRetries = 5;
-        // FILE_FLAG_BACKUP_SEMANTICS is required to open a directory handle
-        var options = isDirectory ? (FileOptions)0x02000000 : FileOptions.None;
+        var flags = isDirectory ? FILE_FLAG_BACKUP_SEMANTICS : 0u;
+
         for (int attempt = 0; ; attempt++)
         {
             try
             {
-                return File.OpenHandle(filePath, FileMode.Open, FileAccess.ReadWrite,
-                    FileShare.ReadWrite | FileShare.Delete, options);
+                var handle = PInvoke.CreateFile(
+                    filePath,
+                    GENERIC_WRITE,
+                    global::Windows.Win32.Storage.FileSystem.FILE_SHARE_MODE.FILE_SHARE_READ
+                        | global::Windows.Win32.Storage.FileSystem.FILE_SHARE_MODE.FILE_SHARE_WRITE
+                        | global::Windows.Win32.Storage.FileSystem.FILE_SHARE_MODE.FILE_SHARE_DELETE,
+                    null,
+                    global::Windows.Win32.Storage.FileSystem.FILE_CREATION_DISPOSITION.OPEN_EXISTING,
+                    (global::Windows.Win32.Storage.FileSystem.FILE_FLAGS_AND_ATTRIBUTES)flags,
+                    null);
+
+                if (handle.IsInvalid)
+                    throw new IOException($"CreateFile failed for {filePath}");
+
+                // Wrap in SafeFileHandle for automatic disposal
+                return new Microsoft.Win32.SafeHandles.SafeFileHandle(handle.DangerousGetHandle(), ownsHandle: true);
             }
             catch (IOException) when (attempt < maxRetries - 1)
             {
@@ -1098,6 +1400,15 @@ public class SyncEngine : IDisposable
     public void Dispose()
     {
         ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_DISCONNECTED);
+
+        // Cancel all in-progress hydrations
+        foreach (var kvp in _pinnedDirectories)
+        {
+            kvp.Value.Cancel();
+            kvp.Value.Dispose();
+        }
+        _pinnedDirectories.Clear();
+
         _fileChangeWatcher.Dispose();
         _uploadLock.Dispose();
         _syncRoot.Dispose();

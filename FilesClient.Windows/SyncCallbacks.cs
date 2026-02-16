@@ -24,7 +24,7 @@ internal class SyncCallbacks
     /// In-flight hydration requests keyed by TransferKey, so CANCEL_FETCH_DATA
     /// can cancel the corresponding download.
     /// </summary>
-    private readonly ConcurrentDictionary<long, CancellationTokenSource> _inFlightFetches = new();
+    private readonly ConcurrentDictionary<long, (CancellationTokenSource Cts, string? NodeId)> _inFlightFetches = new();
 
     /// <summary>
     /// Whether the server supports HTTP Range requests. Set to false after
@@ -168,7 +168,7 @@ internal class SyncCallbacks
     {
         var transferKey = callbackInfo->TransferKey;
         var cts = new CancellationTokenSource();
-        _inFlightFetches[transferKey] = cts;
+        _inFlightFetches[transferKey] = (cts, null);
 
         var fileName = Path.GetFileName(callbackInfo->NormalizedPath.ToString());
         OnDownloadStarted?.Invoke(transferKey, fileName);
@@ -184,12 +184,29 @@ internal class SyncCallbacks
 
             if (string.IsNullOrEmpty(nodeId))
             {
-                Console.Error.WriteLine($"FETCH_DATA: No identity for {callbackInfo->NormalizedPath}");
+                Console.Error.WriteLine($"FETCH_DATA: No identity for {fileName}");
                 TransferError(*callbackInfo, new NTSTATUS(unchecked((int)0xC000000D))); // STATUS_INVALID_PARAMETER
                 return;
             }
 
-            Console.WriteLine($"FETCH_DATA: node={nodeId}, offset={requiredOffset}, len={requiredLength}");
+            // Store node ID so CancelFetchesWhere can match by node
+            _inFlightFetches[transferKey] = (cts, nodeId);
+
+            // Log the requesting process so we can understand what triggers
+            // FETCH_DATA (e.g. Explorer thumbnails, Search indexer, etc.)
+            var processName = "(unknown)";
+            if (callbackInfo->ProcessInfo != null)
+            {
+                try
+                {
+                    var processId = callbackInfo->ProcessInfo->ProcessId;
+                    processName = $"PID={processId}";
+                    if (callbackInfo->ProcessInfo->ImagePath.Length > 0)
+                        processName = Path.GetFileName(callbackInfo->ProcessInfo->ImagePath.ToString());
+                }
+                catch { }
+            }
+            Console.WriteLine($"FETCH_DATA: node={nodeId}, offset={requiredOffset}, len={requiredLength}, caller={processName}");
 
             // Download blob data asynchronously, then transfer to cfapi
             // synchronously on the callback thread (CfExecute requires
@@ -277,8 +294,26 @@ internal class SyncCallbacks
         var nodeId = ExtractNodeId(callbackInfo);
         Console.WriteLine($"CANCEL_FETCH_DATA: node={nodeId}, transferKey={transferKey}");
 
-        if (_inFlightFetches.TryGetValue(transferKey, out var cts))
-            cts.Cancel();
+        if (_inFlightFetches.TryGetValue(transferKey, out var entry))
+            entry.Cts.Cancel();
+    }
+
+    /// <summary>
+    /// Cancel in-flight downloads whose node ID matches the predicate.
+    /// Called when a directory is unpinned to abort hydrations for files
+    /// under that directory only.
+    /// </summary>
+    public void CancelFetchesWhere(Func<string, bool> shouldCancel)
+    {
+        foreach (var kvp in _inFlightFetches)
+        {
+            var (cts, nodeId) = kvp.Value;
+            if (nodeId != null && shouldCancel(nodeId))
+            {
+                Console.WriteLine($"Cancelling in-flight download for node {nodeId}");
+                cts.Cancel();
+            }
+        }
     }
 
     private unsafe void NotifyDehydrateCallback(CF_CALLBACK_INFO* callbackInfo, CF_CALLBACK_PARAMETERS* callbackParameters)
