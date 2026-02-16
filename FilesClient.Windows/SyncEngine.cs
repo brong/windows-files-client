@@ -25,6 +25,12 @@ public class SyncEngine : IDisposable
     private readonly ConcurrentDictionary<string, string> _nodeIdToPath = new();
     // Directories the user has pinned ("Always keep on this device")
     private readonly ConcurrentDictionary<string, byte> _pinnedDirectories = new(StringComparer.OrdinalIgnoreCase);
+    // Files recently uploaded — stores the LastWriteTimeUtc at upload time so we
+    // can suppress the FileSystemWatcher echo that fires when
+    // ConvertToPlaceholder / UpdatePlaceholderIdentity changes file attributes.
+    // If the timestamp has changed by the time the echo arrives, a real edit
+    // happened and we let it through.
+    private readonly ConcurrentDictionary<string, DateTime> _recentlyUploaded = new(StringComparer.OrdinalIgnoreCase);
 
     public string SyncRootPath => _syncRootPath;
 
@@ -371,6 +377,12 @@ public class SyncEngine : IDisposable
         if (!File.Exists(change.FullPath))
             return;
 
+        // Skip echo from our own placeholder conversion/update, but only if the
+        // file hasn't been edited since (LastWriteTime unchanged).
+        if (_recentlyUploaded.TryRemove(change.FullPath, out var uploadedWriteTime)
+            && File.GetLastWriteTimeUtc(change.FullPath) == uploadedWriteTime)
+            return;
+
         var fileName = Path.GetFileName(change.FullPath);
         var parentDir = Path.GetDirectoryName(change.FullPath)!;
 
@@ -411,6 +423,7 @@ public class SyncEngine : IDisposable
 
             // Update cfapi placeholder identity with new node ID
             UpdatePlaceholderIdentity(change.FullPath, newNode.Id);
+            _recentlyUploaded[change.FullPath] = File.GetLastWriteTimeUtc(change.FullPath);
             _nodeIdToPath.TryRemove(existingNodeId, out _);
             _pathToNodeId[change.FullPath] = newNode.Id;
             _nodeIdToPath[newNode.Id] = change.FullPath;
@@ -433,6 +446,7 @@ public class SyncEngine : IDisposable
             _nodeIdToPath[node.Id] = change.FullPath;
             StripZoneIdentifier(change.FullPath);
             SetInSync(change.FullPath);
+            _recentlyUploaded[change.FullPath] = File.GetLastWriteTimeUtc(change.FullPath);
             Console.WriteLine($"Created: {fileName} → node {node.Id}");
         }
     }
