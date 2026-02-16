@@ -314,7 +314,14 @@ public class SyncEngine : IDisposable
         // Process uploads on a background thread (fire-and-forget from the timer callback)
         _ = Task.Run(async () =>
         {
-            foreach (var change in changes)
+            // Sort: directories first (shallowest first), then files — ensures parent
+            // directories are created on the server before their children are uploaded.
+            var sorted = changes
+                .OrderBy(c => Directory.Exists(c.FullPath) ? 0 : 1)
+                .ThenBy(c => c.FullPath.Count(ch => ch == Path.DirectorySeparatorChar))
+                .ToArray();
+
+            foreach (var change in sorted)
             {
                 try
                 {
@@ -371,12 +378,7 @@ public class SyncEngine : IDisposable
             }
 
             // Modified existing file — content is immutable, so destroy+create atomically
-            var parentId = ResolveParentNodeId(parentDir);
-            if (parentId == null)
-            {
-                Console.Error.WriteLine($"Cannot update {fileName}: parent folder not mapped");
-                return;
-            }
+            var parentId = await EnsureParentMappedAsync(parentDir);
 
             Console.WriteLine($"Uploading modified file: {fileName}");
             using var stream = new FileStream(change.FullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
@@ -394,12 +396,7 @@ public class SyncEngine : IDisposable
         else
         {
             // New file — upload blob, create StorageNode, convert to placeholder
-            var parentId = ResolveParentNodeId(parentDir);
-            if (parentId == null)
-            {
-                Console.Error.WriteLine($"Cannot upload {fileName}: parent folder not mapped");
-                return;
-            }
+            var parentId = await EnsureParentMappedAsync(parentDir);
 
             Console.WriteLine($"Uploading new file: {fileName}");
             using var stream = new FileStream(change.FullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
@@ -427,12 +424,7 @@ public class SyncEngine : IDisposable
 
         var folderName = Path.GetFileName(change.FullPath);
         var parentDir = Path.GetDirectoryName(change.FullPath)!;
-        var parentId = ResolveParentNodeId(parentDir);
-        if (parentId == null)
-        {
-            Console.Error.WriteLine($"Cannot create folder {folderName}: parent not mapped");
-            return;
-        }
+        var parentId = await EnsureParentMappedAsync(parentDir);
 
         Console.WriteLine($"Creating folder on server: {folderName}");
         var node = await _jmapClient.CreateStorageNodeAsync(parentId, null, folderName);
@@ -752,6 +744,44 @@ public class SyncEngine : IDisposable
         if (string.Equals(localPath, _syncRootPath, StringComparison.OrdinalIgnoreCase))
             return "root";
         return _pathToNodeId.TryGetValue(localPath, out var id) ? id : null;
+    }
+
+    /// <summary>
+    /// Ensures the given local directory is mapped to a server node, creating
+    /// it (and any missing ancestors) on the server if necessary.
+    /// This handles the case where a directory event was missed or arrives
+    /// after its children during a bulk copy.
+    /// </summary>
+    private async Task<string> EnsureParentMappedAsync(string localDir)
+    {
+        // Sync root is always "root"
+        if (string.Equals(localDir, _syncRootPath, StringComparison.OrdinalIgnoreCase))
+            return "root";
+
+        // Already mapped — fast path
+        if (_pathToNodeId.TryGetValue(localDir, out var existingId))
+            return existingId;
+
+        // Recursively ensure the grandparent is mapped first
+        var grandparentDir = Path.GetDirectoryName(localDir)!;
+        var parentNodeId = await EnsureParentMappedAsync(grandparentDir);
+
+        // Double-check after awaiting (another task may have created it)
+        if (_pathToNodeId.TryGetValue(localDir, out var raceId))
+            return raceId;
+
+        // Create the directory on the server
+        var folderName = Path.GetFileName(localDir);
+        Console.WriteLine($"Auto-creating missing parent folder on server: {folderName}");
+        var node = await _jmapClient.CreateStorageNodeAsync(parentNodeId, null, folderName);
+
+        // Convert to placeholder and update mappings
+        ConvertToPlaceholder(localDir, node.Id, isDirectory: true);
+        _pathToNodeId[localDir] = node.Id;
+        _nodeIdToPath[node.Id] = localDir;
+        Console.WriteLine($"Auto-created folder: {folderName} → node {node.Id}");
+
+        return node.Id;
     }
 
     private static void DeleteLocalItem(string localPath)
