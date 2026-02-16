@@ -8,6 +8,8 @@ using Windows.Win32.Storage.CloudFilters;
 
 namespace FilesClient.Windows;
 
+public enum SyncStatus { Idle, Syncing, Error, Disconnected }
+
 public class SyncEngine : IDisposable
 {
     private readonly string _syncRootPath;
@@ -26,6 +28,8 @@ public class SyncEngine : IDisposable
 
     public string SyncRootPath => _syncRootPath;
 
+    public event Action<SyncStatus>? StatusChanged;
+
     /// <summary>
     /// Unregister a previous sync root for the given account and delete all
     /// local files.  Call before creating a SyncEngine instance to start fresh.
@@ -36,6 +40,19 @@ public class SyncEngine : IDisposable
     private void ReportStatus(CF_SYNC_PROVIDER_STATUS status)
     {
         _syncRoot.UpdateProviderStatus(status);
+
+        var syncStatus = status switch
+        {
+            CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_IDLE => SyncStatus.Idle,
+            CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_POPULATE_NAMESPACE
+                or CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_SYNC_INCREMENTAL
+                or CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_SYNC_FULL
+                or CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_POPULATE_CONTENT => SyncStatus.Syncing,
+            CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_CONNECTIVITY_LOST => SyncStatus.Disconnected,
+            CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_DISCONNECTED => SyncStatus.Disconnected,
+            _ => SyncStatus.Error,
+        };
+        StatusChanged?.Invoke(syncStatus);
     }
 
     public void ReportConnectivityLost() => ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_CONNECTIVITY_LOST);
