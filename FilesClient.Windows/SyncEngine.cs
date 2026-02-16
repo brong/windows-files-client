@@ -479,10 +479,7 @@ public class SyncEngine : IDisposable
         {
             // Skip re-upload if this file was just hydrated by cfapi
             if (_syncCallbacks.RecentlyHydrated.TryRemove(existingNodeId, out _))
-            {
-                Console.WriteLine($"Skipping re-upload of recently hydrated file: {fileName}");
                 return;
-            }
 
             // Modified existing file — content is immutable, so destroy+create atomically
             var parentId = await EnsureParentMappedAsync(parentDir);
@@ -768,22 +765,12 @@ public class SyncEngine : IDisposable
 
             Console.WriteLine($"Unpinned directory: {path} ({filesToDehydrate.Count} files to dehydrate)");
 
-            // 4. Dehydrate each file. Don't reject FETCH_DATA — Explorer's
-            //    thumbnail handler will re-download some files for thumbnails.
-            //    After a delay (thumbnails cached), dehydrate again.
-            _ = Task.Run(async () =>
+            // 4. Dehydrate each file on a background thread.
+            _ = Task.Run(() =>
             {
                 try
                 {
-                    DehydrateFiles(filesToDehydrate, "pass 1");
-
-                    // Wait for Explorer to finish thumbnail generation.
-                    // During this time Explorer may re-hydrate some files
-                    // via FETCH_DATA — that's OK, we'll dehydrate them again.
-                    Console.WriteLine($"Waiting for Explorer thumbnail caching...");
-                    await Task.Delay(15_000);
-
-                    DehydrateFiles(filesToDehydrate, "pass 2");
+                    DehydrateFiles(filesToDehydrate);
                 }
                 finally
                 {
@@ -820,7 +807,7 @@ public class SyncEngine : IDisposable
         }
     }
 
-    private static void DehydrateFiles(List<(string FilePath, string NodeId)> files, string label)
+    private static void DehydrateFiles(List<(string FilePath, string NodeId)> files)
     {
         const FileAttributes dehydratedFlag = (FileAttributes)0x00400000;
         int count = 0;
@@ -835,12 +822,12 @@ public class SyncEngine : IDisposable
                     continue; // Already dehydrated
 
                 DehydratePlaceholder(filePath);
-                Console.WriteLine($"Dehydrated ({label}): {Path.GetFileName(filePath)}");
+                Console.WriteLine($"Dehydrated: {Path.GetFileName(filePath)}");
                 count++;
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"  Dehydrate failed ({label}): {Path.GetFileName(filePath)}: {ex.Message}");
+                Console.Error.WriteLine($"  Dehydrate failed: {Path.GetFileName(filePath)}: {ex.Message}");
                 failed.Add((filePath, nodeId));
             }
         }
@@ -859,20 +846,20 @@ public class SyncEngine : IDisposable
                         continue; // Dehydrated by another path
 
                     DehydratePlaceholder(filePath);
-                    Console.WriteLine($"Dehydrated ({label} retry {retry}): {Path.GetFileName(filePath)}");
+                    Console.WriteLine($"Dehydrated (retry {retry}): {Path.GetFileName(filePath)}");
                     count++;
                 }
                 catch (Exception ex)
                 {
                     if (retry == 5)
-                        Console.Error.WriteLine($"  Dehydrate failed after retries ({label}): {Path.GetFileName(filePath)}: {ex.Message}");
+                        Console.Error.WriteLine($"  Dehydrate failed after retries: {Path.GetFileName(filePath)}: {ex.Message}");
                     stillFailed.Add((filePath, nodeId));
                 }
             }
             failed = stillFailed;
         }
 
-        Console.WriteLine($"Dehydrated {count}/{files.Count} files ({label})");
+        Console.WriteLine($"Dehydrated {count}/{files.Count} files");
     }
 
     /// <summary>
