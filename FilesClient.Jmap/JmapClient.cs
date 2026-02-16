@@ -184,24 +184,45 @@ public class JmapClient : IJmapClient
         return result.List;
     }
 
-    public async Task<string[]> QueryChildrenAsync(string parentId, CancellationToken ct = default)
+    public async Task<StorageNode[]> GetChildrenAsync(string parentId, CancellationToken ct = default)
     {
-        var result = await CallAsync<QueryResponse>(
-            StorageNodeUsing, "StorageNode/query", new
+        var queryCallId = "c" + Interlocked.Increment(ref _nextCallId);
+        var getCallId = "c" + Interlocked.Increment(ref _nextCallId);
+
+        var request = JmapRequest.Create(StorageNodeUsing,
+            ("StorageNode/query", new
             {
                 accountId = AccountId,
                 filter = new { parentId },
                 sort = new[] { new { property = "name", isAscending = true } },
-            }, ct);
-        return result.Ids;
-    }
+            }, queryCallId),
+            ("StorageNode/get", new Dictionary<string, object>
+            {
+                ["accountId"] = AccountId,
+                ["#ids"] = new { resultOf = queryCallId, name = "StorageNode/query", path = "/ids" },
+            }, getCallId));
 
-    public async Task<StorageNode[]> GetChildrenAsync(string parentId, CancellationToken ct = default)
-    {
-        var ids = await QueryChildrenAsync(parentId, ct);
-        if (ids.Length == 0)
-            return [];
-        return await GetStorageNodesAsync(ids, ct);
+        var json = JsonSerializer.Serialize(request, JmapSerializerOptions.Default);
+        var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+        var httpResponse = await _http.PostAsync(Session.ApiUrl, content, ct);
+        httpResponse.EnsureSuccessStatusCode();
+        var responseJson = await httpResponse.Content.ReadAsStringAsync(ct);
+        var response = JsonSerializer.Deserialize<JmapResponse>(responseJson, JmapSerializerOptions.Default)
+            ?? throw new InvalidOperationException("Failed to parse JMAP response");
+
+        var responseMap = new Dictionary<string, (string method, JsonElement args)>();
+        foreach (var entry in response.MethodResponses)
+        {
+            var respCallId = entry[2].GetString() ?? "";
+            var respMethod = entry[0].GetString() ?? "";
+            responseMap[respCallId] = (respMethod, entry[1]);
+        }
+
+        // Validate query response (ensures no errors), but we don't need the result
+        GetValidatedResult<QueryResponse>(responseMap, queryCallId, "StorageNode/query");
+        var getResult = GetValidatedResult<GetResponse<StorageNode>>(responseMap, getCallId, "StorageNode/get");
+
+        return getResult.List;
     }
 
     public async Task<ChangesResponse> GetChangesAsync(string sinceState, CancellationToken ct = default)
