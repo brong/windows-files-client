@@ -86,14 +86,18 @@ Feature detection for version-specific capabilities (integration number check).
 
 Implemented: switched from `Full` to `Progressive` hydration policy with HTTP Range request support. `FetchDataCallback` now attempts byte-range downloads via `DownloadBlobRangeAsync` and falls back to full downloads if the server returns 200 instead of 206 or on error (session-level fallback).
 
-### 18. Per-operation sync status
+### ~~18. Blob/get for small files + digest verification~~ ✓ Done
 
-The `CF_OPERATION_INFO.SyncStatus` field (currently null in all our CfExecute calls) can provide specific error messages per failed operation.
+Implemented: files ≤16KB are fetched inline via RFC 9404 `Blob/get` (base64 data + digest in a single JMAP call), avoiding a separate HTTP round-trip. All download paths (Blob/get, HTTP Range, full HTTP) now verify content integrity using the server's preferred digest algorithm (`sha` or `sha-256`) fetched concurrently via `Blob/get`. Digest mismatches log warnings but don't block downloads. Gracefully degrades when the server lacks the `urn:ietf:params:jmap:blob` capability.
+
+### 19. Per-operation sync status
+
+The `CF_OPERATION_INFO.SyncStatus` field (currently null in all our CfExecute calls) can provide specific error messages per failed operation. (Renumbered from #18 after Blob/get was added.)
 
 ## Tier 4 — Future/Niche
 
 - **Search integration** (`IStorageProviderSearchHandler`) — cloud search results in Explorer, but requires Windows 11 24H2 Copilot+ PCs
-- **Data validation** (`VALIDATE_DATA` callback + `VALIDATION_REQUIRED` modifier) — end-to-end integrity checks
+- **Data validation** (`VALIDATE_DATA` callback + `VALIDATION_REQUIRED` modifier) — cfapi-level integrity checks (application-level digest verification already done via Blob/get, see #18)
 - **Streaming mode** (`STREAMING_ALLOWED`) — for video/media playback without disk persistence
 - **CfSetPinState** — programmatically pin/unpin files (we only *detect* pins currently)
 - **Correlation vectors** — telemetry/request tracing
@@ -139,6 +143,8 @@ Client-side range request support is implemented with automatic fallback. The sp
 ### Content hash (improves: conflict detection)
 
 A `blobHash` or `contentHash` property on FileNode would let the client compare local vs. server content without re-downloading the blob. Currently the client has no way to detect whether a local edit matches what's already on the server, so it re-uploads unconditionally. Not strictly blocking any cfapi feature, but important for robust sync.
+
+**Note:** Download integrity verification is already implemented using `Blob/get` digests (see #18), but a persistent content hash on the node would enable pre-upload deduplication.
 
 ### Quota (improves: Explorer storage display)
 
