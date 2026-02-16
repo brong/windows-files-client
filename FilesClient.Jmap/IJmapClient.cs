@@ -6,6 +6,11 @@ public interface IJmapClient : IDisposable
 {
     string AccountId { get; }
     string Username { get; }
+    /// <summary>
+    /// The first digest algorithm from the server's supportedDigestAlgorithms
+    /// that we support locally (sha or sha-256), or null if blob capability not present.
+    /// </summary>
+    string? PreferredDigestAlgorithm { get; }
     Task<StorageNode[]> GetStorageNodesAsync(string[] ids, CancellationToken ct = default);
     Task<StorageNode[]> GetChildrenAsync(string parentId, CancellationToken ct = default);
     Task<ChangesResponse> GetChangesAsync(string sinceState, CancellationToken ct = default);
@@ -18,4 +23,9 @@ public interface IJmapClient : IDisposable
     Task MoveStorageNodeAsync(string nodeId, string parentId, string newName, CancellationToken ct = default);
     Task DestroyStorageNodeAsync(string nodeId, CancellationToken ct = default);
     IAsyncEnumerable<string> WatchForChangesAsync(CancellationToken ct = default);
+    /// <summary>
+    /// Fetch blob metadata/data via Blob/get (RFC 9404).
+    /// </summary>
+    Task<BlobDataItem> GetBlobAsync(string blobId, string[] properties,
+        long? offset = null, long? length = null, CancellationToken ct = default);
 }

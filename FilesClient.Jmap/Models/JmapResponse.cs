@@ -142,3 +142,33 @@ public class ChangesResponse
     [JsonPropertyName("destroyed")]
     public string[] Destroyed { get; set; } = [];
 }
+
+public class BlobGetResponse
+{
+    [JsonPropertyName("list")]
+    public BlobDataItem[] List { get; set; } = [];
+
+    [JsonPropertyName("notFound")]
+    public string[] NotFound { get; set; } = [];
+}
+
+public class BlobDataItem
+{
+    [JsonPropertyName("id")]
+    public string Id { get; set; } = "";
+
+    [JsonPropertyName("data:asBase64")]
+    public string? DataAsBase64 { get; set; }
+
+    [JsonPropertyName("size")]
+    public long Size { get; set; }
+
+    [JsonPropertyName("digest:sha")]
+    public string? DigestSha { get; set; }
+
+    [JsonPropertyName("digest:sha-256")]
+    public string? DigestSha256 { get; set; }
+
+    [JsonPropertyName("isTruncated")]
+    public bool IsTruncated { get; set; }
+}

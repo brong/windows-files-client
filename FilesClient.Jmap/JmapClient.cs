@@ -14,13 +14,32 @@ public class JmapClient : IJmapClient
     // discover it via the session resource.
     public const string CoreCapability = "urn:ietf:params:jmap:core";
     public const string StorageNodeCapability = "https://www.fastmail.com/dev/files";
+    public const string BlobCapability = "urn:ietf:params:jmap:blob";
     private static readonly string[] StorageNodeUsing = [CoreCapability, StorageNodeCapability];
+    private static readonly string[] BlobUsing = [CoreCapability, BlobCapability];
+    private static readonly HashSet<string> SupportedDigests = ["sha", "sha-256"];
+    private string? _preferredDigestAlgorithm;
+    private bool _preferredDigestResolved;
 
     public JmapSession Session => _session
         ?? throw new InvalidOperationException("Session not initialised — call ConnectAsync first");
 
     public string AccountId => Session.GetPrimaryAccount(StorageNodeCapability);
     public string Username => Session.Username;
+
+    public string? PreferredDigestAlgorithm
+    {
+        get
+        {
+            if (!_preferredDigestResolved)
+            {
+                var algos = Session.GetSupportedDigestAlgorithms(AccountId);
+                _preferredDigestAlgorithm = algos.FirstOrDefault(a => SupportedDigests.Contains(a));
+                _preferredDigestResolved = true;
+            }
+            return _preferredDigestAlgorithm;
+        }
+    }
 
     public JmapClient(string token, bool debug = false)
     {
@@ -365,6 +384,40 @@ public class JmapClient : IJmapClient
             // Malformed JSON — skip
         }
         return null;
+    }
+
+    public async Task<BlobDataItem> GetBlobAsync(string blobId, string[] properties,
+        long? offset = null, long? length = null, CancellationToken ct = default)
+    {
+        var blobArgs = new Dictionary<string, object?>
+        {
+            ["accountId"] = AccountId,
+            ["ids"] = new[] { blobId },
+            ["properties"] = properties,
+        };
+
+        if (offset.HasValue)
+            blobArgs["offset"] = offset.Value;
+        if (length.HasValue)
+            blobArgs["length"] = length.Value;
+
+        var request = JmapRequest.Create(BlobUsing, ("Blob/get", blobArgs, "b0"));
+        var response = await CallAsync(request, ct);
+        var (method, _, _) = response.GetResponse(0);
+
+        if (method == "error")
+        {
+            var error = response.GetArgs<JsonElement>(0);
+            throw new InvalidOperationException($"JMAP error: {error}");
+        }
+
+        var blobResponse = response.GetArgs<BlobGetResponse>(0);
+        if (blobResponse.NotFound.Length > 0)
+            throw new FileNotFoundException($"Blob not found: {blobId}");
+        if (blobResponse.List.Length == 0)
+            throw new InvalidOperationException($"Blob/get returned no results for {blobId}");
+
+        return blobResponse.List[0];
     }
 
     public void Dispose()

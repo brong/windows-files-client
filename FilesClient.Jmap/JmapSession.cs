@@ -58,6 +58,23 @@ public class JmapSession
             .Replace("{type}", Uri.EscapeDataString(type ?? "application/octet-stream"))
             .Replace("{name}", Uri.EscapeDataString(name ?? "download"));
     }
+
+    public string[] GetSupportedDigestAlgorithms(string accountId)
+    {
+        if (!Accounts.TryGetValue(accountId, out var account))
+            return [];
+        if (!account.AccountCapabilities.TryGetValue("urn:ietf:params:jmap:blob", out var blobCap))
+            return [];
+        if (blobCap.TryGetProperty("supportedDigestAlgorithms", out var algos) &&
+            algos.ValueKind == JsonValueKind.Array)
+        {
+            return algos.EnumerateArray()
+                .Select(e => e.GetString())
+                .Where(s => s != null)
+                .ToArray()!;
+        }
+        return [];
+    }
 }
 
 public class JmapAccount

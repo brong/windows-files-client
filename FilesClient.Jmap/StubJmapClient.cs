@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using System.Security.Cryptography;
 using System.Text;
 using FilesClient.Jmap.Models;
 
@@ -32,6 +33,7 @@ public class StubJmapClient : IJmapClient
 
     public string AccountId => "stub-account";
     public string Username => "stub@example.com";
+    public string? PreferredDigestAlgorithm => "sha-256";
 
     public Task<StorageNode[]> GetStorageNodesAsync(string[] ids, CancellationToken ct = default)
     {
@@ -145,6 +147,41 @@ public class StubJmapClient : IJmapClient
             Console.WriteLine($"[Stub] Moved StorageNode {nodeId} to {parentId}/{newName}");
         }
         return Task.CompletedTask;
+    }
+
+    public Task<BlobDataItem> GetBlobAsync(string blobId, string[] properties,
+        long? offset = null, long? length = null, CancellationToken ct = default)
+    {
+        if (!_blobs.TryGetValue(blobId, out var data))
+            throw new FileNotFoundException($"Unknown blob: {blobId}");
+
+        byte[] slice = data;
+        if (offset.HasValue || length.HasValue)
+        {
+            int start = (int)(offset ?? 0);
+            int count = (int)(length ?? (data.Length - start));
+            count = Math.Min(count, data.Length - start);
+            slice = new byte[count];
+            Array.Copy(data, start, slice, 0, count);
+        }
+
+        var item = new BlobDataItem
+        {
+            Id = blobId,
+            Size = slice.Length,
+        };
+
+        foreach (var prop in properties)
+        {
+            if (prop == "data:asBase64")
+                item.DataAsBase64 = Convert.ToBase64String(slice);
+            else if (prop == "digest:sha")
+                item.DigestSha = Convert.ToBase64String(SHA1.HashData(slice));
+            else if (prop == "digest:sha-256")
+                item.DigestSha256 = Convert.ToBase64String(SHA256.HashData(slice));
+        }
+
+        return Task.FromResult(item);
     }
 
     public async IAsyncEnumerable<string> WatchForChangesAsync([EnumeratorCancellation] CancellationToken ct = default)

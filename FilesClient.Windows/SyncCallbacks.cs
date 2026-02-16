@@ -1,10 +1,12 @@
 using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using Windows.Win32;
 using Windows.Win32.Foundation;
 using Windows.Win32.Storage.CloudFilters;
 using FilesClient.Jmap;
+using FilesClient.Jmap.Models;
 
 namespace FilesClient.Windows;
 
@@ -29,6 +31,10 @@ internal class SyncCallbacks
     /// a non-206 response or error, disabling range requests for the session.
     /// </summary>
     private volatile bool _rangeRequestsSupported = true;
+
+    private const long BlobGetMaxSize = 16384;
+    private string? _digestAlgorithm;
+    private bool _digestAlgorithmResolved;
 
     /// <summary>
     /// Called before a delete completes. Return true to allow, false to veto.
@@ -381,10 +387,58 @@ internal class SyncCallbacks
         PInvoke.CfExecute(in opInfo, ref opParams).ThrowOnFailure();
     }
 
+    private string? GetDigestAlgorithm()
+    {
+        if (!_digestAlgorithmResolved)
+        {
+            _digestAlgorithm = _jmapClient.PreferredDigestAlgorithm;
+            _digestAlgorithmResolved = true;
+        }
+        return _digestAlgorithm;
+    }
+
+    private static string ComputeDigest(string algorithm, byte[] data)
+    {
+        byte[] hash = algorithm switch
+        {
+            "sha" => SHA1.HashData(data),
+            "sha-256" => SHA256.HashData(data),
+            _ => throw new ArgumentException($"Unsupported digest algorithm: {algorithm}"),
+        };
+        return Convert.ToBase64String(hash);
+    }
+
+    private static string? GetDigestFromItem(BlobDataItem item, string algorithm)
+    {
+        return algorithm switch
+        {
+            "sha" => item.DigestSha,
+            "sha-256" => item.DigestSha256,
+            _ => null,
+        };
+    }
+
+    private async Task<BlobDataItem?> GetBlobDigestAsync(string blobId, string algo,
+        long? offset, long? length, CancellationToken ct)
+    {
+        return await _jmapClient.GetBlobAsync(blobId, [$"digest:{algo}"], offset, length, ct);
+    }
+
+    private static void VerifyDigest(string algorithm, byte[] data, BlobDataItem item, string context)
+    {
+        var expected = GetDigestFromItem(item, algorithm);
+        if (expected == null)
+            return;
+        var actual = ComputeDigest(algorithm, data);
+        if (actual != expected)
+            Console.Error.WriteLine($"Digest mismatch ({context}): expected {expected}, got {actual}");
+    }
+
     /// <summary>
     /// Download blob data asynchronously (can run on any thread).
     /// Returns the data bytes, the file offset where data starts, and total file size.
-    /// Attempts a range download when supported; falls back to full download.
+    /// Uses Blob/get for small files, HTTP Range for partial requests, and full HTTP as fallback.
+    /// All paths verify content digests when the server supports Blob/get.
     /// </summary>
     private async Task<(byte[] data, long dataStartOffset, long totalSize)> FetchBlobDataAsync(
         string nodeId, long requiredOffset, long requiredLength, CancellationToken ct)
@@ -394,14 +448,44 @@ internal class SyncCallbacks
             throw new FileNotFoundException($"Node {nodeId} not found or has no blob");
 
         var node = nodes[0];
+        var algo = GetDigestAlgorithm();
+        bool isPartialRequest = requiredOffset > 0 || requiredLength < node.Size;
 
-        // Try range download if supported and this is a partial request
-        if (_rangeRequestsSupported && (requiredOffset > 0 || requiredLength < node.Size))
+        // Path A — Small file via Blob/get (full file, ≤ 16KB)
+        if (!isPartialRequest && node.Size <= BlobGetMaxSize && algo != null)
         {
             try
             {
-                var (rangeStream, isPartial) = await _jmapClient.DownloadBlobRangeAsync(
+                var props = new[] { "data:asBase64", "size", $"digest:{algo}" };
+                var item = await _jmapClient.GetBlobAsync(node.BlobId!, props, ct: ct);
+                if (item.DataAsBase64 != null && !item.IsTruncated)
+                {
+                    var data = Convert.FromBase64String(item.DataAsBase64);
+                    VerifyDigest(algo, data, item, $"Blob/get {node.BlobId}");
+                    Console.WriteLine($"FETCH_DATA: small file via Blob/get, {data.Length} bytes");
+                    return (data, 0, node.Size);
+                }
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Blob/get failed for small file, falling back to HTTP: {ex.Message}");
+            }
+        }
+
+        // Path B — Range download via HTTP with concurrent digest verification
+        if (_rangeRequestsSupported && isPartialRequest)
+        {
+            try
+            {
+                // Launch HTTP download and digest fetch concurrently
+                var downloadTask = _jmapClient.DownloadBlobRangeAsync(
                     node.BlobId!, requiredOffset, requiredLength, node.Type, node.Name, ct);
+                Task<BlobDataItem?> digestTask = algo != null
+                    ? GetBlobDigestAsync(node.BlobId!, algo, requiredOffset, requiredLength, ct)
+                    : Task.FromResult<BlobDataItem?>(null);
+
+                var (rangeStream, isPartial) = await downloadTask;
                 using (rangeStream)
                 {
                     using var ms = new MemoryStream();
@@ -409,11 +493,40 @@ internal class SyncCallbacks
                     var rangeBytes = ms.ToArray();
 
                     if (isPartial)
+                    {
+                        if (algo != null)
+                        {
+                            try
+                            {
+                                var digestItem = await digestTask;
+                                if (digestItem != null)
+                                    VerifyDigest(algo, rangeBytes, digestItem, $"range {node.BlobId} @{requiredOffset}+{requiredLength}");
+                            }
+                            catch (Exception ex) when (ex is not OperationCanceledException)
+                            {
+                                Console.Error.WriteLine($"Digest fetch failed for range request: {ex.Message}");
+                            }
+                        }
                         return (rangeBytes, requiredOffset, node.Size);
+                    }
 
                     // Server returned 200 (full content) — disable range requests
                     _rangeRequestsSupported = false;
                     Console.WriteLine("Range requests not supported by server, falling back to full downloads");
+
+                    if (algo != null)
+                    {
+                        try
+                        {
+                            // Re-fetch digest for full file since range digest doesn't apply
+                            var fullDigestItem = await _jmapClient.GetBlobAsync(node.BlobId!, [$"digest:{algo}"], ct: ct);
+                            VerifyDigest(algo, rangeBytes, fullDigestItem, $"full fallback {node.BlobId}");
+                        }
+                        catch (Exception ex) when (ex is not OperationCanceledException)
+                        {
+                            Console.Error.WriteLine($"Digest fetch failed for full fallback: {ex.Message}");
+                        }
+                    }
                     return (rangeBytes, 0, node.Size);
                 }
             }
@@ -425,11 +538,34 @@ internal class SyncCallbacks
             }
         }
 
-        // Full download fallback
-        using var stream = await _jmapClient.DownloadBlobAsync(node.BlobId!, node.Type, node.Name, ct);
-        using var fullMs = new MemoryStream();
-        await stream.CopyToAsync(fullMs, ct);
-        return (fullMs.ToArray(), 0, node.Size);
+        // Path C — Full HTTP download with concurrent digest verification
+        {
+            var downloadTask = _jmapClient.DownloadBlobAsync(node.BlobId!, node.Type, node.Name, ct);
+            Task<BlobDataItem?> digestTask = algo != null
+                ? GetBlobDigestAsync(node.BlobId!, algo, null, null, ct)
+                : Task.FromResult<BlobDataItem?>(null);
+
+            using var stream = await downloadTask;
+            using var fullMs = new MemoryStream();
+            await stream.CopyToAsync(fullMs, ct);
+            var fullBytes = fullMs.ToArray();
+
+            if (algo != null)
+            {
+                try
+                {
+                    var digestItem = await digestTask;
+                    if (digestItem != null)
+                        VerifyDigest(algo, fullBytes, digestItem, $"full download {node.BlobId}");
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    Console.Error.WriteLine($"Digest fetch failed for full download: {ex.Message}");
+                }
+            }
+
+            return (fullBytes, 0, node.Size);
+        }
     }
 
     /// <summary>
