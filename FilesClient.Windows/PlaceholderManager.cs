@@ -35,7 +35,7 @@ internal class PlaceholderManager
         return new string(chars).TrimEnd(' ', '.');
     }
 
-    public unsafe void CreatePlaceholders(string parentPath, StorageNode[] children)
+    public unsafe void CreatePlaceholders(string parentPath, FileNode[] children)
     {
         if (children.Length == 0)
             return;
@@ -54,7 +54,7 @@ internal class PlaceholderManager
                 var nameChars = (SanitizeName(node.Name) + "\0").ToCharArray();
                 pinnedNames[i] = GCHandle.Alloc(nameChars, GCHandleType.Pinned);
 
-                // Identity blob: store the StorageNode ID as UTF-8
+                // Identity blob: store the FileNode ID as UTF-8
                 var identityBytes = Encoding.UTF8.GetBytes(node.Id);
                 pinnedIdentities[i] = GCHandle.Alloc(identityBytes, GCHandleType.Pinned);
 
@@ -117,12 +117,12 @@ internal class PlaceholderManager
         }
     }
 
-    public string GetLocalPath(StorageNode node, Dictionary<string, StorageNode> nodeMap)
+    public string GetLocalPath(FileNode node, Dictionary<string, FileNode> nodeMap)
     {
         var parts = new List<string>();
         var current = node;
 
-        while (current != null && current.Id != "root")
+        while (current != null && current.Role != "home")
         {
             parts.Add(SanitizeName(current.Name));
             if (current.ParentId != null && nodeMap.TryGetValue(current.ParentId, out var parent))

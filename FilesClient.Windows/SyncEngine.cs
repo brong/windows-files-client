@@ -22,10 +22,12 @@ public class SyncEngine : IDisposable
     private readonly SyncOutbox _outbox;
     private readonly OutboxProcessor _outboxProcessor;
 
-    // Maps local file path → StorageNode ID (populated during sync)
+    // Maps local file path → FileNode ID (populated during sync)
     private readonly ConcurrentDictionary<string, string> _pathToNodeId = new(StringComparer.OrdinalIgnoreCase);
-    // Reverse mapping: StorageNode ID → local file path (needed for delete handling)
+    // Reverse mapping: FileNode ID → local file path (needed for delete handling)
     private readonly ConcurrentDictionary<string, string> _nodeIdToPath = new();
+    // Home node ID discovered during PopulateAsync
+    private string _homeNodeId = null!;
     // Directories the user has pinned ("Always keep on this device")
     // Value is a CancellationTokenSource used to cancel in-progress hydration when unpinned.
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _pinnedDirectories = new(StringComparer.OrdinalIgnoreCase);
@@ -163,10 +165,15 @@ public class SyncEngine : IDisposable
     {
         ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_POPULATE_NAMESPACE);
 
+        // Discover home node
+        _homeNodeId = await _queue.EnqueueAsync(QueuePriority.Background,
+            () => _jmapClient.FindHomeNodeIdAsync(ct), ct);
+        Console.WriteLine($"Home node: {_homeNodeId}");
+
         // Phase 1: Fetch the entire tree from the server
         Console.WriteLine("Fetching directory tree...");
-        var tree = new List<(string parentId, string localParentPath, StorageNode[] children)>();
-        await FetchTreeAsync("root", _syncRootPath, tree, ct);
+        var tree = new List<(string parentId, string localParentPath, FileNode[] children)>();
+        await FetchTreeAsync(_homeNodeId, _syncRootPath, tree, ct);
 
         // Phase 2: Create all placeholders in one fast pass (parent before children,
         // but each directory's children are created immediately after the directory)
@@ -249,12 +256,12 @@ public class SyncEngine : IDisposable
 
         ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_IDLE);
         return await _queue.EnqueueAsync(QueuePriority.Background,
-            () => _jmapClient.GetStateAsync(ct), ct);
+            () => _jmapClient.GetStateAsync(_homeNodeId, ct), ct);
     }
 
     private async Task FetchTreeAsync(
         string parentId, string localParentPath,
-        List<(string parentId, string localParentPath, StorageNode[] children)> tree,
+        List<(string parentId, string localParentPath, FileNode[] children)> tree,
         CancellationToken ct)
     {
         var children = await _queue.EnqueueAsync(QueuePriority.Background,
@@ -996,7 +1003,7 @@ public class SyncEngine : IDisposable
     internal string? ResolveParentNodeId(string localPath)
     {
         if (string.Equals(localPath, _syncRootPath, StringComparison.OrdinalIgnoreCase))
-            return "root";
+            return _homeNodeId;
         return _pathToNodeId.TryGetValue(localPath, out var id) ? id : null;
     }
 
@@ -1047,9 +1054,9 @@ public class SyncEngine : IDisposable
     /// </summary>
     private async Task<string> EnsureParentMappedAsync(string localDir)
     {
-        // Sync root is always "root"
+        // Sync root maps to the home node
         if (string.Equals(localDir, _syncRootPath, StringComparison.OrdinalIgnoreCase))
-            return "root";
+            return _homeNodeId;
 
         // Already mapped — fast path
         if (_pathToNodeId.TryGetValue(localDir, out var existingId))
@@ -1067,7 +1074,7 @@ public class SyncEngine : IDisposable
         var folderName = Path.GetFileName(localDir);
         Console.WriteLine($"Auto-creating missing parent folder on server: {folderName}");
         var node = await _queue.EnqueueAsync(QueuePriority.Background,
-            () => _jmapClient.CreateStorageNodeAsync(parentNodeId, null, folderName));
+            () => _jmapClient.CreateFileNodeAsync(parentNodeId, null, folderName));
 
         // Convert to placeholder and update mappings
         ConvertToPlaceholder(localDir, node.Id, isDirectory: true);
@@ -1319,11 +1326,11 @@ public class SyncEngine : IDisposable
 
     private async Task<string?> ResolveLocalPathAsync(string nodeId, CancellationToken ct)
     {
-        if (nodeId == "root")
+        if (nodeId == _homeNodeId)
             return _syncRootPath;
 
         var nodes = await _queue.EnqueueAsync(QueuePriority.Background,
-            () => _jmapClient.GetStorageNodesAsync([nodeId], ct), ct);
+            () => _jmapClient.GetFileNodesAsync([nodeId], ct), ct);
         if (nodes.Length == 0)
             return null;
 

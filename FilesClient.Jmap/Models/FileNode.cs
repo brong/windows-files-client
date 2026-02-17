@@ -2,7 +2,7 @@ using System.Text.Json.Serialization;
 
 namespace FilesClient.Jmap.Models;
 
-public class StorageNode
+public class FileNode
 {
     [JsonPropertyName("id")]
     public string Id { get; set; } = "";
@@ -28,32 +28,23 @@ public class StorageNode
     [JsonPropertyName("modified")]
     public DateTime? Modified { get; set; }
 
-    [JsonPropertyName("width")]
-    public int? Width { get; set; }
+    [JsonPropertyName("role")]
+    public string? Role { get; set; }
 
-    [JsonPropertyName("height")]
-    public int? Height { get; set; }
+    [JsonPropertyName("accessed")]
+    public DateTime? Accessed { get; set; }
 
-    [JsonPropertyName("orientation")]
-    public int? Orientation { get; set; }
+    [JsonPropertyName("executable")]
+    public bool? Executable { get; set; }
 
-    [JsonPropertyName("title")]
-    public string? Title { get; set; }
-
-    [JsonPropertyName("comment")]
-    public string? Comment { get; set; }
+    [JsonPropertyName("isSubscribed")]
+    public bool? IsSubscribed { get; set; }
 
     [JsonPropertyName("myRights")]
     public FilesRights? MyRights { get; set; }
 
     [JsonPropertyName("shareWith")]
     public Dictionary<string, FilesRights>? ShareWith { get; set; }
-
-    [JsonPropertyName("sharedLinkUrl")]
-    public string? SharedLinkUrl { get; set; }
-
-    [JsonPropertyName("isSharedLinkEnabled")]
-    public bool? IsSharedLinkEnabled { get; set; }
 
     [JsonIgnore]
     public bool IsFolder => BlobId == null;
@@ -67,6 +58,6 @@ public class FilesRights
     [JsonPropertyName("mayWrite")]
     public bool MayWrite { get; set; }
 
-    [JsonPropertyName("mayAdmin")]
-    public bool MayAdmin { get; set; }
+    [JsonPropertyName("mayShare")]
+    public bool MayShare { get; set; }
 }

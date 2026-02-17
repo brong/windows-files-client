@@ -181,7 +181,7 @@ internal class SyncCallbacks
             long requiredOffset = fetchParams.RequiredFileOffset;
             long requiredLength = fetchParams.RequiredLength;
 
-            // Extract the StorageNode ID from the file identity blob
+            // Extract the FileNode ID from the file identity blob
             var nodeId = ExtractNodeId(callbackInfo);
 
             if (string.IsNullOrEmpty(nodeId))
@@ -491,7 +491,7 @@ internal class SyncCallbacks
         string nodeId, long requiredOffset, long requiredLength, CancellationToken ct)
     {
         var nodes = await _queue.EnqueueAsync(QueuePriority.Interactive,
-            () => _jmapClient.GetStorageNodesAsync([nodeId], ct), ct);
+            () => _jmapClient.GetFileNodesAsync([nodeId], ct), ct);
         if (nodes.Length == 0 || nodes[0].BlobId == null)
             throw new FileNotFoundException($"Node {nodeId} not found or has no blob");
 

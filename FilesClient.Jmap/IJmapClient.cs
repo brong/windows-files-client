@@ -12,19 +12,20 @@ public interface IJmapClient : IDisposable
     /// that we support locally (sha or sha-256), or null if blob capability not present.
     /// </summary>
     string? PreferredDigestAlgorithm { get; }
-    Task<StorageNode[]> GetStorageNodesAsync(string[] ids, CancellationToken ct = default);
-    Task<StorageNode[]> GetChildrenAsync(string parentId, CancellationToken ct = default);
+    Task<string> FindHomeNodeIdAsync(CancellationToken ct = default);
+    Task<FileNode[]> GetFileNodesAsync(string[] ids, CancellationToken ct = default);
+    Task<FileNode[]> GetChildrenAsync(string parentId, CancellationToken ct = default);
     Task<ChangesResponse> GetChangesAsync(string sinceState, CancellationToken ct = default);
-    Task<(ChangesResponse Changes, StorageNode[] Created, StorageNode[] Updated)>
+    Task<(ChangesResponse Changes, FileNode[] Created, FileNode[] Updated)>
         GetChangesAndNodesAsync(string sinceState, CancellationToken ct = default);
-    Task<string> GetStateAsync(CancellationToken ct = default);
+    Task<string> GetStateAsync(string homeNodeId, CancellationToken ct = default);
     Task<Stream> DownloadBlobAsync(string blobId, string? type = null, string? name = null, CancellationToken ct = default);
     Task<(Stream data, bool isPartial)> DownloadBlobRangeAsync(string blobId, long offset, long length, string? type = null, string? name = null, CancellationToken ct = default);
     Task<string> UploadBlobAsync(Stream data, string contentType, CancellationToken ct = default);
-    Task<StorageNode> CreateStorageNodeAsync(string parentId, string? blobId, string name, string? type = null, CancellationToken ct = default);
-    Task<StorageNode> ReplaceStorageNodeBlobAsync(string nodeId, string parentId, string name, string blobId, string? type = null, CancellationToken ct = default);
-    Task MoveStorageNodeAsync(string nodeId, string parentId, string newName, CancellationToken ct = default);
-    Task DestroyStorageNodeAsync(string nodeId, CancellationToken ct = default);
+    Task<FileNode> CreateFileNodeAsync(string parentId, string? blobId, string name, string? type = null, CancellationToken ct = default);
+    Task<FileNode> ReplaceFileNodeBlobAsync(string nodeId, string parentId, string name, string blobId, string? type = null, CancellationToken ct = default);
+    Task MoveFileNodeAsync(string nodeId, string parentId, string newName, CancellationToken ct = default);
+    Task DestroyFileNodeAsync(string nodeId, CancellationToken ct = default);
     IAsyncEnumerable<string> WatchForChangesAsync(CancellationToken ct = default);
     /// <summary>
     /// Fetch blob metadata/data via Blob/get (RFC 9404).

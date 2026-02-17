@@ -11,16 +11,24 @@ public class StubJmapClient : IJmapClient
 
     private int _nextId = 2;
     private int _nextBlobId = 2;
-    private readonly Dictionary<string, StorageNode> _nodes = new();
+    private readonly Dictionary<string, FileNode> _nodes = new();
     private readonly Dictionary<string, byte[]> _blobs = new();
 
     public StubJmapClient()
     {
-        var helloFile = new StorageNode
+        var homeNode = new FileNode
+        {
+            Id = "stub-home",
+            Name = "",
+            Role = "home",
+        };
+        _nodes["stub-home"] = homeNode;
+
+        var helloFile = new FileNode
         {
             Id = "stub-file-1",
             Name = "hello.txt",
-            ParentId = "root",
+            ParentId = "stub-home",
             BlobId = FileBlobId,
             Type = "text/plain",
             Size = 5,
@@ -36,7 +44,10 @@ public class StubJmapClient : IJmapClient
     public string Username => Context.Username;
     public string? PreferredDigestAlgorithm => "sha-256";
 
-    public Task<StorageNode[]> GetStorageNodesAsync(string[] ids, CancellationToken ct = default)
+    public Task<string> FindHomeNodeIdAsync(CancellationToken ct = default)
+        => Task.FromResult("stub-home");
+
+    public Task<FileNode[]> GetFileNodesAsync(string[] ids, CancellationToken ct = default)
     {
         var nodes = ids
             .Where(id => _nodes.ContainsKey(id))
@@ -45,7 +56,7 @@ public class StubJmapClient : IJmapClient
         return Task.FromResult(nodes);
     }
 
-    public Task<StorageNode[]> GetChildrenAsync(string parentId, CancellationToken ct = default)
+    public Task<FileNode[]> GetChildrenAsync(string parentId, CancellationToken ct = default)
     {
         var children = _nodes.Values.Where(n => n.ParentId == parentId).ToArray();
         return Task.FromResult(children);
@@ -56,13 +67,13 @@ public class StubJmapClient : IJmapClient
         return Task.FromResult(new ChangesResponse { NewState = sinceState });
     }
 
-    public Task<(ChangesResponse Changes, StorageNode[] Created, StorageNode[] Updated)>
+    public Task<(ChangesResponse Changes, FileNode[] Created, FileNode[] Updated)>
         GetChangesAndNodesAsync(string sinceState, CancellationToken ct = default)
     {
-        return Task.FromResult((new ChangesResponse { NewState = sinceState }, Array.Empty<StorageNode>(), Array.Empty<StorageNode>()));
+        return Task.FromResult((new ChangesResponse { NewState = sinceState }, Array.Empty<FileNode>(), Array.Empty<FileNode>()));
     }
 
-    public Task<string> GetStateAsync(CancellationToken ct = default)
+    public Task<string> GetStateAsync(string homeNodeId, CancellationToken ct = default)
     {
         return Task.FromResult("stub-state-1");
     }
@@ -96,18 +107,18 @@ public class StubJmapClient : IJmapClient
         return Task.FromResult(blobId);
     }
 
-    public Task DestroyStorageNodeAsync(string nodeId, CancellationToken ct = default)
+    public Task DestroyFileNodeAsync(string nodeId, CancellationToken ct = default)
     {
         if (_nodes.Remove(nodeId))
-            Console.WriteLine($"[Stub] Destroyed StorageNode {nodeId}");
+            Console.WriteLine($"[Stub] Destroyed FileNode {nodeId}");
         return Task.CompletedTask;
     }
 
-    public Task<StorageNode> CreateStorageNodeAsync(string parentId, string? blobId, string name, string? type = null, CancellationToken ct = default)
+    public Task<FileNode> CreateFileNodeAsync(string parentId, string? blobId, string name, string? type = null, CancellationToken ct = default)
     {
         var id = $"stub-file-{_nextId++}";
         var size = blobId != null && _blobs.TryGetValue(blobId, out var data) ? data.Length : 0;
-        var node = new StorageNode
+        var node = new FileNode
         {
             Id = id,
             ParentId = parentId,
@@ -119,16 +130,16 @@ public class StubJmapClient : IJmapClient
             Modified = DateTime.UtcNow,
         };
         _nodes[id] = node;
-        Console.WriteLine($"[Stub] Created StorageNode {id}: {name}");
+        Console.WriteLine($"[Stub] Created FileNode {id}: {name}");
         return Task.FromResult(node);
     }
 
-    public Task<StorageNode> ReplaceStorageNodeBlobAsync(string nodeId, string parentId, string name, string blobId, string? type = null, CancellationToken ct = default)
+    public Task<FileNode> ReplaceFileNodeBlobAsync(string nodeId, string parentId, string name, string blobId, string? type = null, CancellationToken ct = default)
     {
         _nodes.Remove(nodeId);
         var newId = $"stub-file-{_nextId++}";
         var size = _blobs.TryGetValue(blobId, out var data) ? data.Length : 0;
-        var newNode = new StorageNode
+        var newNode = new FileNode
         {
             Id = newId,
             ParentId = parentId,
@@ -140,18 +151,18 @@ public class StubJmapClient : IJmapClient
             Modified = DateTime.UtcNow,
         };
         _nodes[newId] = newNode;
-        Console.WriteLine($"[Stub] Replaced StorageNode {nodeId} → {newId}: {name} (blob {blobId})");
+        Console.WriteLine($"[Stub] Replaced FileNode {nodeId} → {newId}: {name} (blob {blobId})");
         return Task.FromResult(newNode);
     }
 
-    public Task MoveStorageNodeAsync(string nodeId, string parentId, string newName, CancellationToken ct = default)
+    public Task MoveFileNodeAsync(string nodeId, string parentId, string newName, CancellationToken ct = default)
     {
         if (_nodes.TryGetValue(nodeId, out var node))
         {
             node.ParentId = parentId;
             node.Name = newName;
             node.Modified = DateTime.UtcNow;
-            Console.WriteLine($"[Stub] Moved StorageNode {nodeId} to {parentId}/{newName}");
+            Console.WriteLine($"[Stub] Moved FileNode {nodeId} to {parentId}/{newName}");
         }
         return Task.CompletedTask;
     }

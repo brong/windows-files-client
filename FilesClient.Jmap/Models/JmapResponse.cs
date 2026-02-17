@@ -75,10 +75,10 @@ public class SetResponse
     public string NewState { get; set; } = "";
 
     [JsonPropertyName("created")]
-    public Dictionary<string, StorageNode>? Created { get; set; }
+    public Dictionary<string, FileNode>? Created { get; set; }
 
     [JsonPropertyName("updated")]
-    public Dictionary<string, StorageNode?>? Updated { get; set; }
+    public Dictionary<string, FileNode?>? Updated { get; set; }
 
     [JsonPropertyName("destroyed")]
     public string[]? Destroyed { get; set; }

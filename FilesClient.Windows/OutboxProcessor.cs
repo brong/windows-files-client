@@ -127,7 +127,7 @@ public class OutboxProcessor : IDisposable
         {
             Console.WriteLine($"Outbox: destroying node {change.NodeId}");
             await _queue.EnqueueAsync(QueuePriority.Background,
-                () => _jmapClient.DestroyStorageNodeAsync(change.NodeId, ct), ct);
+                () => _jmapClient.DestroyFileNodeAsync(change.NodeId, ct), ct);
         }
         catch (Exception ex) when (ex.Message.Contains("notFound") || ex.Message.Contains("404"))
         {
@@ -151,7 +151,7 @@ public class OutboxProcessor : IDisposable
 
         Console.WriteLine($"Outbox: creating folder {folderName}");
         var node = await _queue.EnqueueAsync(QueuePriority.Background,
-            () => _jmapClient.CreateStorageNodeAsync(parentId, null, folderName, null, ct), ct);
+            () => _jmapClient.CreateFileNodeAsync(parentId, null, folderName, null, ct), ct);
 
         SyncEngine.ConvertToPlaceholder(change.LocalPath, node.Id, isDirectory: true);
         _engine.UpdateMappings(change.LocalPath, null, node.Id);
@@ -183,7 +183,7 @@ public class OutboxProcessor : IDisposable
             var blobId = await _queue.EnqueueAsync(QueuePriority.Background,
                 () => _jmapClient.UploadBlobAsync(stream, contentType, ct), ct);
             var newNode = await _queue.EnqueueAsync(QueuePriority.Background,
-                () => _jmapClient.ReplaceStorageNodeBlobAsync(change.NodeId, parentId, fileName, blobId, contentType, ct), ct);
+                () => _jmapClient.ReplaceFileNodeBlobAsync(change.NodeId, parentId, fileName, blobId, contentType, ct), ct);
 
             SyncEngine.UpdatePlaceholderIdentity(change.LocalPath, newNode.Id);
             _engine.RecordRecentUpload(change.LocalPath);
@@ -196,7 +196,7 @@ public class OutboxProcessor : IDisposable
                 if (newParentId != null)
                 {
                     await _queue.EnqueueAsync(QueuePriority.Background,
-                        () => _jmapClient.MoveStorageNodeAsync(newNode.Id, newParentId, fileName, ct), ct);
+                        () => _jmapClient.MoveFileNodeAsync(newNode.Id, newParentId, fileName, ct), ct);
                 }
             }
 
@@ -217,7 +217,7 @@ public class OutboxProcessor : IDisposable
             var blobId = await _queue.EnqueueAsync(QueuePriority.Background,
                 () => _jmapClient.UploadBlobAsync(stream, contentType, ct), ct);
             var node = await _queue.EnqueueAsync(QueuePriority.Background,
-                () => _jmapClient.CreateStorageNodeAsync(parentId, blobId, fileName, contentType, ct), ct);
+                () => _jmapClient.CreateFileNodeAsync(parentId, blobId, fileName, contentType, ct), ct);
 
             SyncEngine.ConvertToPlaceholder(change.LocalPath, node.Id);
             _engine.UpdateMappings(change.LocalPath, null, node.Id);
@@ -244,7 +244,7 @@ public class OutboxProcessor : IDisposable
         try
         {
             await _queue.EnqueueAsync(QueuePriority.Background,
-                () => _jmapClient.MoveStorageNodeAsync(change.NodeId, parentId, newName, ct), ct);
+                () => _jmapClient.MoveFileNodeAsync(change.NodeId, parentId, newName, ct), ct);
             SyncEngine.SetInSync(change.LocalPath);
         }
         catch (Exception ex) when (ex.Message.Contains("notFound") || ex.Message.Contains("404"))
