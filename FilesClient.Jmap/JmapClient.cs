@@ -9,6 +9,7 @@ public class JmapClient : IJmapClient
 {
     private readonly HttpClient _http;
     private JmapSession? _session;
+    private JmapContext? _context;
     private int _nextCallId;
 
     // Fastmail uses "https://www.fastmailusercontent.com/jmap/api/" but we
@@ -25,8 +26,11 @@ public class JmapClient : IJmapClient
     public JmapSession Session => _session
         ?? throw new InvalidOperationException("Session not initialised — call ConnectAsync first");
 
-    public string AccountId => Session.GetPrimaryAccount(StorageNodeCapability);
-    public string Username => Session.Username;
+    public JmapContext Context => _context
+        ?? throw new InvalidOperationException("Context not initialised — call ConnectAsync first");
+
+    public string AccountId => Context.AccountId;
+    public string Username => Context.Username;
 
     public string? PreferredDigestAlgorithm
     {
@@ -60,6 +64,9 @@ public class JmapClient : IJmapClient
         var json = await response.Content.ReadAsStringAsync(ct);
         _session = JsonSerializer.Deserialize<JmapSession>(json)
             ?? throw new InvalidOperationException("Failed to parse JMAP session");
+
+        var accountId = _session.GetPrimaryAccount(StorageNodeCapability);
+        _context = new JmapContext(_session.Username, accountId);
     }
 
     private async Task<JsonElement> CallAsync(string[] capabilities, string method, object args, CancellationToken ct)

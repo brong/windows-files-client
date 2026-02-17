@@ -31,8 +31,9 @@ public class StubJmapClient : IJmapClient
         _blobs[FileBlobId] = Encoding.UTF8.GetBytes("world");
     }
 
-    public string AccountId => "stub-account";
-    public string Username => "stub@example.com";
+    public JmapContext Context { get; } = new("stub@example.com", "stub-account");
+    public string AccountId => Context.AccountId;
+    public string Username => Context.Username;
     public string? PreferredDigestAlgorithm => "sha-256";
 
     public Task<StorageNode[]> GetStorageNodesAsync(string[] ids, CancellationToken ct = default)

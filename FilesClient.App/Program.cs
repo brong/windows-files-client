@@ -95,9 +95,10 @@ class Program
             jmapClient = realClient;
         }
         Console.WriteLine($"Account: {jmapClient.AccountId}");
+        Console.WriteLine($"Context: {jmapClient.Context.ScopeKey}");
 
         // Derive display name and folder name from account username
-        var displayName = $"{jmapClient.Username} Files";
+        var displayName = $"{jmapClient.Context.Username} Files";
         syncRootPath ??= Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
             SanitizeFolderName(displayName));
@@ -108,14 +109,14 @@ class Program
         if (clean)
         {
             Console.WriteLine("Cleaning previous sync state...");
-            SyncEngine.Clean(syncRootPath, jmapClient.AccountId);
+            SyncEngine.Clean(syncRootPath, jmapClient.Context.AccountId);
             Console.WriteLine();
         }
 
         // Download Fastmail favicon for use as sync root icon
         var iconPath = await DownloadIconAsync(cts.Token);
 
-        using var trayIcon = new TrayIcon(cts, iconPath, syncRootPath, jmapClient.Username);
+        using var trayIcon = new TrayIcon(cts, iconPath, syncRootPath, jmapClient.Context.Username);
         trayIcon.Start();
 
         using var _ = jmapClient;
@@ -130,7 +131,7 @@ class Program
 
             // 1a. Register sync root (but don't connect yet — no callbacks active)
             Console.WriteLine("Registering sync root...");
-            await engine.RegisterAsync(displayName, jmapClient.AccountId, iconPath);
+            await engine.RegisterAsync(displayName, jmapClient.Context.AccountId, iconPath);
 
             // 2. Create placeholders while disconnected so Explorer/indexer
             //    can't trigger FETCH_DATA downloads during initial population.

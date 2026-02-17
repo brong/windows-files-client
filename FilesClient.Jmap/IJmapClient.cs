@@ -4,6 +4,7 @@ namespace FilesClient.Jmap;
 
 public interface IJmapClient : IDisposable
 {
+    JmapContext Context { get; }
     string AccountId { get; }
     string Username { get; }
     /// <summary>
