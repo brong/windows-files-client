@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using FilesClient.Jmap.Auth;
@@ -11,15 +10,6 @@ public class JmapClient : IJmapClient
     private readonly HttpClient _http;
     private JmapSession? _session;
     private int _nextCallId;
-    private readonly ConcurrentQueue<PendingCall> _pendingCalls = new();
-    private readonly SemaphoreSlim _batchLock = new(1, 1);
-
-    private sealed record PendingCall(
-        string[] Capabilities,
-        string Method,
-        object Args,
-        string CallId,
-        TaskCompletionSource<JsonElement> Tcs);
 
     // Fastmail uses "https://www.fastmailusercontent.com/jmap/api/" but we
     // discover it via the session resource.
@@ -75,34 +65,26 @@ public class JmapClient : IJmapClient
     private async Task<JsonElement> CallAsync(string[] capabilities, string method, object args, CancellationToken ct)
     {
         var callId = "c" + Interlocked.Increment(ref _nextCallId);
-        var tcs = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var ctr = ct.Register(() => tcs.TrySetCanceled(ct));
+        var request = JmapRequest.Create(capabilities, (method, args, callId));
+        var json = JsonSerializer.Serialize(request, JmapSerializerOptions.Default);
+        var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+        var httpResponse = await _http.PostAsync(Session.ApiUrl, content, ct);
+        httpResponse.EnsureSuccessStatusCode();
+        var responseJson = await httpResponse.Content.ReadAsStringAsync(ct);
+        var response = JsonSerializer.Deserialize<JmapResponse>(responseJson, JmapSerializerOptions.Default)
+            ?? throw new InvalidOperationException("Failed to parse JMAP response");
 
-        _pendingCalls.Enqueue(new PendingCall(capabilities, method, args, callId, tcs));
+        if (response.MethodResponses.Length == 0)
+            throw new InvalidOperationException($"No response for {method} call");
 
-        await _batchLock.WaitAsync(ct);
-        try
-        {
-            if (!tcs.Task.IsCompleted)
-            {
-                // We are the batch leader — drain the queue
-                var batch = new List<PendingCall>();
-                while (_pendingCalls.TryDequeue(out var pending))
-                {
-                    if (!pending.Tcs.Task.IsCompleted)
-                        batch.Add(pending);
-                }
-                if (batch.Count > 0)
-                    await ExecuteBatchAsync(batch);
-            }
-        }
-        finally
-        {
-            _batchLock.Release();
-        }
+        var entry = response.MethodResponses[0];
+        var respMethod = entry[0].GetString() ?? "";
+        if (respMethod == "error")
+            throw new InvalidOperationException($"JMAP error: {entry[1]}");
+        if (respMethod != method)
+            throw new InvalidOperationException($"JMAP method mismatch: expected {method}, got {respMethod}");
 
-        ctr.Dispose();
-        return await tcs.Task;
+        return entry[1];
     }
 
     private async Task<T> CallAsync<T>(string[] capabilities, string method, object args, CancellationToken ct)
@@ -110,71 +92,6 @@ public class JmapClient : IJmapClient
         var result = await CallAsync(capabilities, method, args, ct);
         return result.Deserialize<T>(JmapSerializerOptions.Default)
             ?? throw new InvalidOperationException($"Failed to deserialize {method} response");
-    }
-
-    private async Task ExecuteBatchAsync(List<PendingCall> batch)
-    {
-        try
-        {
-            // Merge capabilities from all batch items
-            var allCapabilities = new HashSet<string>();
-            var calls = new (string method, object args, string callId)[batch.Count];
-            for (int i = 0; i < batch.Count; i++)
-            {
-                foreach (var cap in batch[i].Capabilities)
-                    allCapabilities.Add(cap);
-                calls[i] = (batch[i].Method, batch[i].Args, batch[i].CallId);
-            }
-
-            var request = JmapRequest.Create(allCapabilities.ToArray(), calls);
-            var json = JsonSerializer.Serialize(request, JmapSerializerOptions.Default);
-            var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
-            var httpResponse = await _http.PostAsync(Session.ApiUrl, content);
-            httpResponse.EnsureSuccessStatusCode();
-            var responseJson = await httpResponse.Content.ReadAsStringAsync();
-            var response = JsonSerializer.Deserialize<JmapResponse>(responseJson, JmapSerializerOptions.Default)
-                ?? throw new InvalidOperationException("Failed to parse JMAP response");
-
-            // Build lookup by call ID
-            var responseMap = new Dictionary<string, (string method, JsonElement args)>();
-            foreach (var entry in response.MethodResponses)
-            {
-                var respCallId = entry[2].GetString() ?? "";
-                var respMethod = entry[0].GetString() ?? "";
-                responseMap[respCallId] = (respMethod, entry[1]);
-            }
-
-            // Route responses to pending calls
-            foreach (var pending in batch)
-            {
-                if (!responseMap.TryGetValue(pending.CallId, out var resp))
-                {
-                    pending.Tcs.TrySetException(
-                        new InvalidOperationException($"No response for call ID {pending.CallId}"));
-                }
-                else if (resp.method == "error")
-                {
-                    pending.Tcs.TrySetException(
-                        new InvalidOperationException($"JMAP error: {resp.args}"));
-                }
-                else if (resp.method != pending.Method)
-                {
-                    pending.Tcs.TrySetException(
-                        new InvalidOperationException(
-                            $"JMAP method mismatch: expected {pending.Method}, got {resp.method}"));
-                }
-                else
-                {
-                    pending.Tcs.TrySetResult(resp.args);
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            // If the HTTP call itself fails, set exception on all pending calls
-            foreach (var pending in batch)
-                pending.Tcs.TrySetException(ex);
-        }
     }
 
     public async Task<StorageNode[]> GetStorageNodesAsync(string[] ids, CancellationToken ct = default)

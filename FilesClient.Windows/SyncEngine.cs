@@ -14,6 +14,7 @@ public class SyncEngine : IDisposable
 {
     private readonly string _syncRootPath;
     private readonly IJmapClient _jmapClient;
+    private readonly JmapQueue _queue;
     private readonly SyncRoot _syncRoot;
     private readonly PlaceholderManager _placeholderManager;
     private readonly SyncCallbacks _syncCallbacks;
@@ -107,13 +108,14 @@ public class SyncEngine : IDisposable
         StatusDetailChanged?.Invoke(_downloadDetail ?? _uploadDetail);
     }
 
-    public SyncEngine(string syncRootPath, IJmapClient jmapClient)
+    public SyncEngine(string syncRootPath, IJmapClient jmapClient, JmapQueue queue)
     {
         _syncRootPath = syncRootPath;
         _jmapClient = jmapClient;
+        _queue = queue;
         _syncRoot = new SyncRoot(syncRootPath);
         _placeholderManager = new PlaceholderManager(syncRootPath);
-        _syncCallbacks = new SyncCallbacks(jmapClient);
+        _syncCallbacks = new SyncCallbacks(jmapClient, queue);
         _syncCallbacks.OnDeleteRequested = HandleDeleteRequestAsync;
         _syncCallbacks.OnRenameRequested = HandleRenameRequestAsync;
         _syncCallbacks.OnDehydrateRequested = HandleDehydrateRequestAsync;
@@ -230,7 +232,8 @@ public class SyncEngine : IDisposable
         }
 
         ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_IDLE);
-        return await _jmapClient.GetStateAsync(ct);
+        return await _queue.EnqueueAsync(QueuePriority.Background,
+            () => _jmapClient.GetStateAsync(ct), ct);
     }
 
     private async Task FetchTreeAsync(
@@ -238,7 +241,8 @@ public class SyncEngine : IDisposable
         List<(string parentId, string localParentPath, StorageNode[] children)> tree,
         CancellationToken ct)
     {
-        var children = await _jmapClient.GetChildrenAsync(parentId, ct);
+        var children = await _queue.EnqueueAsync(QueuePriority.Background,
+            () => _jmapClient.GetChildrenAsync(parentId, ct), ct);
         tree.Add((parentId, localParentPath, children));
 
         foreach (var child in children.Where(c => c.IsFolder))
@@ -250,7 +254,8 @@ public class SyncEngine : IDisposable
 
     public async Task<string> PollChangesAsync(string sinceState, CancellationToken ct)
     {
-        var (changes, createdNodes, updatedNodes) = await _jmapClient.GetChangesAndNodesAsync(sinceState, ct);
+        var (changes, createdNodes, updatedNodes) = await _queue.EnqueueAsync(QueuePriority.Background,
+            () => _jmapClient.GetChangesAndNodesAsync(sinceState, ct), ct);
 
         if (changes.Created.Length == 0 && changes.Updated.Length == 0 && changes.Destroyed.Length == 0)
         {
@@ -484,8 +489,10 @@ public class SyncEngine : IDisposable
 
             Console.WriteLine($"Uploading modified file: {fileName}");
             using var stream = new FileStream(change.FullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-            var blobId = await _jmapClient.UploadBlobAsync(stream, contentType);
-            var newNode = await _jmapClient.ReplaceStorageNodeBlobAsync(existingNodeId, parentId, fileName, blobId, contentType);
+            var blobId = await _queue.EnqueueAsync(QueuePriority.Background,
+                () => _jmapClient.UploadBlobAsync(stream, contentType));
+            var newNode = await _queue.EnqueueAsync(QueuePriority.Background,
+                () => _jmapClient.ReplaceStorageNodeBlobAsync(existingNodeId, parentId, fileName, blobId, contentType));
 
             // Update cfapi placeholder identity with new node ID
             UpdatePlaceholderIdentity(change.FullPath, newNode.Id);
@@ -503,8 +510,10 @@ public class SyncEngine : IDisposable
 
             Console.WriteLine($"Uploading new file: {fileName}");
             using var stream = new FileStream(change.FullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-            var blobId = await _jmapClient.UploadBlobAsync(stream, contentType);
-            var node = await _jmapClient.CreateStorageNodeAsync(parentId, blobId, fileName, contentType);
+            var blobId = await _queue.EnqueueAsync(QueuePriority.Background,
+                () => _jmapClient.UploadBlobAsync(stream, contentType));
+            var node = await _queue.EnqueueAsync(QueuePriority.Background,
+                () => _jmapClient.CreateStorageNodeAsync(parentId, blobId, fileName, contentType));
 
             // Convert the regular file to a cloud placeholder
             ConvertToPlaceholder(change.FullPath, node.Id);
@@ -531,7 +540,8 @@ public class SyncEngine : IDisposable
         var parentId = await EnsureParentMappedAsync(parentDir);
 
         Console.WriteLine($"Creating folder on server: {folderName}");
-        var node = await _jmapClient.CreateStorageNodeAsync(parentId, null, folderName);
+        var node = await _queue.EnqueueAsync(QueuePriority.Background,
+            () => _jmapClient.CreateStorageNodeAsync(parentId, null, folderName));
 
         ConvertToPlaceholder(change.FullPath, node.Id, isDirectory: true);
         _pathToNodeId[change.FullPath] = node.Id;
@@ -553,7 +563,8 @@ public class SyncEngine : IDisposable
         try
         {
             Console.WriteLine($"NOTIFY_DELETE: destroying node {nodeId} for {path}");
-            await _jmapClient.DestroyStorageNodeAsync(nodeId);
+            await _queue.EnqueueAsync(QueuePriority.Interactive,
+                () => _jmapClient.DestroyStorageNodeAsync(nodeId));
 
             // Clean up descendant mappings if this was a directory
             var prefix = path + Path.DirectorySeparatorChar;
@@ -614,7 +625,8 @@ public class SyncEngine : IDisposable
 
             var newName = Path.GetFileName(target);
             Console.WriteLine($"NOTIFY_RENAME: moving node {nodeId} → {parentId}/{newName}");
-            await _jmapClient.MoveStorageNodeAsync(nodeId, parentId, newName);
+            await _queue.EnqueueAsync(QueuePriority.Interactive,
+                () => _jmapClient.MoveStorageNodeAsync(nodeId, parentId, newName));
 
             // Update descendant mappings if this is a directory
             if (_pathToNodeId.TryGetValue(source, out _) && Directory.Exists(source))
@@ -1131,7 +1143,8 @@ public class SyncEngine : IDisposable
         // Create the directory on the server
         var folderName = Path.GetFileName(localDir);
         Console.WriteLine($"Auto-creating missing parent folder on server: {folderName}");
-        var node = await _jmapClient.CreateStorageNodeAsync(parentNodeId, null, folderName);
+        var node = await _queue.EnqueueAsync(QueuePriority.Background,
+            () => _jmapClient.CreateStorageNodeAsync(parentNodeId, null, folderName));
 
         // Convert to placeholder and update mappings
         ConvertToPlaceholder(localDir, node.Id, isDirectory: true);
@@ -1386,7 +1399,8 @@ public class SyncEngine : IDisposable
         if (nodeId == "root")
             return _syncRootPath;
 
-        var nodes = await _jmapClient.GetStorageNodesAsync([nodeId], ct);
+        var nodes = await _queue.EnqueueAsync(QueuePriority.Background,
+            () => _jmapClient.GetStorageNodesAsync([nodeId], ct), ct);
         if (nodes.Length == 0)
             return null;
 

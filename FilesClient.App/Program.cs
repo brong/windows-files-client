@@ -119,11 +119,12 @@ class Program
         trayIcon.Start();
 
         using var _ = jmapClient;
+        using var queue = new JmapQueue();
 
         try
         {
             // 1. Set up sync engine (register + connect callbacks)
-            using var engine = new SyncEngine(syncRootPath, jmapClient);
+            using var engine = new SyncEngine(syncRootPath, jmapClient, queue);
             engine.StatusChanged += trayIcon.UpdateStatus;
             engine.StatusDetailChanged += trayIcon.UpdateStatusDetail;
 

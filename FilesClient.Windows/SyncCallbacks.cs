@@ -13,6 +13,7 @@ namespace FilesClient.Windows;
 internal class SyncCallbacks
 {
     private readonly IJmapClient _jmapClient;
+    private readonly JmapQueue _queue;
 
     /// <summary>
     /// Node IDs that were recently hydrated by cfapi. SyncEngine checks this
@@ -60,9 +61,10 @@ internal class SyncCallbacks
     public record DirectoryPopulatedInfo(string DirectoryPath);
     public event Action<DirectoryPopulatedInfo>? OnDirectoryPopulated;
 
-    public SyncCallbacks(IJmapClient jmapClient)
+    public SyncCallbacks(IJmapClient jmapClient, JmapQueue queue)
     {
         _jmapClient = jmapClient;
+        _queue = queue;
     }
 
     public unsafe (CF_CALLBACK_REGISTRATION[] registrations, CF_CALLBACK[] delegates) CreateCallbackRegistrations()
@@ -463,7 +465,10 @@ internal class SyncCallbacks
     private async Task<BlobDataItem?> GetBlobDigestAsync(string blobId, string algo,
         long? offset, long? length, CancellationToken ct)
     {
-        return await _jmapClient.GetBlobAsync(blobId, [$"digest:{algo}"], offset, length, ct);
+        // Use Background queue to avoid deadlock: download+digest run concurrently,
+        // and if all 4 interactive slots hold downloads waiting for digests, deadlock.
+        return await _queue.EnqueueAsync(QueuePriority.Background,
+            () => _jmapClient.GetBlobAsync(blobId, [$"digest:{algo}"], offset, length, ct), ct);
     }
 
     private static void VerifyDigest(string algorithm, byte[] data, BlobDataItem item, string context)
@@ -485,7 +490,8 @@ internal class SyncCallbacks
     private async Task<(byte[] data, long dataStartOffset, long totalSize)> FetchBlobDataAsync(
         string nodeId, long requiredOffset, long requiredLength, CancellationToken ct)
     {
-        var nodes = await _jmapClient.GetStorageNodesAsync([nodeId], ct);
+        var nodes = await _queue.EnqueueAsync(QueuePriority.Interactive,
+            () => _jmapClient.GetStorageNodesAsync([nodeId], ct), ct);
         if (nodes.Length == 0 || nodes[0].BlobId == null)
             throw new FileNotFoundException($"Node {nodeId} not found or has no blob");
 
@@ -499,7 +505,8 @@ internal class SyncCallbacks
             try
             {
                 var props = new[] { "data:asBase64", "size", $"digest:{algo}" };
-                var item = await _jmapClient.GetBlobAsync(node.BlobId!, props, ct: ct);
+                var item = await _queue.EnqueueAsync(QueuePriority.Interactive,
+                    () => _jmapClient.GetBlobAsync(node.BlobId!, props, ct: ct), ct);
                 if (item.DataAsBase64 != null && !item.IsTruncated)
                 {
                     var data = Convert.FromBase64String(item.DataAsBase64);
@@ -521,8 +528,9 @@ internal class SyncCallbacks
             try
             {
                 // Launch HTTP download and digest fetch concurrently
-                var downloadTask = _jmapClient.DownloadBlobRangeAsync(
-                    node.BlobId!, requiredOffset, requiredLength, node.Type, node.Name, ct);
+                var downloadTask = _queue.EnqueueAsync(QueuePriority.Interactive,
+                    () => _jmapClient.DownloadBlobRangeAsync(
+                        node.BlobId!, requiredOffset, requiredLength, node.Type, node.Name, ct), ct);
                 Task<BlobDataItem?> digestTask = algo != null
                     ? GetBlobDigestAsync(node.BlobId!, algo, requiredOffset, requiredLength, ct)
                     : Task.FromResult<BlobDataItem?>(null);
@@ -561,7 +569,8 @@ internal class SyncCallbacks
                         try
                         {
                             // Re-fetch digest for full file since range digest doesn't apply
-                            var fullDigestItem = await _jmapClient.GetBlobAsync(node.BlobId!, [$"digest:{algo}"], ct: ct);
+                            var fullDigestItem = await _queue.EnqueueAsync(QueuePriority.Interactive,
+                                () => _jmapClient.GetBlobAsync(node.BlobId!, [$"digest:{algo}"], ct: ct), ct);
                             VerifyDigest(algo, rangeBytes, fullDigestItem, $"full fallback {node.BlobId}");
                         }
                         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -582,7 +591,8 @@ internal class SyncCallbacks
 
         // Path C — Full HTTP download with concurrent digest verification
         {
-            var downloadTask = _jmapClient.DownloadBlobAsync(node.BlobId!, node.Type, node.Name, ct);
+            var downloadTask = _queue.EnqueueAsync(QueuePriority.Interactive,
+                () => _jmapClient.DownloadBlobAsync(node.BlobId!, node.Type, node.Name, ct), ct);
             Task<BlobDataItem?> digestTask = algo != null
                 ? GetBlobDigestAsync(node.BlobId!, algo, null, null, ct)
                 : Task.FromResult<BlobDataItem?>(null);
