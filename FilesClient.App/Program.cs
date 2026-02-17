@@ -125,9 +125,10 @@ class Program
         try
         {
             // 1. Set up sync engine (register + connect callbacks)
-            using var engine = new SyncEngine(syncRootPath, jmapClient, queue);
+            using var engine = new SyncEngine(syncRootPath, jmapClient, queue, jmapClient.Context.ScopeKey);
             engine.StatusChanged += trayIcon.UpdateStatus;
             engine.StatusDetailChanged += trayIcon.UpdateStatusDetail;
+            engine.PendingCountChanged += trayIcon.UpdatePendingCount;
 
             // 1a. Register sync root (but don't connect yet — no callbacks active)
             Console.WriteLine("Registering sync root...");

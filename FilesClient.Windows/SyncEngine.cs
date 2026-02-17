@@ -19,6 +19,8 @@ public class SyncEngine : IDisposable
     private readonly PlaceholderManager _placeholderManager;
     private readonly SyncCallbacks _syncCallbacks;
     private readonly FileChangeWatcher _fileChangeWatcher;
+    private readonly SyncOutbox _outbox;
+    private readonly OutboxProcessor _outboxProcessor;
 
     // Maps local file path → StorageNode ID (populated during sync)
     private readonly ConcurrentDictionary<string, string> _pathToNodeId = new(StringComparer.OrdinalIgnoreCase);
@@ -41,10 +43,9 @@ public class SyncEngine : IDisposable
 
     public event Action<SyncStatus>? StatusChanged;
     public event Action<string?>? StatusDetailChanged;
+    public event Action<int>? PendingCountChanged;
 
     private readonly ConcurrentDictionary<long, string> _activeDownloads = new();
-    private readonly SemaphoreSlim _uploadLock = new(1, 1);
-    private string? _uploadDetail;
     private string? _downloadDetail;
 
     /// <summary>
@@ -72,8 +73,17 @@ public class SyncEngine : IDisposable
         StatusChanged?.Invoke(syncStatus);
     }
 
-    public void ReportConnectivityLost() => ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_CONNECTIVITY_LOST);
-    public void ReportConnectivityRestored() => ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_IDLE);
+    public void ReportConnectivityLost()
+    {
+        _outboxProcessor.SetOnline(false);
+        ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_CONNECTIVITY_LOST);
+    }
+
+    public void ReportConnectivityRestored()
+    {
+        _outboxProcessor.SetOnline(true);
+        ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_IDLE);
+    }
 
     private void OnDownloadStarted(long transferKey, string fileName)
     {
@@ -105,10 +115,10 @@ public class SyncEngine : IDisposable
 
     private void ReportTransferDetail()
     {
-        StatusDetailChanged?.Invoke(_downloadDetail ?? _uploadDetail);
+        StatusDetailChanged?.Invoke(_downloadDetail);
     }
 
-    public SyncEngine(string syncRootPath, IJmapClient jmapClient, JmapQueue queue)
+    public SyncEngine(string syncRootPath, IJmapClient jmapClient, JmapQueue queue, string scopeKey)
     {
         _syncRootPath = syncRootPath;
         _jmapClient = jmapClient;
@@ -127,6 +137,10 @@ public class SyncEngine : IDisposable
         _fileChangeWatcher.OnDirectoryPinned += OnDirectoryPinned;
         _fileChangeWatcher.OnFilePinned += OnFilePinned;
         _fileChangeWatcher.OnFileUnpinned += OnFileUnpinned;
+        _outbox = new SyncOutbox(scopeKey);
+        _outbox.Load();
+        _outbox.PendingCountChanged += count => PendingCountChanged?.Invoke(count);
+        _outboxProcessor = new OutboxProcessor(_outbox, this, jmapClient, queue);
     }
 
     public async Task RegisterAsync(string displayName, string accountId, string? iconPath = null)
@@ -140,6 +154,7 @@ public class SyncEngine : IDisposable
         _syncRoot.Connect(registrations, delegates);
 
         _fileChangeWatcher.Start();
+        _outboxProcessor.Start();
         ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_IDLE);
     }
 
@@ -280,6 +295,13 @@ public class SyncEngine : IDisposable
             if (node.ParentId == null)
                 continue;
 
+            // Skip server changes for items with pending local changes
+            if (_outbox.HasPendingForNodeId(node.Id))
+            {
+                Console.WriteLine($"  Skipping update for {node.Id} (pending in outbox)");
+                continue;
+            }
+
             var oldPath = _nodeIdToPath.GetValueOrDefault(node.Id);
             var parentPath = await ResolveLocalPathAsync(node.ParentId, ct);
             if (parentPath == null)
@@ -341,6 +363,12 @@ public class SyncEngine : IDisposable
             if (node.ParentId == null)
                 continue;
 
+            if (_outbox.HasPendingForNodeId(node.Id))
+            {
+                Console.WriteLine($"  Skipping create for {node.Id} (pending in outbox)");
+                continue;
+            }
+
             var parentPath = await ResolveLocalPathAsync(node.ParentId, ct);
             if (parentPath == null)
                 continue;
@@ -371,6 +399,12 @@ public class SyncEngine : IDisposable
 
         foreach (var destroyedId in changes.Destroyed)
         {
+            if (_outbox.HasPendingForNodeId(destroyedId))
+            {
+                Console.WriteLine($"  Skipping destroy for {destroyedId} (pending in outbox)");
+                continue;
+            }
+
             if (_nodeIdToPath.TryRemove(destroyedId, out var localPath))
             {
                 _pathToNodeId.TryRemove(localPath, out _);
@@ -391,217 +425,84 @@ public class SyncEngine : IDisposable
 
     private void OnLocalFileChanges(FileChangeWatcher.FileChange[] changes)
     {
-        // Process uploads on a background thread (fire-and-forget from the timer callback).
-        // The semaphore serializes batches so only one runs at a time, preventing
-        // unbounded concurrent HTTP connections to the server.
-        _ = Task.Run(async () =>
+        foreach (var change in changes)
         {
-            await _uploadLock.WaitAsync();
-            try
+            var isDirectory = Directory.Exists(change.FullPath);
+
+            // Skip echo from our own placeholder conversion/update
+            if (!isDirectory && _recentlyUploaded.TryRemove(change.FullPath, out var uploadedWriteTime))
             {
-                ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_POPULATE_CONTENT);
-
-                // Sort: directories first (shallowest first), then files — ensures parent
-                // directories are created on the server before their children are uploaded.
-                var sorted = changes
-                    .OrderBy(c => Directory.Exists(c.FullPath) ? 0 : 1)
-                    .ThenBy(c => c.FullPath.Count(ch => ch == Path.DirectorySeparatorChar))
-                    .ToArray();
-
-                for (int i = 0; i < sorted.Length; i++)
+                try
                 {
-                    var change = sorted[i];
-                    var uploadFileName = Path.GetFileName(change.FullPath);
-                    int remaining = sorted.Length - i - 1;
-                    _uploadDetail = remaining > 0
-                        ? $"Uploading {uploadFileName} (and {remaining} more)"
-                        : $"Uploading {uploadFileName}";
-                    ReportTransferDetail();
-
-                    try
-                    {
-                        await ProcessLocalChangeAsync(change);
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.Error.WriteLine($"Upload error for {change.FullPath}: {ex.Message}");
-                    }
+                    if (File.GetLastWriteTimeUtc(change.FullPath) == uploadedWriteTime)
+                        continue;
                 }
-
-                _uploadDetail = null;
-                ReportTransferDetail();
-                ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_IDLE);
+                catch { continue; }
             }
-            finally
-            {
-                _uploadLock.Release();
-            }
-        });
-    }
 
-    private async Task ProcessLocalChangeAsync(FileChangeWatcher.FileChange change)
-    {
-        // Handle new directories
-        if (Directory.Exists(change.FullPath))
-        {
-            await ProcessNewFolderAsync(change);
-            return;
-        }
+            // Skip echo for directories already mapped (server-side create)
+            if (isDirectory && _pathToNodeId.ContainsKey(change.FullPath))
+                continue;
 
-        if (!File.Exists(change.FullPath))
-            return;
+            // Skip re-enqueue if this file was just hydrated by cfapi
+            if (!isDirectory && _pathToNodeId.TryGetValue(change.FullPath, out var existingNodeId)
+                && _syncCallbacks.RecentlyHydrated.TryRemove(existingNodeId, out _))
+                continue;
 
-        // Skip echo from our own placeholder conversion/update, but only if the
-        // file hasn't been edited since (LastWriteTime unchanged).
-        if (_recentlyUploaded.TryRemove(change.FullPath, out var uploadedWriteTime)
-            && File.GetLastWriteTimeUtc(change.FullPath) == uploadedWriteTime)
-            return;
+            var nodeId = _pathToNodeId.TryGetValue(change.FullPath, out var nid) ? nid : null;
+            var contentType = ResolveContentType(change.FullPath);
 
-        var fileName = Path.GetFileName(change.FullPath);
-        var parentDir = Path.GetDirectoryName(change.FullPath)!;
-
-        // Determine MIME type from extension
-        var ext = Path.GetExtension(change.FullPath).ToLowerInvariant();
-        var contentType = ext switch
-        {
-            ".txt" => "text/plain",
-            ".html" or ".htm" => "text/html",
-            ".css" => "text/css",
-            ".js" => "application/javascript",
-            ".json" => "application/json",
-            ".xml" => "application/xml",
-            ".png" => "image/png",
-            ".jpg" or ".jpeg" => "image/jpeg",
-            ".gif" => "image/gif",
-            ".pdf" => "application/pdf",
-            ".zip" => "application/zip",
-            _ => "application/octet-stream",
-        };
-
-        if (_pathToNodeId.TryGetValue(change.FullPath, out var existingNodeId))
-        {
-            // Skip re-upload if this file was just hydrated by cfapi
-            if (_syncCallbacks.RecentlyHydrated.TryRemove(existingNodeId, out _))
-                return;
-
-            // Modified existing file — content is immutable, so destroy+create atomically
-            var parentId = await EnsureParentMappedAsync(parentDir);
-
-            Console.WriteLine($"Uploading modified file: {fileName}");
-            using var stream = new FileStream(change.FullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-            var blobId = await _queue.EnqueueAsync(QueuePriority.Background,
-                () => _jmapClient.UploadBlobAsync(stream, contentType));
-            var newNode = await _queue.EnqueueAsync(QueuePriority.Background,
-                () => _jmapClient.ReplaceStorageNodeBlobAsync(existingNodeId, parentId, fileName, blobId, contentType));
-
-            // Update cfapi placeholder identity with new node ID
-            UpdatePlaceholderIdentity(change.FullPath, newNode.Id);
-            _recentlyUploaded[change.FullPath] = File.GetLastWriteTimeUtc(change.FullPath);
-            _nodeIdToPath.TryRemove(existingNodeId, out _);
-            _pathToNodeId[change.FullPath] = newNode.Id;
-            _nodeIdToPath[newNode.Id] = change.FullPath;
-            StripZoneIdentifier(change.FullPath);
-            Console.WriteLine($"Updated: {fileName} → node {newNode.Id} (blob {blobId})");
-        }
-        else
-        {
-            // New file — upload blob, create StorageNode, convert to placeholder
-            var parentId = await EnsureParentMappedAsync(parentDir);
-
-            Console.WriteLine($"Uploading new file: {fileName}");
-            using var stream = new FileStream(change.FullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-            var blobId = await _queue.EnqueueAsync(QueuePriority.Background,
-                () => _jmapClient.UploadBlobAsync(stream, contentType));
-            var node = await _queue.EnqueueAsync(QueuePriority.Background,
-                () => _jmapClient.CreateStorageNodeAsync(parentId, blobId, fileName, contentType));
-
-            // Convert the regular file to a cloud placeholder
-            ConvertToPlaceholder(change.FullPath, node.Id);
-            _pathToNodeId[change.FullPath] = node.Id;
-            _nodeIdToPath[node.Id] = change.FullPath;
-            StripZoneIdentifier(change.FullPath);
-            SetInSync(change.FullPath);
-            _recentlyUploaded[change.FullPath] = File.GetLastWriteTimeUtc(change.FullPath);
-            Console.WriteLine($"Created: {fileName} → node {node.Id}");
+            _outbox.EnqueueContentChange(change.FullPath, nodeId, contentType, isDirectory);
         }
     }
 
-    private async Task ProcessNewFolderAsync(FileChangeWatcher.FileChange change)
-    {
-        // If already mapped, this is an echo from a server-side create
-        if (_pathToNodeId.ContainsKey(change.FullPath))
-        {
-            Console.WriteLine($"New folder: skipping echo for {change.FullPath}");
-            return;
-        }
-
-        var folderName = Path.GetFileName(change.FullPath);
-        var parentDir = Path.GetDirectoryName(change.FullPath)!;
-        var parentId = await EnsureParentMappedAsync(parentDir);
-
-        Console.WriteLine($"Creating folder on server: {folderName}");
-        var node = await _queue.EnqueueAsync(QueuePriority.Background,
-            () => _jmapClient.CreateStorageNodeAsync(parentId, null, folderName));
-
-        ConvertToPlaceholder(change.FullPath, node.Id, isDirectory: true);
-        _pathToNodeId[change.FullPath] = node.Id;
-        _nodeIdToPath[node.Id] = change.FullPath;
-        Console.WriteLine($"Created folder: {folderName} → node {node.Id}");
-    }
-
-    private async Task<bool> HandleDeleteRequestAsync(string? nodeId, string path)
+    private Task<bool> HandleDeleteRequestAsync(string? nodeId, string path)
     {
         // No node ID or path not in our mappings → not a tracked placeholder,
         // or an echo from PollChangesAsync which already removed the mapping.
-        // Allow the delete to proceed without a server call.
         if (nodeId == null || !_pathToNodeId.ContainsKey(path))
         {
             Console.WriteLine($"NOTIFY_DELETE: allowing untracked/echo delete: {path}");
-            return true;
+            return Task.FromResult(true);
         }
 
-        try
+        Console.WriteLine($"NOTIFY_DELETE: queuing delete for node {nodeId}: {path}");
+
+        // Enqueue child deletes for directories
+        var prefix = path + Path.DirectorySeparatorChar;
+        var descendants = _pathToNodeId
+            .Where(kvp => kvp.Key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        foreach (var (descPath, descNodeId) in descendants)
         {
-            Console.WriteLine($"NOTIFY_DELETE: destroying node {nodeId} for {path}");
-            await _queue.EnqueueAsync(QueuePriority.Interactive,
-                () => _jmapClient.DestroyStorageNodeAsync(nodeId));
-
-            // Clean up descendant mappings if this was a directory
-            var prefix = path + Path.DirectorySeparatorChar;
-            var descendants = _pathToNodeId
-                .Where(kvp => kvp.Key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-                .ToList();
-            foreach (var (descPath, descNodeId) in descendants)
-            {
-                _pathToNodeId.TryRemove(descPath, out _);
-                _nodeIdToPath.TryRemove(descNodeId, out _);
-            }
-
-            _pathToNodeId.TryRemove(path, out _);
-            _nodeIdToPath.TryRemove(nodeId, out _);
-            return true;
+            _outbox.EnqueueDelete(descPath, descNodeId);
+            _pathToNodeId.TryRemove(descPath, out _);
+            _nodeIdToPath.TryRemove(descNodeId, out _);
         }
-        catch (Exception ex)
-        {
-            Console.Error.WriteLine($"NOTIFY_DELETE: server call failed, vetoing delete: {ex.Message}");
-            return false;
-        }
+
+        _outbox.EnqueueDelete(path, nodeId);
+        _pathToNodeId.TryRemove(path, out _);
+        _nodeIdToPath.TryRemove(nodeId, out _);
+        return Task.FromResult(true);
     }
 
-    private async Task<bool> HandleRenameRequestAsync(string? nodeId, string source, string target, bool targetInScope)
+    private Task<bool> HandleRenameRequestAsync(string? nodeId, string source, string target, bool targetInScope)
     {
         // No node ID → not a tracked placeholder, allow
         if (nodeId == null)
         {
             Console.WriteLine($"NOTIFY_RENAME: allowing untracked rename: {source} → {target}");
-            return true;
+            return Task.FromResult(true);
         }
 
-        // Veto moves out of sync root
+        // Move out of sync root → queue as delete
         if (!targetInScope)
         {
-            Console.WriteLine($"NOTIFY_RENAME: vetoing move out of sync root: {source} → {target}");
-            return false;
+            Console.WriteLine($"NOTIFY_RENAME: move out of sync root, queuing delete: {source} → {target}");
+            _outbox.EnqueueDelete(source, nodeId);
+            _pathToNodeId.TryRemove(source, out _);
+            _nodeIdToPath.TryRemove(nodeId, out _);
+            return Task.FromResult(true);
         }
 
         // Echo check: if mappings already point to the target, this rename
@@ -610,40 +511,22 @@ public class SyncEngine : IDisposable
             string.Equals(mappedPath, target, StringComparison.OrdinalIgnoreCase))
         {
             Console.WriteLine($"NOTIFY_RENAME: allowing echo for {nodeId}");
-            return true;
+            return Task.FromResult(true);
         }
 
-        try
-        {
-            var parentDir = Path.GetDirectoryName(target)!;
-            var parentId = ResolveParentNodeId(parentDir);
-            if (parentId == null)
-            {
-                Console.Error.WriteLine($"NOTIFY_RENAME: cannot resolve parent for {target}");
-                return false;
-            }
+        Console.WriteLine($"NOTIFY_RENAME: queuing move for node {nodeId}: {source} → {target}");
+        _outbox.EnqueueMove(nodeId, source, target);
 
-            var newName = Path.GetFileName(target);
-            Console.WriteLine($"NOTIFY_RENAME: moving node {nodeId} → {parentId}/{newName}");
-            await _queue.EnqueueAsync(QueuePriority.Interactive,
-                () => _jmapClient.MoveStorageNodeAsync(nodeId, parentId, newName));
+        // Update descendant mappings if this is a directory
+        if (_pathToNodeId.TryGetValue(source, out _) && Directory.Exists(source))
+            UpdateDescendantMappings(source, target);
 
-            // Update descendant mappings if this is a directory
-            if (_pathToNodeId.TryGetValue(source, out _) && Directory.Exists(source))
-                UpdateDescendantMappings(source, target);
+        // Update the renamed item's own mapping immediately
+        _pathToNodeId.TryRemove(source, out _);
+        _pathToNodeId[target] = nodeId;
+        _nodeIdToPath[nodeId] = target;
 
-            // Update the renamed item's own mapping
-            _pathToNodeId.TryRemove(source, out _);
-            _pathToNodeId[target] = nodeId;
-            _nodeIdToPath[nodeId] = target;
-
-            return true;
-        }
-        catch (Exception ex)
-        {
-            Console.Error.WriteLine($"NOTIFY_RENAME: server call failed, vetoing rename: {ex.Message}");
-            return false;
-        }
+        return Task.FromResult(true);
     }
 
     private void OnDirectoryPopulated(SyncCallbacks.DirectoryPopulatedInfo info)
@@ -1109,11 +992,50 @@ public class SyncEngine : IDisposable
         ).ThrowOnFailure();
     }
 
-    private string? ResolveParentNodeId(string localPath)
+    internal string? ResolveParentNodeId(string localPath)
     {
         if (string.Equals(localPath, _syncRootPath, StringComparison.OrdinalIgnoreCase))
             return "root";
         return _pathToNodeId.TryGetValue(localPath, out var id) ? id : null;
+    }
+
+    /// <summary>
+    /// Update path↔nodeId mappings. Called by OutboxProcessor after server operations.
+    /// </summary>
+    internal void UpdateMappings(string localPath, string? oldNodeId, string newNodeId)
+    {
+        if (oldNodeId != null)
+            _nodeIdToPath.TryRemove(oldNodeId, out _);
+        _pathToNodeId[localPath] = newNodeId;
+        _nodeIdToPath[newNodeId] = localPath;
+    }
+
+    /// <summary>
+    /// Record that a file was recently uploaded, to suppress FileSystemWatcher echo.
+    /// </summary>
+    internal void RecordRecentUpload(string localPath)
+    {
+        _recentlyUploaded[localPath] = File.GetLastWriteTimeUtc(localPath);
+    }
+
+    internal static string ResolveContentType(string filePath)
+    {
+        var ext = Path.GetExtension(filePath).ToLowerInvariant();
+        return ext switch
+        {
+            ".txt" => "text/plain",
+            ".html" or ".htm" => "text/html",
+            ".css" => "text/css",
+            ".js" => "application/javascript",
+            ".json" => "application/json",
+            ".xml" => "application/xml",
+            ".png" => "image/png",
+            ".jpg" or ".jpeg" => "image/jpeg",
+            ".gif" => "image/gif",
+            ".pdf" => "application/pdf",
+            ".zip" => "application/zip",
+            _ => "application/octet-stream",
+        };
     }
 
     /// <summary>
@@ -1180,7 +1102,7 @@ public class SyncEngine : IDisposable
         }
     }
 
-    private static unsafe void ConvertToPlaceholder(string filePath, string nodeId, bool isDirectory = false)
+    internal static unsafe void ConvertToPlaceholder(string filePath, string nodeId, bool isDirectory = false)
     {
         var identityBytes = Encoding.UTF8.GetBytes(nodeId);
         using var safeHandle = OpenWithRetry(filePath, isDirectory);
@@ -1202,7 +1124,7 @@ public class SyncEngine : IDisposable
         }
     }
 
-    private static unsafe void UpdatePlaceholderIdentity(string filePath, string newNodeId)
+    internal static unsafe void UpdatePlaceholderIdentity(string filePath, string newNodeId)
     {
         var identityBytes = Encoding.UTF8.GetBytes(newNodeId);
         using var safeHandle = OpenWithRetry(filePath);
@@ -1245,7 +1167,7 @@ public class SyncEngine : IDisposable
     private const uint FILE_WRITE_ATTRIBUTES = 0x100;
     private const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
 
-    private static unsafe void SetInSync(string path)
+    internal static unsafe void SetInSync(string path)
     {
         // Use FILE_WRITE_ATTRIBUTES to avoid triggering hydration on dehydrated
         // files. GENERIC_READ/GENERIC_WRITE would cause cfapi to send FETCH_DATA.
@@ -1348,7 +1270,7 @@ public class SyncEngine : IDisposable
         }
     }
 
-    private static void StripZoneIdentifier(string filePath)
+    internal static void StripZoneIdentifier(string filePath)
     {
         try { File.Delete(filePath + ":Zone.Identifier"); } catch { }
     }
@@ -1424,8 +1346,9 @@ public class SyncEngine : IDisposable
         }
         _pinnedDirectories.Clear();
 
+        _outboxProcessor.Dispose();
+        _outbox.Dispose();
         _fileChangeWatcher.Dispose();
-        _uploadLock.Dispose();
         _syncRoot.Dispose();
     }
 }

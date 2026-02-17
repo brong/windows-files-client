@@ -22,6 +22,7 @@ sealed class TrayIcon : IDisposable
     private IntPtr _currentHIcon;
     private SyncStatus _lastStatus;
     private string? _lastDetail;
+    private int _pendingCount;
     private bool _disposed;
 
     public TrayIcon(CancellationTokenSource cts, string? iconPath, string syncRootPath, string username)
@@ -64,19 +65,37 @@ sealed class TrayIcon : IDisposable
         }, null);
     }
 
+    public void UpdatePendingCount(int count)
+    {
+        _syncContext?.Post(_ =>
+        {
+            if (_notifyIcon == null) return;
+            _pendingCount = count;
+            RefreshTooltip();
+        }, null);
+    }
+
     private void RefreshTooltip()
     {
+        var pendingSuffix = _pendingCount > 0
+            ? $" ({_pendingCount} pending)"
+            : "";
+
         var (color, defaultTooltip) = _lastStatus switch
         {
+            SyncStatus.Idle when _pendingCount > 0 =>
+                (Color.DodgerBlue, $"{_username} - {_pendingCount} pending changes"),
             SyncStatus.Idle => (Color.LimeGreen, $"{_username} - Up to date"),
             SyncStatus.Syncing => (Color.DodgerBlue, $"{_username} - Syncing..."),
             SyncStatus.Error => (Color.Red, $"{_username} - Error"),
+            SyncStatus.Disconnected when _pendingCount > 0 =>
+                (Color.Gray, $"{_username} - Offline ({_pendingCount} pending)"),
             SyncStatus.Disconnected => (Color.Gray, $"{_username} - Connection lost"),
             _ => (Color.Gray, _username),
         };
 
         var tooltip = _lastDetail != null
-            ? $"{_username} - {_lastDetail}"
+            ? $"{_username} - {_lastDetail}{pendingSuffix}"
             : defaultTooltip;
 
         // NotifyIcon.Text has a 127-character limit
