@@ -497,10 +497,11 @@ internal class SyncCallbacks
 
         var node = nodes[0];
         var algo = GetDigestAlgorithm();
-        bool isPartialRequest = requiredOffset > 0 || requiredLength < node.Size;
+        var nodeSize = node.Size ?? 0;
+        bool isPartialRequest = requiredOffset > 0 || requiredLength < nodeSize;
 
         // Path A — Small file via Blob/get (full file, ≤ 16KB)
-        if (!isPartialRequest && node.Size <= BlobGetMaxSize && algo != null)
+        if (!isPartialRequest && nodeSize <= BlobGetMaxSize && algo != null)
         {
             try
             {
@@ -512,7 +513,7 @@ internal class SyncCallbacks
                     var data = Convert.FromBase64String(item.DataAsBase64);
                     VerifyDigest(algo, data, item, $"Blob/get {node.BlobId}");
                     Console.WriteLine($"FETCH_DATA: small file via Blob/get, {data.Length} bytes");
-                    return (data, 0, node.Size);
+                    return (data, 0, nodeSize);
                 }
             }
             catch (OperationCanceledException) { throw; }
@@ -557,7 +558,7 @@ internal class SyncCallbacks
                                 Console.Error.WriteLine($"Digest fetch failed for range request: {ex.Message}");
                             }
                         }
-                        return (rangeBytes, requiredOffset, node.Size);
+                        return (rangeBytes, requiredOffset, nodeSize);
                     }
 
                     // Server returned 200 (full content) — disable range requests
@@ -578,7 +579,7 @@ internal class SyncCallbacks
                             Console.Error.WriteLine($"Digest fetch failed for full fallback: {ex.Message}");
                         }
                     }
-                    return (rangeBytes, 0, node.Size);
+                    return (rangeBytes, 0, nodeSize);
                 }
             }
             catch (OperationCanceledException) { throw; }
@@ -616,7 +617,7 @@ internal class SyncCallbacks
                 }
             }
 
-            return (fullBytes, 0, node.Size);
+            return (fullBytes, 0, nodeSize);
         }
     }
 

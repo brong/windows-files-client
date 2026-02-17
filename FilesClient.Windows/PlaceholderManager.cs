@@ -73,7 +73,7 @@ internal class PlaceholderManager
                 else
                 {
                     info.FsMetadata.BasicInfo.FileAttributes = (uint)FileAttributes.Normal;
-                    info.FsMetadata.FileSize = node.Size;
+                    info.FsMetadata.FileSize = node.Size ?? 0;
                 }
 
                 if (node.Created.HasValue)

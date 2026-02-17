@@ -20,7 +20,7 @@ public class FileNode
     public string? Type { get; set; }
 
     [JsonPropertyName("size")]
-    public long Size { get; set; }
+    public long? Size { get; set; }
 
     [JsonPropertyName("created")]
     public DateTime? Created { get; set; }
