@@ -121,7 +121,7 @@ sealed class StatusForm : Form
 
     private void RefreshList()
     {
-        var snapshot = _outbox.GetSnapshot();
+        var (snapshot, processingIds) = _outbox.GetSnapshot();
         var now = DateTime.UtcNow;
 
         _listView.BeginUpdate();
@@ -134,7 +134,8 @@ sealed class StatusForm : Form
                 : entry.NodeId ?? "(unknown)";
 
             var action = DeriveAction(entry);
-            var status = DeriveStatus(entry, now);
+            var isProcessing = processingIds.Contains(entry.Id);
+            var status = isProcessing ? "Syncing..." : DeriveStatus(entry, now);
 
             var item = new ListViewItem(name);
             item.SubItems.Add(action);
@@ -147,8 +148,10 @@ sealed class StatusForm : Form
                 tooltip += $"\nError: {entry.LastError}";
             item.ToolTipText = tooltip;
 
-            // Red foreground for entries with errors
-            if (entry.LastError != null)
+            // Color: blue for active sync, red for errors
+            if (isProcessing)
+                item.ForeColor = Color.DodgerBlue;
+            else if (entry.LastError != null)
                 item.ForeColor = Color.Red;
 
             _listView.Items.Add(item);

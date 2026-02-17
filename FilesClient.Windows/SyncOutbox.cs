@@ -59,6 +59,7 @@ public class SyncOutbox : IDisposable
     private readonly Timer _saveTimer;
     private readonly ManualResetEventSlim _workSignal = new(false);
     private bool _disposed;
+    private readonly HashSet<Guid> _processingIds = new();
 
     public event Action<int>? PendingCountChanged;
 
@@ -312,7 +313,8 @@ public class SyncOutbox : IDisposable
         lock (_lock)
         {
             var ready = _entries.Values
-                .Where(e => e.NextRetryAfter == null || e.NextRetryAfter <= now)
+                .Where(e => !_processingIds.Contains(e.Id)
+                    && (e.NextRetryAfter == null || e.NextRetryAfter <= now))
                 .ToList();
 
             // 1. Folder creates — shallowest first
@@ -348,11 +350,20 @@ public class SyncOutbox : IDisposable
         }
     }
 
+    /// <summary>Mark a change as currently being processed.</summary>
+    public void MarkProcessing(Guid id)
+    {
+        lock (_lock)
+            _processingIds.Add(id);
+        RaisePendingCountChanged();
+    }
+
     /// <summary>Mark a change as successfully processed.</summary>
     public void MarkCompleted(Guid id)
     {
         lock (_lock)
         {
+            _processingIds.Remove(id);
             if (_entries.TryGetValue(id, out var entry))
             {
                 RemoveEntryLocked(entry);
@@ -368,6 +379,7 @@ public class SyncOutbox : IDisposable
     {
         lock (_lock)
         {
+            _processingIds.Remove(id);
             if (_entries.TryGetValue(id, out var entry))
             {
                 entry.AttemptCount++;
@@ -377,13 +389,15 @@ public class SyncOutbox : IDisposable
                 MarkDirtyAndSignal();
             }
         }
+
+        RaisePendingCountChanged();
     }
 
-    /// <summary>Return a snapshot of all pending changes.</summary>
-    public PendingChange[] GetSnapshot()
+    /// <summary>Return a snapshot of all pending changes and the set of currently processing IDs.</summary>
+    public (PendingChange[] Entries, HashSet<Guid> ProcessingIds) GetSnapshot()
     {
         lock (_lock)
-            return _entries.Values.ToArray();
+            return (_entries.Values.ToArray(), new HashSet<Guid>(_processingIds));
     }
 
     /// <summary>Check if there's a pending change for the given nodeId.</summary>

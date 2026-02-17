@@ -4,6 +4,8 @@ namespace FilesClient.Windows;
 
 public class OutboxProcessor : IDisposable
 {
+    private const int MaxConcurrency = 4;
+
     private readonly SyncOutbox _outbox;
     private readonly SyncEngine _engine;
     private readonly IJmapClient _jmapClient;
@@ -11,6 +13,7 @@ public class OutboxProcessor : IDisposable
     private CancellationTokenSource? _cts;
     private Task? _loopTask;
     private volatile bool _online = true;
+    private readonly SemaphoreSlim _workerSlots = new(MaxConcurrency, MaxConcurrency);
 
     public OutboxProcessor(SyncOutbox outbox, SyncEngine engine, IJmapClient jmapClient, JmapQueue queue)
     {
@@ -23,7 +26,7 @@ public class OutboxProcessor : IDisposable
     public void Start()
     {
         _cts = new CancellationTokenSource();
-        _loopTask = Task.Run(() => ProcessLoop(_cts.Token));
+        _loopTask = Task.Run(() => DispatchLoop(_cts.Token));
     }
 
     public void SetOnline(bool online)
@@ -31,7 +34,7 @@ public class OutboxProcessor : IDisposable
         _online = online;
     }
 
-    private async Task ProcessLoop(CancellationToken ct)
+    private async Task DispatchLoop(CancellationToken ct)
     {
         while (!ct.IsCancellationRequested)
         {
@@ -43,33 +46,48 @@ public class OutboxProcessor : IDisposable
                     continue;
                 }
 
+                // Wait for a worker slot to be available
+                await _workerSlots.WaitAsync(ct);
+
                 var change = _outbox.DequeueNext();
                 if (change == null)
                 {
+                    _workerSlots.Release();
                     try { _outbox.WaitForWork(TimeSpan.FromSeconds(10), ct); }
                     catch (OperationCanceledException) { break; }
                     continue;
                 }
 
-                try
-                {
-                    await ProcessChangeAsync(change, ct);
-                    _outbox.MarkCompleted(change.Id);
-                }
-                catch (OperationCanceledException) { break; }
-                catch (Exception ex)
-                {
-                    Console.Error.WriteLine($"Outbox process error for {change.LocalPath ?? change.NodeId}: {ex.Message}");
-                    _outbox.MarkFailed(change.Id, ex.Message);
-                }
+                _outbox.MarkProcessing(change.Id);
+                // Fire-and-forget — the worker releases its slot when done
+                _ = ProcessWorkerAsync(change, ct);
             }
             catch (OperationCanceledException) { break; }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"Outbox loop error: {ex.Message}");
+                Console.Error.WriteLine($"Outbox dispatch error: {ex.Message}");
                 try { await Task.Delay(1000, ct); }
                 catch (OperationCanceledException) { break; }
             }
+        }
+    }
+
+    private async Task ProcessWorkerAsync(PendingChange change, CancellationToken ct)
+    {
+        try
+        {
+            await ProcessChangeAsync(change, ct);
+            _outbox.MarkCompleted(change.Id);
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Outbox process error for {change.LocalPath ?? change.NodeId}: {ex.Message}");
+            _outbox.MarkFailed(change.Id, ex.Message);
+        }
+        finally
+        {
+            _workerSlots.Release();
         }
     }
 
@@ -245,5 +263,6 @@ public class OutboxProcessor : IDisposable
             catch { /* shutdown */ }
             _cts.Dispose();
         }
+        _workerSlots.Dispose();
     }
 }
