@@ -379,6 +379,13 @@ public class SyncOutbox : IDisposable
         }
     }
 
+    /// <summary>Return a snapshot of all pending changes.</summary>
+    public PendingChange[] GetSnapshot()
+    {
+        lock (_lock)
+            return _entries.Values.ToArray();
+    }
+
     /// <summary>Check if there's a pending change for the given nodeId.</summary>
     public bool HasPendingForNodeId(string nodeId)
     {

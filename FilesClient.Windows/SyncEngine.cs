@@ -40,6 +40,7 @@ public class SyncEngine : IDisposable
     private readonly ConcurrentDictionary<string, DateTime> _recentlyUploaded = new(StringComparer.OrdinalIgnoreCase);
 
     public string SyncRootPath => _syncRootPath;
+    public SyncOutbox Outbox => _outbox;
 
     public event Action<SyncStatus>? StatusChanged;
     public event Action<string?>? StatusDetailChanged;

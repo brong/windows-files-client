@@ -24,6 +24,9 @@ sealed class TrayIcon : IDisposable
     private string? _lastDetail;
     private int _pendingCount;
     private bool _disposed;
+    private SyncOutbox? _outbox;
+    private string? _accountLabel;
+    private StatusForm? _statusForm;
 
     public TrayIcon(CancellationTokenSource cts, string? iconPath, string syncRootPath, string username)
     {
@@ -45,6 +48,12 @@ sealed class TrayIcon : IDisposable
         _ready.Wait();
     }
 
+    public void SetOutbox(string accountLabel, SyncOutbox outbox)
+    {
+        _outbox = outbox;
+        _accountLabel = accountLabel;
+    }
+
     public void UpdateStatus(SyncStatus status)
     {
         _syncContext?.Post(_ =>
@@ -52,6 +61,7 @@ sealed class TrayIcon : IDisposable
             if (_notifyIcon == null) return;
             _lastStatus = status;
             RefreshTooltip();
+            _statusForm?.UpdateStatus(status);
         }, null);
     }
 
@@ -197,6 +207,11 @@ sealed class TrayIcon : IDisposable
             catch { /* best-effort */ }
         });
 
+        menu.Items.Add("View pending changes...", null, (_, _) =>
+        {
+            ShowStatusForm();
+        });
+
         menu.Items.Add(new ToolStripSeparator());
 
         menu.Items.Add("Exit", null, (_, _) =>
@@ -206,6 +221,27 @@ sealed class TrayIcon : IDisposable
         });
 
         return menu;
+    }
+
+    private void ShowStatusForm()
+    {
+        if (_outbox == null || _accountLabel == null)
+            return;
+
+        _syncContext?.Post(_ =>
+        {
+            if (_statusForm == null || _statusForm.IsDisposed)
+                _statusForm = new StatusForm(_accountLabel, _outbox, _lastStatus);
+
+            if (_statusForm.Visible)
+            {
+                _statusForm.Activate();
+            }
+            else
+            {
+                _statusForm.Show();
+            }
+        }, null);
     }
 
     public void Dispose()

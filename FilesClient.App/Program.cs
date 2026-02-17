@@ -129,6 +129,7 @@ class Program
             engine.StatusChanged += trayIcon.UpdateStatus;
             engine.StatusDetailChanged += trayIcon.UpdateStatusDetail;
             engine.PendingCountChanged += trayIcon.UpdatePendingCount;
+            trayIcon.SetOutbox(jmapClient.Context.Username, engine.Outbox);
 
             // 1a. Register sync root (but don't connect yet — no callbacks active)
             Console.WriteLine("Registering sync root...");
