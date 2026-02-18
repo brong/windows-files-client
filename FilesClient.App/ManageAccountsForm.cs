@@ -9,7 +9,8 @@ sealed class ManageAccountsForm : Form
     private readonly string? _iconPath;
     private readonly ListView _listView;
     private readonly Button _addButton;
-    private readonly Button _removeButton;
+    private readonly Button _cleanUpButton;
+    private readonly Button _removeLoginButton;
     private readonly Button _configureButton;
     private readonly System.Windows.Forms.Timer _refreshTimer;
 
@@ -19,8 +20,8 @@ sealed class ManageAccountsForm : Form
         _iconPath = iconPath;
 
         Text = "Fastmail Files - Manage Accounts";
-        Size = new Size(500, 350);
-        MinimumSize = new Size(400, 250);
+        Size = new Size(550, 350);
+        MinimumSize = new Size(500, 250);
         StartPosition = FormStartPosition.CenterScreen;
         ShowInTaskbar = true;
 
@@ -33,7 +34,7 @@ sealed class ManageAccountsForm : Form
             MultiSelect = false,
         };
         _listView.Columns.Add("Account", 200);
-        _listView.Columns.Add("Sync Folder", 160);
+        _listView.Columns.Add("Sync Folder", 180);
         _listView.Columns.Add("Status", 80);
         _listView.SelectedIndexChanged += (_, _) => UpdateButtonState();
 
@@ -46,29 +47,39 @@ sealed class ManageAccountsForm : Form
 
         _addButton = new Button
         {
-            Text = "Add account...",
-            Width = 110,
+            Text = "Add...",
+            Width = 65,
             Height = 28,
             Location = new Point(8, 8),
         };
         _addButton.Click += OnAddClicked;
 
-        _removeButton = new Button
+        _cleanUpButton = new Button
         {
-            Text = "Remove",
-            Width = 80,
+            Text = "Clean up",
+            Width = 75,
             Height = 28,
-            Location = new Point(125, 8),
+            Location = new Point(80, 8),
             Enabled = false,
         };
-        _removeButton.Click += OnRemoveClicked;
+        _cleanUpButton.Click += OnCleanUpClicked;
+
+        _removeLoginButton = new Button
+        {
+            Text = "Remove login",
+            Width = 100,
+            Height = 28,
+            Location = new Point(162, 8),
+            Enabled = false,
+        };
+        _removeLoginButton.Click += OnRemoveLoginClicked;
 
         _configureButton = new Button
         {
             Text = "Configure...",
             Width = 90,
             Height = 28,
-            Location = new Point(212, 8),
+            Location = new Point(269, 8),
             Enabled = false,
         };
         _configureButton.Click += OnConfigureClicked;
@@ -83,7 +94,7 @@ sealed class ManageAccountsForm : Form
         closeButton.Location = new Point(bottomPanel.Width - closeButton.Width - 12, 8);
         closeButton.Click += (_, _) => Close();
 
-        bottomPanel.Controls.AddRange([_addButton, _removeButton, _configureButton, closeButton]);
+        bottomPanel.Controls.AddRange([_addButton, _cleanUpButton, _removeLoginButton, _configureButton, closeButton]);
         Controls.Add(bottomPanel);
         Controls.Add(_listView);
 
@@ -135,7 +146,8 @@ sealed class ManageAccountsForm : Form
     private void UpdateButtonState()
     {
         var hasSelection = _listView.SelectedItems.Count > 0;
-        _removeButton.Enabled = hasSelection;
+        _cleanUpButton.Enabled = hasSelection;
+        _removeLoginButton.Enabled = hasSelection;
         _configureButton.Enabled = hasSelection;
     }
 
@@ -145,7 +157,7 @@ sealed class ManageAccountsForm : Form
         addForm.ShowDialog(this);
     }
 
-    private async void OnRemoveClicked(object? sender, EventArgs e)
+    private async void OnCleanUpClicked(object? sender, EventArgs e)
     {
         if (_listView.SelectedItems.Count == 0)
             return;
@@ -155,25 +167,69 @@ sealed class ManageAccountsForm : Form
             return;
 
         var result = MessageBox.Show(
-            $"Remove {supervisor.DisplayName}?\n\nThis will stop syncing and remove the stored credential. Local files will not be deleted.",
-            "Remove Account",
+            $"Clean up {supervisor.DisplayName}?\n\n" +
+            "This will stop syncing, unregister the sync root, and delete all local files in:\n" +
+            $"{supervisor.SyncRootPath}",
+            "Clean Up Account",
             MessageBoxButtons.YesNo,
-            MessageBoxIcon.Question);
+            MessageBoxIcon.Warning);
 
         if (result != DialogResult.Yes)
             return;
 
-        var loginId = CredentialStore.DeriveLoginId(supervisor.Username, "");
-        // Find the actual loginId by matching the supervisor's account
-        // The LoginManager tracks sessions with loginIds
         try
         {
-            _removeButton.Enabled = false;
+            _cleanUpButton.Enabled = false;
+            _removeLoginButton.Enabled = false;
+            await _loginManager.CleanUpAccountAsync(supervisor.AccountId);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Failed to clean up account: {ex.Message}", "Error",
+                MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private async void OnRemoveLoginClicked(object? sender, EventArgs e)
+    {
+        if (_listView.SelectedItems.Count == 0)
+            return;
+
+        var supervisor = _listView.SelectedItems[0].Tag as AccountSupervisor;
+        if (supervisor == null)
+            return;
+
+        var loginId = _loginManager.GetLoginIdForAccount(supervisor.AccountId);
+        if (loginId == null)
+        {
+            MessageBox.Show("Could not find login for this account.", "Error",
+                MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
+
+        var activeIds = _loginManager.GetActiveAccountIds(loginId);
+        var accountWord = activeIds.Count == 1 ? "account" : $"{activeIds.Count} accounts";
+
+        var result = MessageBox.Show(
+            $"Remove login {loginId}?\n\n" +
+            $"This will stop syncing {accountWord}, unregister all sync roots, " +
+            "delete local files, and forget the stored credential.",
+            "Remove Login",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Warning);
+
+        if (result != DialogResult.Yes)
+            return;
+
+        try
+        {
+            _cleanUpButton.Enabled = false;
+            _removeLoginButton.Enabled = false;
             await _loginManager.RemoveLoginAsync(loginId);
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Failed to remove account: {ex.Message}", "Error",
+            MessageBox.Show($"Failed to remove login: {ex.Message}", "Error",
                 MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
