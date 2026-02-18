@@ -84,7 +84,7 @@ sealed class LoginManager : IDisposable
     }
 
     /// <summary>
-    /// Remove a login: stop its supervisors, remove credential.
+    /// Remove a login: stop all its supervisors, clean sync roots, remove credential.
     /// </summary>
     public async Task RemoveLoginAsync(string loginId)
     {
@@ -100,14 +100,13 @@ sealed class LoginManager : IDisposable
 
         foreach (var supervisor in toStop)
         {
-            try
-            {
-                await supervisor.StopAsync();
-            }
+            try { await supervisor.StopAsync(); }
             catch (Exception ex)
             {
                 Console.Error.WriteLine($"Error stopping supervisor {supervisor.DisplayName}: {ex.Message}");
             }
+
+            CleanSupervisorSyncRoot(supervisor);
             supervisor.Dispose();
         }
 
@@ -122,6 +121,70 @@ sealed class LoginManager : IDisposable
         _credentialStore.Remove(loginId);
         AccountsChanged?.Invoke();
         RaiseAggregateStatus();
+    }
+
+    /// <summary>
+    /// Clean up a single account: stop supervisor, unregister sync root, delete local files.
+    /// If other accounts remain under the same login, update the credential's enabled set.
+    /// If no accounts remain, remove the credential entirely.
+    /// </summary>
+    public async Task CleanUpAccountAsync(string accountId)
+    {
+        AccountSupervisor? supervisor;
+        LoginSession? session;
+
+        lock (_lock)
+        {
+            supervisor = _supervisors.FirstOrDefault(s => s.AccountId == accountId);
+            session = _sessions.FirstOrDefault(s => s.AccountIds.Contains(accountId));
+        }
+
+        if (supervisor == null)
+            return;
+
+        try { await supervisor.StopAsync(); }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Error stopping supervisor {supervisor.DisplayName}: {ex.Message}");
+        }
+
+        CleanSupervisorSyncRoot(supervisor);
+        supervisor.Dispose();
+
+        lock (_lock)
+            _supervisors.Remove(supervisor);
+
+        // Update or remove the stored credential
+        if (session != null)
+        {
+            var remaining = GetActiveAccountIds(session.LoginId);
+            if (remaining.Count == 0)
+            {
+                _credentialStore.Remove(session.LoginId);
+                lock (_lock)
+                    _sessions.Remove(session);
+            }
+            else
+            {
+                _credentialStore.Save(session.LoginId, session.Token, session.SessionUrl, remaining);
+            }
+        }
+
+        AccountsChanged?.Invoke();
+        RaiseAggregateStatus();
+    }
+
+    private static void CleanSupervisorSyncRoot(AccountSupervisor supervisor)
+    {
+        try
+        {
+            Console.WriteLine($"Cleaning sync root for {supervisor.DisplayName}...");
+            SyncEngine.Clean(supervisor.SyncRootPath, supervisor.AccountId);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Error cleaning sync root for {supervisor.DisplayName}: {ex.Message}");
+        }
     }
 
     /// <summary>
