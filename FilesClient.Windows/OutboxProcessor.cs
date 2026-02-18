@@ -192,9 +192,9 @@ public class OutboxProcessor : IDisposable
                 FileShare.ReadWrite | FileShare.Delete);
             using var stream = new ProgressStream(fileStream, fileStream.Length,
                 percent => _outbox.UpdateProgress(change.Id, percent));
-            // Size-based timeout: 60s base + 1s per 50KB (~50KB/s minimum throughput)
+            // Size-based timeout: 120s base + 1s per 25KB (~25KB/s minimum throughput)
             // Activity-based timeouts don't work because HTTP/2 buffers all reads upfront
-            var timeout1 = Math.Max(60, (int)(fileStream.Length / 50_000) + 60);
+            var timeout1 = (int)(fileStream.Length / 25_000) + 120;
             using var uploadCts1 = CancellationTokenSource.CreateLinkedTokenSource(ct);
             uploadCts1.CancelAfter(TimeSpan.FromSeconds(timeout1));
             var blobId = await _queue.EnqueueAsync(QueuePriority.Background,
@@ -233,7 +233,7 @@ public class OutboxProcessor : IDisposable
                 FileShare.ReadWrite | FileShare.Delete);
             using var stream = new ProgressStream(fileStream, fileStream.Length,
                 percent => _outbox.UpdateProgress(change.Id, percent));
-            var timeout2 = Math.Max(60, (int)(fileStream.Length / 50_000) + 60);
+            var timeout2 = (int)(fileStream.Length / 25_000) + 120;
             using var uploadCts2 = CancellationTokenSource.CreateLinkedTokenSource(ct);
             uploadCts2.CancelAfter(TimeSpan.FromSeconds(timeout2));
             var blobId = await _queue.EnqueueAsync(QueuePriority.Background,
