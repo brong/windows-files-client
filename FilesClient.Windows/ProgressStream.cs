@@ -10,15 +10,13 @@ sealed class ProgressStream : Stream
     private readonly long _totalLength;
     private long _bytesRead;
     private readonly Action<int> _onProgress;
-    private readonly Action? _onActivity;
     private int _lastReported = -1;
 
-    public ProgressStream(Stream inner, long totalLength, Action<int> onProgress, Action? onActivity = null)
+    public ProgressStream(Stream inner, long totalLength, Action<int> onProgress)
     {
         _inner = inner;
         _totalLength = totalLength;
         _onProgress = onProgress;
-        _onActivity = onActivity;
     }
 
     public override bool CanRead => true;
@@ -57,8 +55,6 @@ sealed class ProgressStream : Stream
     {
         if (bytesRead <= 0)
             return;
-
-        _onActivity?.Invoke();
 
         if (_totalLength <= 0)
             return;
