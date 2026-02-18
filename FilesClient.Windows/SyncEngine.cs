@@ -21,6 +21,7 @@ public class SyncEngine : IDisposable
     private readonly FileChangeWatcher _fileChangeWatcher;
     private readonly SyncOutbox _outbox;
     private readonly OutboxProcessor _outboxProcessor;
+    private readonly string _scopeKey;
 
     // Maps local file path → FileNode ID (populated during sync)
     private readonly ConcurrentDictionary<string, string> _pathToNodeId = new(StringComparer.OrdinalIgnoreCase);
@@ -140,6 +141,7 @@ public class SyncEngine : IDisposable
         _fileChangeWatcher.OnDirectoryPinned += OnDirectoryPinned;
         _fileChangeWatcher.OnFilePinned += OnFilePinned;
         _fileChangeWatcher.OnFileUnpinned += OnFileUnpinned;
+        _scopeKey = scopeKey;
         _outbox = new SyncOutbox(scopeKey);
         _outbox.Load();
         _outbox.PendingCountChanged += count => PendingCountChanged?.Invoke(count);
@@ -163,6 +165,29 @@ public class SyncEngine : IDisposable
 
     public async Task<string> PopulateAsync(CancellationToken ct)
     {
+        // Try warm start from cache
+        var cache = NodeCache.Load(_scopeKey);
+        if (cache != null)
+        {
+            try
+            {
+                return await PopulateFromCacheAsync(cache, ct);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Warm start failed, falling back to full fetch: {ex.Message}");
+                _pathToNodeId.Clear();
+                _nodeIdToPath.Clear();
+                _pinnedDirectories.Clear();
+            }
+        }
+
+        // Full fetch (cold start)
+        return await PopulateFullAsync(ct);
+    }
+
+    private async Task<string> PopulateFullAsync(CancellationToken ct)
+    {
         ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_POPULATE_NAMESPACE);
 
         // Discover home node
@@ -181,8 +206,16 @@ public class SyncEngine : IDisposable
             () => _jmapClient.GetFileNodesByIdsPagedAsync(allIds, 1024, ct), ct);
         Console.WriteLine($"Fetched {allNodes.Length} FileNodes, state: {state}");
 
+        BuildTreeAndCreatePlaceholders(allNodes);
+
+        SaveNodeCache(state);
+        ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_IDLE);
+        return state;
+    }
+
+    private void BuildTreeAndCreatePlaceholders(FileNode[] allNodes)
+    {
         // Build tree client-side: group by parentId, BFS from home node
-        var nodeById = allNodes.ToDictionary(n => n.Id);
         var childrenByParent = allNodes
             .Where(n => n.ParentId != null)
             .GroupBy(n => n.ParentId!)
@@ -246,19 +279,23 @@ public class SyncEngine : IDisposable
             catch { /* directory might not be a placeholder */ }
         }
 
-        // Phase 4: Detect directories that were pinned while the app was stopped
-        // and hydrate their contents now.
+        DetectAndHydratePinnedDirectories(tree.Select(t => t.localParentPath));
+    }
+
+    private void DetectAndHydratePinnedDirectories(IEnumerable<string> directoryPaths)
+    {
         const FileAttributes pinnedFlag = (FileAttributes)0x00080000;
-        foreach (var (_, localParentPath, _) in tree)
+        foreach (var dirPath in directoryPaths)
         {
             try
             {
-                var attrs = File.GetAttributes(localParentPath);
+                var attrs = File.GetAttributes(dirPath);
                 if ((attrs & pinnedFlag) != 0)
-                    _pinnedDirectories.TryAdd(localParentPath, new CancellationTokenSource());
+                    _pinnedDirectories.TryAdd(dirPath, new CancellationTokenSource());
             }
             catch { }
         }
+
         if (!_pinnedDirectories.IsEmpty)
         {
             Console.WriteLine($"Found {_pinnedDirectories.Count} pinned directories, hydrating...");
@@ -285,8 +322,190 @@ public class SyncEngine : IDisposable
                 }
             });
         }
+    }
 
+    private async Task<string> PopulateFromCacheAsync(CacheSnapshot cache, CancellationToken ct)
+    {
+        ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_SYNC_INCREMENTAL);
+        _homeNodeId = cache.HomeNodeId;
+
+        // Rebuild mappings from cache
+        Console.WriteLine($"Restoring {cache.Entries.Count} mappings from cache...");
+        foreach (var (nodeId, relativePath) in cache.Entries)
+        {
+            var fullPath = Path.Combine(_syncRootPath, relativePath);
+            _nodeIdToPath[nodeId] = fullPath;
+            _pathToNodeId[fullPath] = nodeId;
+        }
+
+        // Walk directories: mark ALWAYS_FULL + detect pinned
+        var directories = new List<string>();
+        foreach (var path in _nodeIdToPath.Values)
+        {
+            if (Directory.Exists(path))
+            {
+                directories.Add(path);
+                try { MarkDirectoryAlwaysFull(path); }
+                catch { /* directory might not be a placeholder */ }
+            }
+        }
+
+        // Catch up with server
+        string newState;
+        Console.WriteLine($"Catching up from state {cache.State}...");
+        try
+        {
+            newState = await PollChangesAsync(cache.State, ct);
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("cannotCalculateChanges"))
+        {
+            Console.WriteLine("State too old, reconciling from server...");
+            newState = await ReconcileFromServerAsync(ct);
+        }
+
+        // Detect and hydrate pinned directories
+        DetectAndHydratePinnedDirectories(directories);
+
+        SaveNodeCache(newState);
         ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_IDLE);
+        return newState;
+    }
+
+    private async Task<string> ReconcileFromServerAsync(CancellationToken ct)
+    {
+        ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_SYNC_FULL);
+        Console.WriteLine("Reconciling: fetching all server node IDs...");
+
+        // Step 1: Fetch all alive node IDs from server
+        var (serverIds, _, _) = await _queue.EnqueueAsync(QueuePriority.Background,
+            () => _jmapClient.QueryAllFileNodeIdsAsync(ct), ct);
+        var serverIdSet = new HashSet<string>(serverIds);
+        var cachedIdSet = new HashSet<string>(_nodeIdToPath.Keys);
+
+        // Step 2: Classify
+        var goneIds = new HashSet<string>(cachedIdSet);
+        goneIds.ExceptWith(serverIdSet);
+
+        Console.WriteLine($"Reconcile: {serverIds.Length} server nodes, {cachedIdSet.Count} cached, {goneIds.Count} gone");
+
+        // Step 3: Remove gone nodes locally
+        foreach (var id in goneIds)
+        {
+            // Skip nodes with pending local changes — outbox will handle them
+            if (_outbox.HasPendingForNodeId(id))
+            {
+                Console.WriteLine($"  Skipping gone node {id} (pending in outbox)");
+                continue;
+            }
+
+            if (_nodeIdToPath.TryRemove(id, out var localPath))
+            {
+                _pathToNodeId.TryRemove(localPath, out _);
+                DeleteLocalItem(localPath);
+            }
+        }
+
+        // Step 4: Fetch all server nodes in batches to get current data
+        Console.WriteLine($"Fetching {serverIds.Length} FileNode details...");
+        var (allNodes, state) = await _queue.EnqueueAsync(QueuePriority.Background,
+            () => _jmapClient.GetFileNodesByIdsPagedAsync(serverIds, 1024, ct), ct);
+        Console.WriteLine($"Fetched {allNodes.Length} FileNodes, state: {state}");
+
+        // Step 5: Build tree and reconcile — reuses the same BFS + placeholder logic
+        // The existing mappings are already populated, so:
+        //   - existing placeholder at correct path → skip (already in mappings)
+        //   - existing placeholder at wrong path → rename on disk, update mappings
+        //   - missing placeholder → create it
+        // Nodes with pending outbox changes are skipped to avoid overwriting local edits.
+        var childrenByParent = allNodes
+            .Where(n => n.ParentId != null)
+            .GroupBy(n => n.ParentId!)
+            .ToDictionary(g => g.Key, g => g.ToArray());
+
+        var tree = new List<(string parentId, string localParentPath, FileNode[] children)>();
+        var bfsQueue = new Queue<(string nodeId, string localPath)>();
+        bfsQueue.Enqueue((_homeNodeId, _syncRootPath));
+
+        while (bfsQueue.Count > 0)
+        {
+            var (parentId, localParentPath) = bfsQueue.Dequeue();
+            if (!childrenByParent.TryGetValue(parentId, out var children))
+                children = [];
+
+            tree.Add((parentId, localParentPath, children));
+
+            foreach (var child in children.Where(c => c.IsFolder))
+            {
+                var childPath = Path.Combine(localParentPath, PlaceholderManager.SanitizeName(child.Name));
+                bfsQueue.Enqueue((child.Id, childPath));
+            }
+        }
+
+        foreach (var (parentId, localParentPath, children) in tree)
+        {
+            var newChildren = new List<FileNode>();
+            foreach (var child in children)
+            {
+                // Skip nodes with pending local changes
+                if (_outbox.HasPendingForNodeId(child.Id))
+                {
+                    Console.WriteLine($"  Skipping reconcile for {child.Id} (pending in outbox)");
+                    continue;
+                }
+
+                var expectedPath = Path.Combine(localParentPath, PlaceholderManager.SanitizeName(child.Name));
+
+                // Check if node was at a different path (rename/move)
+                if (_nodeIdToPath.TryGetValue(child.Id, out var oldPath)
+                    && !string.Equals(oldPath, expectedPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    // Rename on disk
+                    try
+                    {
+                        _pathToNodeId.TryRemove(oldPath, out _);
+                        if (child.IsFolder && Directory.Exists(oldPath))
+                        {
+                            UpdateDescendantMappings(oldPath, expectedPath);
+                            Directory.Move(oldPath, expectedPath);
+                            Console.WriteLine($"  Reconcile renamed folder: {oldPath} → {expectedPath}");
+                        }
+                        else if (File.Exists(oldPath))
+                        {
+                            File.Move(oldPath, expectedPath);
+                            Console.WriteLine($"  Reconcile renamed file: {oldPath} → {expectedPath}");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.Error.WriteLine($"  Reconcile rename failed {oldPath} → {expectedPath}: {ex.Message}");
+                    }
+                }
+
+                _pathToNodeId[expectedPath] = child.Id;
+                _nodeIdToPath[child.Id] = expectedPath;
+
+                if (!Path.Exists(expectedPath))
+                    newChildren.Add(child);
+                else
+                {
+                    try { SetInSync(expectedPath); }
+                    catch { /* not a placeholder — ignore */ }
+                }
+            }
+
+            if (newChildren.Count > 0)
+                _placeholderManager.CreatePlaceholders(localParentPath, newChildren.ToArray());
+        }
+
+        // Mark directories as ALWAYS_FULL
+        foreach (var (_, localParentPath, _) in tree)
+        {
+            if (string.Equals(localParentPath, _syncRootPath, StringComparison.OrdinalIgnoreCase))
+                continue;
+            try { MarkDirectoryAlwaysFull(localParentPath); }
+            catch { /* directory might not be a placeholder */ }
+        }
+
         return state;
     }
 
@@ -297,6 +516,7 @@ public class SyncEngine : IDisposable
 
         if (changes.Created.Length == 0 && changes.Updated.Length == 0 && changes.Destroyed.Length == 0)
         {
+            SaveNodeCache(changes.NewState);
             ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_IDLE);
             return changes.NewState;
         }
@@ -442,6 +662,7 @@ public class SyncEngine : IDisposable
         if (changes.HasMoreChanges)
             return await PollChangesAsync(changes.NewState, ct);
 
+        SaveNodeCache(changes.NewState);
         ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_IDLE);
         return changes.NewState;
     }
@@ -1360,6 +1581,11 @@ public class SyncEngine : IDisposable
 
         var parentPath = await ResolveLocalPathAsync(node.ParentId, ct);
         return parentPath != null ? Path.Combine(parentPath, PlaceholderManager.SanitizeName(node.Name)) : null;
+    }
+
+    private void SaveNodeCache(string state)
+    {
+        NodeCache.Save(_scopeKey, _homeNodeId, state, _nodeIdToPath, _syncRootPath);
     }
 
     public void Dispose()
