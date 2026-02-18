@@ -23,14 +23,15 @@ class Program
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool IsWindowVisible(IntPtr hWnd);
 
-    private delegate bool ConsoleCtrlHandlerDelegate(int dwCtrlType);
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetSystemMenu(IntPtr hWnd, bool bRevert);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
+    [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool SetConsoleCtrlHandler(ConsoleCtrlHandlerDelegate? handler, bool add);
+    private static extern bool DeleteMenu(IntPtr hMenu, uint uPosition, uint uFlags);
 
-    // Must be a static field to prevent GC of the delegate
-    private static ConsoleCtrlHandlerDelegate? _consoleCtrlHandler;
+    private const uint SC_CLOSE = 0xF060;
+    private const uint MF_BYCOMMAND = 0x00000000;
 
     internal static bool IsDebugMode { get; private set; }
 
@@ -105,18 +106,16 @@ class Program
             AllocConsole();
             IsDebugMode = true;
 
-            // Intercept CTRL_CLOSE_EVENT (user clicks X on console window) to hide
-            // instead of terminating the process
-            _consoleCtrlHandler = (int ctrlType) =>
+            // Disable the close button on the console window — CTRL_CLOSE_EVENT
+            // cannot be truly cancelled and will kill the process after a timeout.
+            // Users hide/show the console from the tray menu instead.
+            var hwnd = GetConsoleWindow();
+            if (hwnd != IntPtr.Zero)
             {
-                if (ctrlType == 2 /* CTRL_CLOSE_EVENT */)
-                {
-                    HideDebugConsole();
-                    return true; // Prevent termination
-                }
-                return false;
-            };
-            SetConsoleCtrlHandler(_consoleCtrlHandler, true);
+                var sysMenu = GetSystemMenu(hwnd, false);
+                if (sysMenu != IntPtr.Zero)
+                    DeleteMenu(sysMenu, SC_CLOSE, MF_BYCOMMAND);
+            }
         }
 
         AppLogger.Initialize(debug);
