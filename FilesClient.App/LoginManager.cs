@@ -13,12 +13,21 @@ sealed class LoginManager : IDisposable
     private readonly CredentialStore _credentialStore = new();
     private readonly List<LoginSession> _sessions = new();
     private readonly List<AccountSupervisor> _supervisors = new();
+    private readonly List<string> _connectingLoginIds = new();
     private readonly object _lock = new();
     private bool _disposed;
 
     public IReadOnlyList<AccountSupervisor> Supervisors
     {
         get { lock (_lock) return _supervisors.ToList(); }
+    }
+
+    /// <summary>
+    /// Login IDs currently in the process of connecting (not yet in Supervisors).
+    /// </summary>
+    public IReadOnlyList<string> ConnectingLoginIds
+    {
+        get { lock (_lock) return _connectingLoginIds.ToList(); }
     }
 
     public event Action? AccountsChanged;
@@ -35,6 +44,15 @@ sealed class LoginManager : IDisposable
     public async Task StartAsync(string? iconPath, bool clean, CancellationToken ct)
     {
         var storedLogins = _credentialStore.LoadAll();
+
+        // Show all stored logins as "Connecting..." in the UI immediately
+        lock (_lock)
+        {
+            foreach (var login in storedLogins)
+                _connectingLoginIds.Add(login.LoginId);
+        }
+        AccountsChanged?.Invoke();
+
         foreach (var login in storedLogins)
         {
             try
@@ -47,6 +65,11 @@ sealed class LoginManager : IDisposable
             catch (Exception ex)
             {
                 Console.Error.WriteLine($"Failed to load login {login.LoginId}: {ex.Message}");
+            }
+            finally
+            {
+                lock (_lock)
+                    _connectingLoginIds.Remove(login.LoginId);
             }
         }
     }

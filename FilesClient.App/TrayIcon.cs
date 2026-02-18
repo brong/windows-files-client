@@ -219,12 +219,19 @@ sealed class TrayIcon : IDisposable
         var menu = new ContextMenuStrip();
         var supervisors = _loginManager.Supervisors;
 
-        if (supervisors.Count == 0)
+        var connecting = _loginManager.ConnectingLoginIds;
+
+        if (supervisors.Count == 0 && connecting.Count == 0)
         {
             var noAccounts = new ToolStripMenuItem("No accounts configured") { Enabled = false };
             menu.Items.Add(noAccounts);
         }
-        else if (supervisors.Count == 1)
+        else if (supervisors.Count == 0)
+        {
+            foreach (var loginId in connecting)
+                menu.Items.Add(new ToolStripMenuItem($"{loginId} \u2014 Connecting...") { Enabled = false });
+        }
+        else if (supervisors.Count == 1 && connecting.Count == 0)
         {
             var s = supervisors[0];
             menu.Items.Add($"Open {s.DisplayName}", null, (_, _) => OpenSyncFolder(s.SyncRootPath));
@@ -240,6 +247,8 @@ sealed class TrayIcon : IDisposable
                 sub.DropDownItems.Add("View pending changes...", null, (_, _) => ShowStatusForm(captured));
                 menu.Items.Add(sub);
             }
+            foreach (var loginId in connecting)
+                menu.Items.Add(new ToolStripMenuItem($"{loginId} \u2014 Connecting...") { Enabled = false });
         }
 
         menu.Items.Add(new ToolStripSeparator());
