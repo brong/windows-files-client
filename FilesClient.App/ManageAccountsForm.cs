@@ -10,6 +10,7 @@ sealed class ManageAccountsForm : Form
     private readonly ListView _listView;
     private readonly Button _addButton;
     private readonly Button _removeButton;
+    private readonly Button _configureButton;
     private readonly System.Windows.Forms.Timer _refreshTimer;
 
     public ManageAccountsForm(LoginManager loginManager, string? iconPath)
@@ -62,6 +63,16 @@ sealed class ManageAccountsForm : Form
         };
         _removeButton.Click += OnRemoveClicked;
 
+        _configureButton = new Button
+        {
+            Text = "Configure...",
+            Width = 90,
+            Height = 28,
+            Location = new Point(212, 8),
+            Enabled = false,
+        };
+        _configureButton.Click += OnConfigureClicked;
+
         var closeButton = new Button
         {
             Text = "Close",
@@ -72,7 +83,7 @@ sealed class ManageAccountsForm : Form
         closeButton.Location = new Point(bottomPanel.Width - closeButton.Width - 12, 8);
         closeButton.Click += (_, _) => Close();
 
-        bottomPanel.Controls.AddRange([_addButton, _removeButton, closeButton]);
+        bottomPanel.Controls.AddRange([_addButton, _removeButton, _configureButton, closeButton]);
         Controls.Add(bottomPanel);
         Controls.Add(_listView);
 
@@ -123,7 +134,9 @@ sealed class ManageAccountsForm : Form
 
     private void UpdateButtonState()
     {
-        _removeButton.Enabled = _listView.SelectedItems.Count > 0;
+        var hasSelection = _listView.SelectedItems.Count > 0;
+        _removeButton.Enabled = hasSelection;
+        _configureButton.Enabled = hasSelection;
     }
 
     private void OnAddClicked(object? sender, EventArgs e)
@@ -161,6 +174,56 @@ sealed class ManageAccountsForm : Form
         catch (Exception ex)
         {
             MessageBox.Show($"Failed to remove account: {ex.Message}", "Error",
+                MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private async void OnConfigureClicked(object? sender, EventArgs e)
+    {
+        if (_listView.SelectedItems.Count == 0)
+            return;
+
+        var supervisor = _listView.SelectedItems[0].Tag as AccountSupervisor;
+        if (supervisor == null)
+            return;
+
+        var loginId = _loginManager.GetLoginIdForAccount(supervisor.AccountId);
+        if (loginId == null)
+        {
+            MessageBox.Show("Could not find login for this account.", "Error",
+                MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
+
+        var accounts = _loginManager.GetLoginAccounts(loginId);
+        if (accounts == null || accounts.Count <= 1)
+        {
+            MessageBox.Show("This login has only one account — nothing to configure.", "Info",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        var currentActive = _loginManager.GetActiveAccountIds(loginId);
+
+        using var selectForm = new SelectAccountsForm(accounts, currentActive);
+        if (selectForm.ShowDialog(this) != DialogResult.OK || selectForm.SelectedAccountIds == null)
+            return;
+
+        if (selectForm.SelectedAccountIds.Count == 0)
+        {
+            MessageBox.Show("At least one account must be selected.", "Warning",
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        try
+        {
+            _configureButton.Enabled = false;
+            await _loginManager.ConfigureLoginAsync(loginId, selectForm.SelectedAccountIds, _iconPath);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Failed to configure accounts: {ex.Message}", "Error",
                 MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }

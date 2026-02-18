@@ -107,8 +107,43 @@ sealed class AddAccountForm : Form
 
         try
         {
+            // Phase 1: Discover accounts
+            var accounts = await _loginManager.DiscoverAccountsAsync(sessionUrl, token);
+
+            if (accounts.Count == 0)
+            {
+                _statusLabel.Text = "No FileNode accounts found";
+                _statusLabel.ForeColor = Color.Red;
+                _connectButton.Enabled = true;
+                return;
+            }
+
+            // Phase 2: If multiple accounts, show account picker
+            HashSet<string>? enabledAccountIds = null;
+            if (accounts.Count > 1)
+            {
+                using var selectForm = new SelectAccountsForm(accounts, null);
+                if (selectForm.ShowDialog(this) != DialogResult.OK || selectForm.SelectedAccountIds == null)
+                {
+                    _connectButton.Enabled = true;
+                    _statusLabel.Text = "";
+                    return;
+                }
+                enabledAccountIds = selectForm.SelectedAccountIds;
+
+                if (enabledAccountIds.Count == 0)
+                {
+                    _statusLabel.Text = "No accounts selected";
+                    _statusLabel.ForeColor = Color.Red;
+                    _connectButton.Enabled = true;
+                    return;
+                }
+            }
+
+            // Phase 3: Connect and start selected accounts
+            _statusLabel.Text = "Starting sync...";
             var loginId = await _loginManager.AddLoginAsync(sessionUrl, token,
-                persist: true, iconPath: _iconPath);
+                persist: true, iconPath: _iconPath, enabledAccountIds: enabledAccountIds);
 
             _statusLabel.Text = $"Connected: {loginId}";
             _statusLabel.ForeColor = Color.Green;
