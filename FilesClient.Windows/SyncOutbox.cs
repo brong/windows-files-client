@@ -60,6 +60,7 @@ public class SyncOutbox : IDisposable
     private readonly ManualResetEventSlim _workSignal = new(false);
     private bool _disposed;
     private readonly HashSet<Guid> _processingIds = new();
+    private readonly ConcurrentDictionary<Guid, int> _uploadProgress = new();
 
     public event Action<int>? PendingCountChanged;
 
@@ -361,6 +362,8 @@ public class SyncOutbox : IDisposable
     /// <summary>Mark a change as successfully processed.</summary>
     public void MarkCompleted(Guid id)
     {
+        _uploadProgress.TryRemove(id, out _);
+
         lock (_lock)
         {
             _processingIds.Remove(id);
@@ -377,6 +380,8 @@ public class SyncOutbox : IDisposable
     /// <summary>Mark a change as failed with exponential backoff.</summary>
     public void MarkFailed(Guid id, string error)
     {
+        _uploadProgress.TryRemove(id, out _);
+
         lock (_lock)
         {
             _processingIds.Remove(id);
@@ -392,6 +397,12 @@ public class SyncOutbox : IDisposable
 
         RaisePendingCountChanged();
     }
+
+    /// <summary>Update transient upload progress for a pending change.</summary>
+    public void UpdateProgress(Guid id, int percent) => _uploadProgress[id] = percent;
+
+    /// <summary>Get current upload progress for a pending change, if any.</summary>
+    public int? GetProgress(Guid id) => _uploadProgress.TryGetValue(id, out var p) ? p : null;
 
     /// <summary>Return a snapshot of all pending changes and the set of currently processing IDs.</summary>
     public (PendingChange[] Entries, HashSet<Guid> ProcessingIds) GetSnapshot()

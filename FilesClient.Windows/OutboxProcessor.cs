@@ -178,8 +178,10 @@ public class OutboxProcessor : IDisposable
                 throw new InvalidOperationException($"Cannot resolve parent for {change.LocalPath}");
 
             Console.WriteLine($"Outbox: uploading modified file {fileName}");
-            using var stream = new FileStream(change.LocalPath, FileMode.Open, FileAccess.Read,
+            using var fileStream = new FileStream(change.LocalPath, FileMode.Open, FileAccess.Read,
                 FileShare.ReadWrite | FileShare.Delete);
+            using var stream = new ProgressStream(fileStream, fileStream.Length,
+                percent => _outbox.UpdateProgress(change.Id, percent));
             var blobId = await _queue.EnqueueAsync(QueuePriority.Background,
                 () => _jmapClient.UploadBlobAsync(stream, contentType, ct), ct);
             var newNode = await _queue.EnqueueAsync(QueuePriority.Background,
@@ -212,8 +214,10 @@ public class OutboxProcessor : IDisposable
                 throw new InvalidOperationException($"Cannot resolve parent for {change.LocalPath}");
 
             Console.WriteLine($"Outbox: uploading new file {fileName}");
-            using var stream = new FileStream(change.LocalPath, FileMode.Open, FileAccess.Read,
+            using var fileStream = new FileStream(change.LocalPath, FileMode.Open, FileAccess.Read,
                 FileShare.ReadWrite | FileShare.Delete);
+            using var stream = new ProgressStream(fileStream, fileStream.Length,
+                percent => _outbox.UpdateProgress(change.Id, percent));
             var blobId = await _queue.EnqueueAsync(QueuePriority.Background,
                 () => _jmapClient.UploadBlobAsync(stream, contentType, ct), ct);
             var node = await _queue.EnqueueAsync(QueuePriority.Background,

@@ -10,6 +10,7 @@ sealed class StatusForm : Form
     private readonly ListView _listView;
     private readonly System.Windows.Forms.Timer _refreshTimer;
     private bool _dirty = true;
+    private bool _hasActiveUploads;
     private SyncStatus _currentStatus;
 
     public StatusForm(string accountLabel, SyncOutbox outbox, SyncStatus initialStatus)
@@ -84,7 +85,7 @@ sealed class StatusForm : Form
         _refreshTimer = new System.Windows.Forms.Timer { Interval = 500 };
         _refreshTimer.Tick += (_, _) =>
         {
-            if (_dirty)
+            if (_dirty || _hasActiveUploads)
             {
                 _dirty = false;
                 RefreshList();
@@ -138,7 +139,16 @@ sealed class StatusForm : Form
 
             var action = DeriveAction(entry);
             var isProcessing = processingIds.Contains(entry.Id);
-            var status = isProcessing ? "Syncing..." : DeriveStatus(entry, now);
+            string status;
+            if (isProcessing)
+            {
+                var progress = _outbox.GetProgress(entry.Id);
+                status = progress.HasValue ? $"Uploading {progress.Value}%" : "Syncing...";
+            }
+            else
+            {
+                status = DeriveStatus(entry, now);
+            }
 
             var item = new ListViewItem(name);
             item.SubItems.Add(action);
@@ -161,6 +171,7 @@ sealed class StatusForm : Form
         }
 
         _listView.EndUpdate();
+        _hasActiveUploads = processingIds.Count > 0;
     }
 
     private static string DeriveAction(PendingChange entry)
