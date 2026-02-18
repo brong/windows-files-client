@@ -170,10 +170,42 @@ public class SyncEngine : IDisposable
             () => _jmapClient.FindHomeNodeIdAsync(ct), ct);
         Console.WriteLine($"Home node: {_homeNodeId}");
 
-        // Phase 1: Fetch the entire tree from the server
-        Console.WriteLine("Fetching directory tree...");
+        // Phase 1: Bulk fetch all FileNode IDs, then all nodes in pages
+        Console.WriteLine("Fetching all FileNode IDs...");
+        var (allIds, _, total) = await _queue.EnqueueAsync(QueuePriority.Background,
+            () => _jmapClient.QueryAllFileNodeIdsAsync(ct), ct);
+        Console.WriteLine($"Found {allIds.Length} FileNodes (total: {total})");
+
+        Console.WriteLine("Fetching FileNode details...");
+        var (allNodes, state) = await _queue.EnqueueAsync(QueuePriority.Background,
+            () => _jmapClient.GetFileNodesByIdsPagedAsync(allIds, 1024, ct), ct);
+        Console.WriteLine($"Fetched {allNodes.Length} FileNodes, state: {state}");
+
+        // Build tree client-side: group by parentId, BFS from home node
+        var nodeById = allNodes.ToDictionary(n => n.Id);
+        var childrenByParent = allNodes
+            .Where(n => n.ParentId != null)
+            .GroupBy(n => n.ParentId!)
+            .ToDictionary(g => g.Key, g => g.ToArray());
+
         var tree = new List<(string parentId, string localParentPath, FileNode[] children)>();
-        await FetchTreeAsync(_homeNodeId, _syncRootPath, tree, ct);
+        var bfsQueue = new Queue<(string nodeId, string localPath)>();
+        bfsQueue.Enqueue((_homeNodeId, _syncRootPath));
+
+        while (bfsQueue.Count > 0)
+        {
+            var (parentId, localParentPath) = bfsQueue.Dequeue();
+            if (!childrenByParent.TryGetValue(parentId, out var children))
+                children = [];
+
+            tree.Add((parentId, localParentPath, children));
+
+            foreach (var child in children.Where(c => c.IsFolder))
+            {
+                var childPath = Path.Combine(localParentPath, PlaceholderManager.SanitizeName(child.Name));
+                bfsQueue.Enqueue((child.Id, childPath));
+            }
+        }
 
         // Phase 2: Create all placeholders in one fast pass (parent before children,
         // but each directory's children are created immediately after the directory)
@@ -255,24 +287,7 @@ public class SyncEngine : IDisposable
         }
 
         ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_IDLE);
-        return await _queue.EnqueueAsync(QueuePriority.Background,
-            () => _jmapClient.GetStateAsync(_homeNodeId, ct), ct);
-    }
-
-    private async Task FetchTreeAsync(
-        string parentId, string localParentPath,
-        List<(string parentId, string localParentPath, FileNode[] children)> tree,
-        CancellationToken ct)
-    {
-        var children = await _queue.EnqueueAsync(QueuePriority.Background,
-            () => _jmapClient.GetChildrenAsync(parentId, ct), ct);
-        tree.Add((parentId, localParentPath, children));
-
-        foreach (var child in children.Where(c => c.IsFolder))
-        {
-            var childPath = Path.Combine(localParentPath, PlaceholderManager.SanitizeName(child.Name));
-            await FetchTreeAsync(child.Id, childPath, tree, ct);
-        }
+        return state;
     }
 
     public async Task<string> PollChangesAsync(string sinceState, CancellationToken ct)

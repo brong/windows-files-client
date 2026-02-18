@@ -108,6 +108,14 @@ sealed class AccountSupervisor : IDisposable
                 await foreach (var newState in _jmapClient.WatchForChangesAsync(ct))
                 {
                     consecutiveFailures = 0;
+
+                    // Skip redundant polls when EventSource yields the same state
+                    if (string.Equals(newState, currentState, StringComparison.Ordinal))
+                    {
+                        Console.WriteLine($"[{_displayName}] State unchanged ({currentState}), skipping poll");
+                        continue;
+                    }
+
                     try
                     {
                         currentState = await _engine!.PollChangesAsync(currentState, ct);

@@ -259,6 +259,58 @@ public class JmapClient : IJmapClient
         return result.State;
     }
 
+    public async Task<string> GetCurrentStateAsync(CancellationToken ct = default)
+    {
+        var result = await CallAsync<GetResponse<FileNode>>(
+            FileNodeUsing, "FileNode/get", new { accountId = AccountId, ids = Array.Empty<string>() }, ct);
+        return result.State;
+    }
+
+    public async Task<(string[] Ids, string QueryState, int Total)> QueryAllFileNodeIdsAsync(CancellationToken ct = default)
+    {
+        var allIds = new List<string>();
+        int position = 0;
+        const int limit = 4096;
+        string queryState = "";
+        int total = 0;
+
+        while (true)
+        {
+            var result = await CallAsync<QueryResponse>(
+                FileNodeUsing, "FileNode/query", new { accountId = AccountId, position, limit }, ct);
+
+            queryState = result.QueryState;
+            if (result.Total.HasValue)
+                total = result.Total.Value;
+
+            allIds.AddRange(result.Ids);
+
+            if (result.Ids.Length < limit || (result.Total.HasValue && allIds.Count >= result.Total.Value))
+                break;
+
+            position = allIds.Count;
+        }
+
+        return (allIds.ToArray(), queryState, total > 0 ? total : allIds.Count);
+    }
+
+    public async Task<(FileNode[] Nodes, string State)> GetFileNodesByIdsPagedAsync(string[] ids, int pageSize = 1024, CancellationToken ct = default)
+    {
+        var allNodes = new List<FileNode>();
+        string state = "";
+
+        for (int i = 0; i < ids.Length; i += pageSize)
+        {
+            var chunk = ids.Skip(i).Take(pageSize).ToArray();
+            var result = await CallAsync<GetResponse<FileNode>>(
+                FileNodeUsing, "FileNode/get", new { accountId = AccountId, ids = chunk }, ct);
+            allNodes.AddRange(result.List);
+            state = result.State;
+        }
+
+        return (allNodes.ToArray(), state);
+    }
+
     public async Task<Stream> DownloadBlobAsync(string blobId, string? type = null, string? name = null, CancellationToken ct = default)
     {
         var url = Session.GetDownloadUrl(AccountId, blobId, type, name);

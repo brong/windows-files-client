@@ -78,6 +78,23 @@ public class StubJmapClient : IJmapClient
         return Task.FromResult("stub-state-1");
     }
 
+    public Task<string> GetCurrentStateAsync(CancellationToken ct = default)
+    {
+        return Task.FromResult("stub-state-1");
+    }
+
+    public Task<(string[] Ids, string QueryState, int Total)> QueryAllFileNodeIdsAsync(CancellationToken ct = default)
+    {
+        var ids = _nodes.Keys.ToArray();
+        return Task.FromResult((ids, "stub-query-state", ids.Length));
+    }
+
+    public Task<(FileNode[] Nodes, string State)> GetFileNodesByIdsPagedAsync(string[] ids, int pageSize = 1024, CancellationToken ct = default)
+    {
+        var nodes = ids.Where(id => _nodes.ContainsKey(id)).Select(id => _nodes[id]).ToArray();
+        return Task.FromResult((nodes, "stub-state-1"));
+    }
+
     public Task<Stream> DownloadBlobAsync(string blobId, string? type = null, string? name = null, CancellationToken ct = default)
     {
         if (_blobs.TryGetValue(blobId, out var data))
