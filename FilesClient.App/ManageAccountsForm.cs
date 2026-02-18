@@ -1,0 +1,174 @@
+using System.Drawing;
+using FilesClient.Windows;
+
+namespace FilesClient.App;
+
+sealed class ManageAccountsForm : Form
+{
+    private readonly LoginManager _loginManager;
+    private readonly string? _iconPath;
+    private readonly ListView _listView;
+    private readonly Button _addButton;
+    private readonly Button _removeButton;
+    private readonly System.Windows.Forms.Timer _refreshTimer;
+
+    public ManageAccountsForm(LoginManager loginManager, string? iconPath)
+    {
+        _loginManager = loginManager;
+        _iconPath = iconPath;
+
+        Text = "Fastmail Files - Manage Accounts";
+        Size = new Size(500, 350);
+        MinimumSize = new Size(400, 250);
+        StartPosition = FormStartPosition.CenterScreen;
+        ShowInTaskbar = true;
+
+        _listView = new ListView
+        {
+            Dock = DockStyle.Fill,
+            View = View.Details,
+            FullRowSelect = true,
+            HeaderStyle = ColumnHeaderStyle.Nonclickable,
+            MultiSelect = false,
+        };
+        _listView.Columns.Add("Account", 200);
+        _listView.Columns.Add("Sync Folder", 160);
+        _listView.Columns.Add("Status", 80);
+        _listView.SelectedIndexChanged += (_, _) => UpdateButtonState();
+
+        var bottomPanel = new Panel
+        {
+            Dock = DockStyle.Bottom,
+            Height = 45,
+            Padding = new Padding(8),
+        };
+
+        _addButton = new Button
+        {
+            Text = "Add account...",
+            Width = 110,
+            Height = 28,
+            Location = new Point(8, 8),
+        };
+        _addButton.Click += OnAddClicked;
+
+        _removeButton = new Button
+        {
+            Text = "Remove",
+            Width = 80,
+            Height = 28,
+            Location = new Point(125, 8),
+            Enabled = false,
+        };
+        _removeButton.Click += OnRemoveClicked;
+
+        var closeButton = new Button
+        {
+            Text = "Close",
+            Width = 75,
+            Height = 28,
+            Anchor = AnchorStyles.Right | AnchorStyles.Top,
+        };
+        closeButton.Location = new Point(bottomPanel.Width - closeButton.Width - 12, 8);
+        closeButton.Click += (_, _) => Close();
+
+        bottomPanel.Controls.AddRange([_addButton, _removeButton, closeButton]);
+        Controls.Add(bottomPanel);
+        Controls.Add(_listView);
+
+        _loginManager.AccountsChanged += () =>
+        {
+            if (InvokeRequired)
+                BeginInvoke(RefreshList);
+            else
+                RefreshList();
+        };
+
+        _refreshTimer = new System.Windows.Forms.Timer { Interval = 2000 };
+        _refreshTimer.Tick += (_, _) => RefreshList();
+        _refreshTimer.Start();
+
+        RefreshList();
+    }
+
+    private void RefreshList()
+    {
+        var supervisors = _loginManager.Supervisors;
+
+        _listView.BeginUpdate();
+        _listView.Items.Clear();
+
+        foreach (var s in supervisors)
+        {
+            var statusText = s.Status switch
+            {
+                SyncStatus.Idle when s.PendingCount > 0 => $"{s.PendingCount} pending",
+                SyncStatus.Idle => "Up to date",
+                SyncStatus.Syncing => "Syncing",
+                SyncStatus.Error => "Error",
+                SyncStatus.Disconnected => "Offline",
+                _ => "Unknown",
+            };
+
+            var item = new ListViewItem(s.DisplayName);
+            item.SubItems.Add(s.SyncRootPath);
+            item.SubItems.Add(statusText);
+            item.Tag = s;
+            _listView.Items.Add(item);
+        }
+
+        _listView.EndUpdate();
+        UpdateButtonState();
+    }
+
+    private void UpdateButtonState()
+    {
+        _removeButton.Enabled = _listView.SelectedItems.Count > 0;
+    }
+
+    private void OnAddClicked(object? sender, EventArgs e)
+    {
+        using var addForm = new AddAccountForm(_loginManager, _iconPath);
+        addForm.ShowDialog(this);
+    }
+
+    private async void OnRemoveClicked(object? sender, EventArgs e)
+    {
+        if (_listView.SelectedItems.Count == 0)
+            return;
+
+        var supervisor = _listView.SelectedItems[0].Tag as AccountSupervisor;
+        if (supervisor == null)
+            return;
+
+        var result = MessageBox.Show(
+            $"Remove {supervisor.DisplayName}?\n\nThis will stop syncing and remove the stored credential. Local files will not be deleted.",
+            "Remove Account",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Question);
+
+        if (result != DialogResult.Yes)
+            return;
+
+        var loginId = CredentialStore.DeriveLoginId(supervisor.Username, "");
+        // Find the actual loginId by matching the supervisor's account
+        // The LoginManager tracks sessions with loginIds
+        try
+        {
+            _removeButton.Enabled = false;
+            await _loginManager.RemoveLoginAsync(loginId);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Failed to remove account: {ex.Message}", "Error",
+                MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    protected override void OnFormClosing(FormClosingEventArgs e)
+    {
+        _refreshTimer.Stop();
+        _refreshTimer.Dispose();
+        base.OnFormClosing(e);
+    }
+}

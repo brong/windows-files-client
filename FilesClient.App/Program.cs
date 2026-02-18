@@ -1,5 +1,5 @@
+using System.Runtime.InteropServices;
 using FilesClient.Jmap;
-using FilesClient.Windows;
 
 namespace FilesClient.App;
 
@@ -8,11 +8,14 @@ class Program
     private const string DefaultSessionUrl = "https://api.fastmail.com/jmap/session";
     private const string FaviconUrl = "https://www.fastmail.com/favicon.ico";
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool AllocConsole();
+
     static async Task<int> Main(string[] args)
     {
         string? token = null;
         string sessionUrl = DefaultSessionUrl;
-        string? syncRootPath = null;
         bool debug = false;
         bool stub = false;
         bool clean = false;
@@ -27,9 +30,6 @@ class Program
                 case "--session-url" when i + 1 < args.Length:
                     sessionUrl = args[++i];
                     break;
-                case "--sync-root" when i + 1 < args.Length:
-                    syncRootPath = args[++i];
-                    break;
                 case "--debug":
                     debug = true;
                     break;
@@ -39,7 +39,7 @@ class Program
                 case "--clean":
                     clean = true;
                     break;
-                case "--token" or "--session-url" or "--sync-root":
+                case "--token" or "--session-url":
                     Console.Error.WriteLine($"Error: {args[i]} requires a value");
                     return 1;
                 default:
@@ -48,7 +48,6 @@ class Program
                     Console.Error.WriteLine("Options:");
                     Console.Error.WriteLine("  --token <token>         Fastmail app password / bearer token");
                     Console.Error.WriteLine("  --session-url <url>     JMAP session URL (default: Fastmail)");
-                    Console.Error.WriteLine("  --sync-root <path>      Local sync folder path");
                     Console.Error.WriteLine("  --debug                 Log all JMAP HTTP traffic to stderr");
                     Console.Error.WriteLine("  --stub                  Use stub JMAP client (single hello.txt file)");
                     Console.Error.WriteLine("  --clean                 Unregister sync root and delete local files before syncing");
@@ -58,152 +57,85 @@ class Program
 
         token ??= Environment.GetEnvironmentVariable("FASTMAIL_TOKEN");
 
-        if (!stub && string.IsNullOrEmpty(token))
-        {
-            Console.Error.WriteLine("Usage: FilesClient.App --token <app-password>");
-            Console.Error.WriteLine("  or set FASTMAIL_TOKEN environment variable");
-            Console.Error.WriteLine();
-            Console.Error.WriteLine("Options:");
-            Console.Error.WriteLine("  --token <token>         Fastmail app password / bearer token");
-            Console.Error.WriteLine("  --session-url <url>     JMAP session URL (default: Fastmail)");
-            Console.Error.WriteLine("  --sync-root <path>      Local sync folder path");
-            Console.Error.WriteLine("  --debug                 Log all JMAP HTTP traffic to stderr");
-            Console.Error.WriteLine("  --stub                  Use stub JMAP client (single hello.txt file)");
-            return 1;
-        }
+        // Allocate a console window in debug mode (since OutputType is WinExe)
+        if (debug)
+            AllocConsole();
+
+        AppLogger.Initialize(debug);
 
         using var cts = new CancellationTokenSource();
-        Console.CancelKeyPress += (_, e) =>
+        if (debug)
         {
-            e.Cancel = true;
-            cts.Cancel();
-            Console.WriteLine("\nShutting down...");
-        };
-
-        IJmapClient jmapClient;
-        if (stub)
-        {
-            jmapClient = new StubJmapClient();
-            Console.WriteLine("Using stub JMAP client");
-        }
-        else
-        {
-            var realClient = new JmapClient(token!, debug);
-            Console.WriteLine("Connecting to JMAP...");
-            await realClient.ConnectAsync(sessionUrl, cts.Token);
-            Console.WriteLine($"Connected as {realClient.Session.Username}");
-            jmapClient = realClient;
-        }
-        Console.WriteLine($"Account: {jmapClient.AccountId}");
-        Console.WriteLine($"Context: {jmapClient.Context.ScopeKey}");
-
-        // Derive display name and folder name from account username
-        var displayName = $"{jmapClient.Context.Username} Files";
-        syncRootPath ??= Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-            SanitizeFolderName(displayName));
-
-        Console.WriteLine($"Sync root: {syncRootPath}");
-        Console.WriteLine();
-
-        if (clean)
-        {
-            Console.WriteLine("Cleaning previous sync state...");
-            SyncEngine.Clean(syncRootPath, jmapClient.Context.AccountId);
-            Console.WriteLine();
+            Console.CancelKeyPress += (_, e) =>
+            {
+                e.Cancel = true;
+                cts.Cancel();
+                Console.WriteLine("\nShutting down...");
+            };
         }
 
         // Download Fastmail favicon for use as sync root icon
         var iconPath = await DownloadIconAsync(cts.Token);
 
-        using var trayIcon = new TrayIcon(cts, iconPath, syncRootPath, jmapClient.Context.Username);
+        if (stub)
+        {
+            // Stub mode: single inline account, no LoginManager
+            return await RunStubModeAsync(iconPath, clean, debug, cts);
+        }
+
+        using var loginManager = new LoginManager(debug);
+
+        // Dev: --token adds a transient (non-persisted) login
+        if (token != null)
+        {
+            try
+            {
+                await loginManager.AddLoginAsync(sessionUrl, token,
+                    persist: false, iconPath: iconPath, clean: clean, ct: cts.Token);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Failed to connect: {ex.Message}");
+                return 1;
+            }
+        }
+
+        await loginManager.StartAsync(iconPath, clean, cts.Token);
+
+        using var trayIcon = new TrayIcon(cts, iconPath, loginManager);
         trayIcon.Start();
 
-        using var _ = jmapClient;
-        using var queue = new JmapQueue();
+        // If no accounts configured, open the manage accounts dialog
+        if (loginManager.Supervisors.Count == 0 && token == null)
+            trayIcon.ShowManageAccounts();
+
+        try { await Task.Delay(Timeout.Infinite, cts.Token); }
+        catch (OperationCanceledException) { }
+
+        await loginManager.StopAllAsync();
+        return 0;
+    }
+
+    /// <summary>
+    /// Stub mode bypasses LoginManager and runs a single StubJmapClient directly.
+    /// </summary>
+    private static async Task<int> RunStubModeAsync(string? iconPath, bool clean, bool debug, CancellationTokenSource cts)
+    {
+        Console.WriteLine("Using stub JMAP client");
+        IJmapClient jmapClient = new StubJmapClient();
+        Console.WriteLine($"Account: {jmapClient.AccountId}");
+
+        var displayName = $"{jmapClient.Context.Username} Files";
+        var syncRootPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            SanitizeFolderName(displayName));
+
+        using var loginManager = new LoginManager(debug);
+        var supervisor = new AccountSupervisor(jmapClient, syncRootPath, displayName, debug);
 
         try
         {
-            // 1. Set up sync engine (register + connect callbacks)
-            using var engine = new SyncEngine(syncRootPath, jmapClient, queue, jmapClient.Context.ScopeKey);
-            engine.StatusChanged += trayIcon.UpdateStatus;
-            engine.StatusDetailChanged += trayIcon.UpdateStatusDetail;
-            engine.PendingCountChanged += trayIcon.UpdatePendingCount;
-            trayIcon.SetOutbox(jmapClient.Context.Username, engine.Outbox);
-
-            // 1a. Register sync root (but don't connect yet — no callbacks active)
-            Console.WriteLine("Registering sync root...");
-            await engine.RegisterAsync(displayName, jmapClient.Context.AccountId, iconPath);
-
-            // 2. Create placeholders while disconnected so Explorer/indexer
-            //    can't trigger FETCH_DATA downloads during initial population.
-            Console.WriteLine("Populating placeholders...");
-            var state = await engine.PopulateAsync(cts.Token);
-            Console.WriteLine($"Initial sync complete. State: {state}");
-            Console.WriteLine();
-
-            // 1b. Now connect — enables callbacks for user-initiated reads
-            engine.Connect();
-
-            // 3. Sync loop — EventSource push notifications with polling fallback
-            Console.WriteLine("Watching for changes (Ctrl+C to stop)...");
-            string currentState = state;
-            int consecutiveFailures = 0;
-            const int maxRetries = 3;
-            while (!cts.Token.IsCancellationRequested)
-            {
-                try
-                {
-                    Console.WriteLine("Connecting to push notifications...");
-                    await foreach (var newState in jmapClient.WatchForChangesAsync(cts.Token))
-                    {
-                        consecutiveFailures = 0;
-                        try
-                        {
-                            currentState = await engine.PollChangesAsync(currentState, cts.Token);
-                        }
-                        catch (Exception ex) when (ex is not OperationCanceledException)
-                        {
-                            Console.Error.WriteLine($"Change poll error: {ex.Message}");
-                        }
-                    }
-                    // Stream ended normally — count as a failure for reconnect purposes
-                    consecutiveFailures++;
-                    Console.WriteLine($"Push connection closed, reconnecting ({consecutiveFailures}/{maxRetries})...");
-                }
-                catch (OperationCanceledException) { break; }
-                catch (Exception ex)
-                {
-                    consecutiveFailures++;
-                    Console.Error.WriteLine($"Push error ({consecutiveFailures}/{maxRetries}): {ex.Message}");
-                }
-
-                if (consecutiveFailures >= maxRetries)
-                {
-                    engine.ReportConnectivityLost();
-                    Console.Error.WriteLine("Connection lost — retries exhausted, will keep trying...");
-                }
-
-                // Brief delay before reconnect, plus one poll to catch anything missed
-                try
-                {
-                    await Task.Delay(TimeSpan.FromSeconds(3), cts.Token);
-                    currentState = await engine.PollChangesAsync(currentState, cts.Token);
-                    // Poll succeeded — connection is working, clear failure count and status
-                    if (consecutiveFailures >= maxRetries)
-                        engine.ReportConnectivityRestored();
-                    consecutiveFailures = 0;
-                }
-                catch (OperationCanceledException) { break; }
-                catch (Exception ex)
-                {
-                    Console.Error.WriteLine($"Change poll error: {ex.Message}");
-                }
-            }
-        }
-        catch (OperationCanceledException)
-        {
-            // Normal shutdown
+            await supervisor.StartAsync(iconPath, clean, cts.Token);
         }
         catch (Exception ex)
         {
@@ -211,6 +143,15 @@ class Program
             return 1;
         }
 
+        using var trayIcon = new TrayIcon(cts, iconPath, loginManager);
+        trayIcon.Start();
+
+        try { await Task.Delay(Timeout.Infinite, cts.Token); }
+        catch (OperationCanceledException) { }
+
+        await supervisor.StopAsync();
+        supervisor.Dispose();
+        jmapClient.Dispose();
         return 0;
     }
 
@@ -236,7 +177,6 @@ class Program
             Directory.CreateDirectory(iconDir);
             var iconPath = Path.Combine(iconDir, "icon.ico");
 
-            // Skip download if we already have it
             if (File.Exists(iconPath))
                 return iconPath;
 

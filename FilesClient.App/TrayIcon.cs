@@ -12,28 +12,25 @@ sealed class TrayIcon : IDisposable
 
     private readonly CancellationTokenSource _cts;
     private readonly string? _iconPath;
-    private readonly string _syncRootPath;
-    private readonly string _username;
+    private readonly LoginManager _loginManager;
     private readonly ManualResetEventSlim _ready = new();
     private Thread? _thread;
     private NotifyIcon? _notifyIcon;
     private SynchronizationContext? _syncContext;
     private Icon? _baseIcon;
     private IntPtr _currentHIcon;
-    private SyncStatus _lastStatus;
-    private string? _lastDetail;
-    private int _pendingCount;
     private bool _disposed;
-    private SyncOutbox? _outbox;
-    private string? _accountLabel;
     private StatusForm? _statusForm;
+    private ManageAccountsForm? _manageForm;
 
-    public TrayIcon(CancellationTokenSource cts, string? iconPath, string syncRootPath, string username)
+    public TrayIcon(CancellationTokenSource cts, string? iconPath, LoginManager loginManager)
     {
         _cts = cts;
         _iconPath = iconPath;
-        _syncRootPath = syncRootPath;
-        _username = username;
+        _loginManager = loginManager;
+
+        _loginManager.AccountsChanged += OnAccountsChanged;
+        _loginManager.AggregateStatusChanged += OnAggregateStatusChanged;
     }
 
     public void Start()
@@ -48,72 +45,104 @@ sealed class TrayIcon : IDisposable
         _ready.Wait();
     }
 
-    public void SetOutbox(string accountLabel, SyncOutbox outbox)
+    public void ShowManageAccounts()
     {
-        _outbox = outbox;
-        _accountLabel = accountLabel;
+        _syncContext?.Post(_ => OpenManageAccountsForm(), null);
     }
 
-    public void UpdateStatus(SyncStatus status)
+    private void OnAccountsChanged()
     {
         _syncContext?.Post(_ =>
         {
             if (_notifyIcon == null) return;
-            _lastStatus = status;
-            RefreshTooltip();
-            _statusForm?.UpdateStatus(status);
-        }, null);
-    }
-
-    public void UpdateStatusDetail(string? detail)
-    {
-        _syncContext?.Post(_ =>
-        {
-            if (_notifyIcon == null) return;
-            _lastDetail = detail;
+            _notifyIcon.ContextMenuStrip = BuildContextMenu();
             RefreshTooltip();
         }, null);
     }
 
-    public void UpdatePendingCount(int count)
+    private void OnAggregateStatusChanged(SyncStatus status)
     {
         _syncContext?.Post(_ =>
         {
             if (_notifyIcon == null) return;
-            _pendingCount = count;
             RefreshTooltip();
         }, null);
     }
 
     private void RefreshTooltip()
     {
-        var pendingSuffix = _pendingCount > 0
-            ? $" ({_pendingCount} pending)"
-            : "";
+        var supervisors = _loginManager.Supervisors;
+        var status = _loginManager.GetAggregateStatus();
+        var pendingCount = _loginManager.GetAggregatePendingCount();
 
-        var (color, defaultTooltip) = _lastStatus switch
+        Color color;
+        string tooltip;
+
+        if (supervisors.Count == 0)
         {
-            SyncStatus.Idle when _pendingCount > 0 =>
-                (Color.DodgerBlue, $"{_username} - {_pendingCount} pending changes"),
-            SyncStatus.Idle => (Color.LimeGreen, $"{_username} - Up to date"),
-            SyncStatus.Syncing => (Color.DodgerBlue, $"{_username} - Syncing..."),
-            SyncStatus.Error => (Color.Red, $"{_username} - Error"),
-            SyncStatus.Disconnected when _pendingCount > 0 =>
-                (Color.Gray, $"{_username} - Offline ({_pendingCount} pending)"),
-            SyncStatus.Disconnected => (Color.Gray, $"{_username} - Connection lost"),
-            _ => (Color.Gray, _username),
-        };
+            color = Color.Gray;
+            tooltip = "Fastmail Files - No accounts";
+        }
+        else if (supervisors.Count == 1)
+        {
+            var s = supervisors[0];
+            (color, tooltip) = FormatSingleAccountTooltip(s.Username, s.Status, s.PendingCount, s.StatusDetail);
+        }
+        else
+        {
+            color = status switch
+            {
+                SyncStatus.Error => Color.Red,
+                SyncStatus.Disconnected => Color.Gray,
+                SyncStatus.Syncing => Color.DodgerBlue,
+                SyncStatus.Idle when pendingCount > 0 => Color.DodgerBlue,
+                SyncStatus.Idle => Color.LimeGreen,
+                _ => Color.Gray,
+            };
 
-        var tooltip = _lastDetail != null
-            ? $"{_username} - {_lastDetail}{pendingSuffix}"
-            : defaultTooltip;
+            var statusText = status switch
+            {
+                SyncStatus.Idle when pendingCount > 0 => $"{pendingCount} pending",
+                SyncStatus.Idle => "Up to date",
+                SyncStatus.Syncing => "Syncing...",
+                SyncStatus.Error => "Error",
+                SyncStatus.Disconnected => "Offline",
+                _ => "",
+            };
 
-        // NotifyIcon.Text has a 127-character limit
+            tooltip = $"{supervisors.Count} accounts - {statusText}";
+        }
+
         if (tooltip.Length > 127)
             tooltip = tooltip.Substring(0, 127);
 
         _notifyIcon!.Text = tooltip;
         SetIconWithDot(color);
+    }
+
+    private static (Color color, string tooltip) FormatSingleAccountTooltip(
+        string username, SyncStatus status, int pendingCount, string? detail)
+    {
+        var pendingSuffix = pendingCount > 0 ? $" ({pendingCount} pending)" : "";
+
+        var (color, defaultTooltip) = status switch
+        {
+            SyncStatus.Idle when pendingCount > 0 =>
+                (Color.DodgerBlue, $"{username} - {pendingCount} pending changes"),
+            SyncStatus.Idle => (Color.LimeGreen, $"{username} - Up to date"),
+            SyncStatus.Syncing => (Color.DodgerBlue, $"{username} - Syncing..."),
+            SyncStatus.Error => (Color.Red, $"{username} - Error"),
+            SyncStatus.Disconnected when pendingCount > 0 =>
+                (Color.Gray, $"{username} - Offline ({pendingCount} pending)"),
+            SyncStatus.Disconnected => (Color.Gray, $"{username} - Connection lost"),
+            _ => (Color.Gray, username),
+        };
+
+        var tooltip = detail != null
+            ? $"{username} - {detail}{pendingSuffix}"
+            : defaultTooltip;
+
+        return (color, tooltip);
     }
 
     private void RunMessageLoop()
@@ -125,7 +154,7 @@ sealed class TrayIcon : IDisposable
         _notifyIcon = new NotifyIcon
         {
             Visible = true,
-            Text = $"{_username} - Starting...",
+            Text = "Fastmail Files - Starting...",
             ContextMenuStrip = BuildContextMenu(),
         };
 
@@ -164,11 +193,9 @@ sealed class TrayIcon : IDisposable
         {
             g.DrawIcon(_baseIcon, new Rectangle(0, 0, 16, 16));
 
-            // Draw status dot in bottom-right corner
             using var brush = new SolidBrush(dotColor);
             g.FillEllipse(brush, 9, 9, 7, 7);
 
-            // Thin dark outline for contrast
             using var pen = new Pen(Color.FromArgb(80, 0, 0, 0), 1);
             g.DrawEllipse(pen, 9, 9, 6, 6);
         }
@@ -176,7 +203,6 @@ sealed class TrayIcon : IDisposable
         var newHIcon = bmp.GetHicon();
         _notifyIcon.Icon = Icon.FromHandle(newHIcon);
 
-        // Destroy the previous HICON to avoid GDI handle leak
         DestroyCurrentHIcon();
         _currentHIcon = newHIcon;
     }
@@ -193,25 +219,33 @@ sealed class TrayIcon : IDisposable
     private ContextMenuStrip BuildContextMenu()
     {
         var menu = new ContextMenuStrip();
+        var supervisors = _loginManager.Supervisors;
 
-        menu.Items.Add("Open sync folder", null, (_, _) =>
+        if (supervisors.Count == 0)
         {
-            try
+            var noAccounts = new ToolStripMenuItem("No accounts configured") { Enabled = false };
+            menu.Items.Add(noAccounts);
+        }
+        else if (supervisors.Count == 1)
+        {
+            var s = supervisors[0];
+            menu.Items.Add($"Open {s.DisplayName}", null, (_, _) => OpenSyncFolder(s.SyncRootPath));
+            menu.Items.Add("View pending changes...", null, (_, _) => ShowStatusForm(s));
+        }
+        else
+        {
+            foreach (var s in supervisors)
             {
-                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-                {
-                    FileName = _syncRootPath,
-                    UseShellExecute = true,
-                });
+                var sub = new ToolStripMenuItem(s.DisplayName);
+                var captured = s;
+                sub.DropDownItems.Add("Open sync folder", null, (_, _) => OpenSyncFolder(captured.SyncRootPath));
+                sub.DropDownItems.Add("View pending changes...", null, (_, _) => ShowStatusForm(captured));
+                menu.Items.Add(sub);
             }
-            catch { /* best-effort */ }
-        });
+        }
 
-        menu.Items.Add("View pending changes...", null, (_, _) =>
-        {
-            ShowStatusForm();
-        });
-
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add("Manage accounts...", null, (_, _) => OpenManageAccountsForm());
         menu.Items.Add(new ToolStripSeparator());
 
         menu.Items.Add("Exit", null, (_, _) =>
@@ -223,24 +257,47 @@ sealed class TrayIcon : IDisposable
         return menu;
     }
 
-    private void ShowStatusForm()
+    private static void OpenSyncFolder(string path)
     {
-        if (_outbox == null || _accountLabel == null)
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = path,
+                UseShellExecute = true,
+            });
+        }
+        catch { /* best-effort */ }
+    }
+
+    private void ShowStatusForm(AccountSupervisor supervisor)
+    {
+        if (supervisor.Outbox == null)
             return;
 
         _syncContext?.Post(_ =>
         {
             if (_statusForm == null || _statusForm.IsDisposed)
-                _statusForm = new StatusForm(_accountLabel, _outbox, _lastStatus);
+                _statusForm = new StatusForm(supervisor.Username, supervisor.Outbox, supervisor.Status);
 
             if (_statusForm.Visible)
-            {
                 _statusForm.Activate();
-            }
             else
-            {
                 _statusForm.Show();
-            }
+        }, null);
+    }
+
+    private void OpenManageAccountsForm()
+    {
+        _syncContext?.Post(_ =>
+        {
+            if (_manageForm == null || _manageForm.IsDisposed)
+                _manageForm = new ManageAccountsForm(_loginManager, _iconPath);
+
+            if (_manageForm.Visible)
+                _manageForm.Activate();
+            else
+                _manageForm.Show();
         }, null);
     }
 
@@ -249,7 +306,6 @@ sealed class TrayIcon : IDisposable
         if (_disposed) return;
         _disposed = true;
 
-        // Marshal shutdown to the STA thread if it's still running
         if (_syncContext != null && _thread?.IsAlive == true)
         {
             _syncContext.Post(_ => Application.ExitThread(), null);

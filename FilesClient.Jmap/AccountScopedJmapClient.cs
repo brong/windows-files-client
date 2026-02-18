@@ -1,34 +1,34 @@
 using System.Runtime.CompilerServices;
 using System.Text.Json;
-using FilesClient.Jmap.Auth;
 using FilesClient.Jmap.Models;
 
 namespace FilesClient.Jmap;
 
-public class JmapClient : IJmapClient
+/// <summary>
+/// Thin wrapper around a parent <see cref="JmapClient"/> that targets a
+/// different accountId. Shares the parent's HttpClient and JmapSession.
+/// </summary>
+public class AccountScopedJmapClient : IJmapClient
 {
-    private readonly HttpClient _http;
-    private JmapSession? _session;
-    private JmapContext? _context;
-    private int _nextCallId;
-
-    public const string CoreCapability = "urn:ietf:params:jmap:core";
-    public const string FileNodeCapability = "https://www.fastmail.com/dev/filenode";
-    public const string BlobCapability = "urn:ietf:params:jmap:blob";
-    private static readonly string[] FileNodeUsing = [CoreCapability, FileNodeCapability];
-    private static readonly string[] BlobUsing = [CoreCapability, BlobCapability];
-    private static readonly HashSet<string> SupportedDigests = ["sha", "sha-256"];
-    private string? _preferredDigestAlgorithm;
+    private readonly JmapClient _parent;
+    private readonly string _accountId;
+    private readonly JmapContext _context;
     private bool _preferredDigestResolved;
+    private string? _preferredDigestAlgorithm;
+    private static readonly HashSet<string> SupportedDigests = ["sha", "sha-256"];
 
-    public JmapSession Session => _session
-        ?? throw new InvalidOperationException("Session not initialised — call ConnectAsync first");
+    public AccountScopedJmapClient(JmapClient parent, string accountId)
+    {
+        _parent = parent;
+        _accountId = accountId;
+        var accountName = parent.Session.Accounts.TryGetValue(accountId, out var acct)
+            ? acct.Name : parent.Session.Username;
+        _context = new JmapContext(accountName, accountId);
+    }
 
-    public JmapContext Context => _context
-        ?? throw new InvalidOperationException("Context not initialised — call ConnectAsync first");
-
-    public string AccountId => Context.AccountId;
-    public string Username => Context.Username;
+    public JmapContext Context => _context;
+    public string AccountId => _accountId;
+    public string Username => _context.Username;
 
     public string? PreferredDigestAlgorithm
     {
@@ -36,7 +36,7 @@ public class JmapClient : IJmapClient
         {
             if (!_preferredDigestResolved)
             {
-                var algos = Session.GetSupportedDigestAlgorithms(AccountId);
+                var algos = _parent.Session.GetSupportedDigestAlgorithms(_accountId);
                 _preferredDigestAlgorithm = algos.FirstOrDefault(a => SupportedDigests.Contains(a));
                 _preferredDigestResolved = true;
             }
@@ -44,36 +44,21 @@ public class JmapClient : IJmapClient
         }
     }
 
-    public JmapClient(string token, bool debug = false)
-    {
-        HttpMessageHandler handler = new TokenAuth(token);
-        if (debug)
-        {
-            Console.Error.WriteLine("[JMAP] Debug logging enabled");
-            handler = new DebugLoggingHandler(handler);
-        }
-        _http = new HttpClient(handler);
-    }
+    private HttpClient Http => _parent.Http;
+    private JmapSession Session => _parent.Session;
 
-    public async Task ConnectAsync(string sessionUrl, CancellationToken ct = default)
-    {
-        var response = await _http.GetAsync(sessionUrl, ct);
-        response.EnsureSuccessStatusCode();
-        var json = await response.Content.ReadAsStringAsync(ct);
-        _session = JsonSerializer.Deserialize<JmapSession>(json)
-            ?? throw new InvalidOperationException("Failed to parse JMAP session");
+    private static readonly string[] FileNodeUsing = [JmapClient.CoreCapability, JmapClient.FileNodeCapability];
+    private static readonly string[] BlobUsing = [JmapClient.CoreCapability, JmapClient.BlobCapability];
 
-        var accountId = _session.GetPrimaryAccount(FileNodeCapability);
-        _context = new JmapContext(_session.Username, accountId);
-    }
+    private string NextCallId() => "c" + Interlocked.Increment(ref _parent.NextCallIdRef);
 
     private async Task<JsonElement> CallAsync(string[] capabilities, string method, object args, CancellationToken ct)
     {
-        var callId = "c" + Interlocked.Increment(ref _nextCallId);
+        var callId = NextCallId();
         var request = JmapRequest.Create(capabilities, (method, args, callId));
         var json = JsonSerializer.Serialize(request, JmapSerializerOptions.Default);
         var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
-        var httpResponse = await _http.PostAsync(Session.ApiUrl, content, ct);
+        var httpResponse = await Http.PostAsync(Session.ApiUrl, content, ct);
         httpResponse.EnsureSuccessStatusCode();
         var responseJson = await httpResponse.Content.ReadAsStringAsync(ct);
         var response = JsonSerializer.Deserialize<JmapResponse>(responseJson, JmapSerializerOptions.Default)
@@ -99,26 +84,41 @@ public class JmapClient : IJmapClient
             ?? throw new InvalidOperationException($"Failed to deserialize {method} response");
     }
 
+    private static T GetValidatedResult<T>(
+        Dictionary<string, (string method, JsonElement args)> responseMap,
+        string callId, string expectedMethod)
+    {
+        if (!responseMap.TryGetValue(callId, out var resp))
+            throw new InvalidOperationException($"No response for call ID {callId}");
+        if (resp.method == "error")
+            throw new InvalidOperationException($"JMAP error: {resp.args}");
+        if (resp.method != expectedMethod)
+            throw new InvalidOperationException(
+                $"JMAP method mismatch: expected {expectedMethod}, got {resp.method}");
+        return resp.args.Deserialize<T>(JmapSerializerOptions.Default)
+            ?? throw new InvalidOperationException($"Failed to deserialize {expectedMethod} response");
+    }
+
     public async Task<string> FindHomeNodeIdAsync(CancellationToken ct = default)
     {
-        var queryCallId = "c" + Interlocked.Increment(ref _nextCallId);
-        var getCallId = "c" + Interlocked.Increment(ref _nextCallId);
+        var queryCallId = NextCallId();
+        var getCallId = NextCallId();
 
         var request = JmapRequest.Create(FileNodeUsing,
             ("FileNode/query", new
             {
-                accountId = AccountId,
+                accountId = _accountId,
                 filter = new { hasRole = "home" },
             }, queryCallId),
             ("FileNode/get", new Dictionary<string, object>
             {
-                ["accountId"] = AccountId,
+                ["accountId"] = _accountId,
                 ["#ids"] = new { resultOf = queryCallId, name = "FileNode/query", path = "/ids" },
             }, getCallId));
 
         var json = JsonSerializer.Serialize(request, JmapSerializerOptions.Default);
         var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
-        var httpResponse = await _http.PostAsync(Session.ApiUrl, content, ct);
+        var httpResponse = await Http.PostAsync(Session.ApiUrl, content, ct);
         httpResponse.EnsureSuccessStatusCode();
         var responseJson = await httpResponse.Content.ReadAsStringAsync(ct);
         var response = JsonSerializer.Deserialize<JmapResponse>(responseJson, JmapSerializerOptions.Default)
@@ -144,31 +144,31 @@ public class JmapClient : IJmapClient
     public async Task<FileNode[]> GetFileNodesAsync(string[] ids, CancellationToken ct = default)
     {
         var result = await CallAsync<GetResponse<FileNode>>(
-            FileNodeUsing, "FileNode/get", new { accountId = AccountId, ids }, ct);
+            FileNodeUsing, "FileNode/get", new { accountId = _accountId, ids }, ct);
         return result.List;
     }
 
     public async Task<FileNode[]> GetChildrenAsync(string parentId, CancellationToken ct = default)
     {
-        var queryCallId = "c" + Interlocked.Increment(ref _nextCallId);
-        var getCallId = "c" + Interlocked.Increment(ref _nextCallId);
+        var queryCallId = NextCallId();
+        var getCallId = NextCallId();
 
         var request = JmapRequest.Create(FileNodeUsing,
             ("FileNode/query", new
             {
-                accountId = AccountId,
+                accountId = _accountId,
                 filter = new { parentId },
                 sort = new[] { new { property = "name", isAscending = true } },
             }, queryCallId),
             ("FileNode/get", new Dictionary<string, object>
             {
-                ["accountId"] = AccountId,
+                ["accountId"] = _accountId,
                 ["#ids"] = new { resultOf = queryCallId, name = "FileNode/query", path = "/ids" },
             }, getCallId));
 
         var json = JsonSerializer.Serialize(request, JmapSerializerOptions.Default);
         var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
-        var httpResponse = await _http.PostAsync(Session.ApiUrl, content, ct);
+        var httpResponse = await Http.PostAsync(Session.ApiUrl, content, ct);
         httpResponse.EnsureSuccessStatusCode();
         var responseJson = await httpResponse.Content.ReadAsStringAsync(ct);
         var response = JsonSerializer.Deserialize<JmapResponse>(responseJson, JmapSerializerOptions.Default)
@@ -191,32 +191,32 @@ public class JmapClient : IJmapClient
     public async Task<ChangesResponse> GetChangesAsync(string sinceState, CancellationToken ct = default)
     {
         return await CallAsync<ChangesResponse>(
-            FileNodeUsing, "FileNode/changes", new { accountId = AccountId, sinceState }, ct);
+            FileNodeUsing, "FileNode/changes", new { accountId = _accountId, sinceState }, ct);
     }
 
     public async Task<(ChangesResponse Changes, FileNode[] Created, FileNode[] Updated)>
         GetChangesAndNodesAsync(string sinceState, CancellationToken ct = default)
     {
-        var changesCallId = "c" + Interlocked.Increment(ref _nextCallId);
-        var createdCallId = "c" + Interlocked.Increment(ref _nextCallId);
-        var updatedCallId = "c" + Interlocked.Increment(ref _nextCallId);
+        var changesCallId = NextCallId();
+        var createdCallId = NextCallId();
+        var updatedCallId = NextCallId();
 
         var request = JmapRequest.Create(FileNodeUsing,
-            ("FileNode/changes", new { accountId = AccountId, sinceState }, changesCallId),
+            ("FileNode/changes", new { accountId = _accountId, sinceState }, changesCallId),
             ("FileNode/get", new Dictionary<string, object>
             {
-                ["accountId"] = AccountId,
+                ["accountId"] = _accountId,
                 ["#ids"] = new { resultOf = changesCallId, name = "FileNode/changes", path = "/created" },
             }, createdCallId),
             ("FileNode/get", new Dictionary<string, object>
             {
-                ["accountId"] = AccountId,
+                ["accountId"] = _accountId,
                 ["#ids"] = new { resultOf = changesCallId, name = "FileNode/changes", path = "/updated" },
             }, updatedCallId));
 
         var json = JsonSerializer.Serialize(request, JmapSerializerOptions.Default);
         var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
-        var httpResponse = await _http.PostAsync(Session.ApiUrl, content, ct);
+        var httpResponse = await Http.PostAsync(Session.ApiUrl, content, ct);
         httpResponse.EnsureSuccessStatusCode();
         var responseJson = await httpResponse.Content.ReadAsStringAsync(ct);
         var response = JsonSerializer.Deserialize<JmapResponse>(responseJson, JmapSerializerOptions.Default)
@@ -237,43 +237,28 @@ public class JmapClient : IJmapClient
         return (changes, created.List, updated.List);
     }
 
-    private static T GetValidatedResult<T>(
-        Dictionary<string, (string method, JsonElement args)> responseMap,
-        string callId, string expectedMethod)
-    {
-        if (!responseMap.TryGetValue(callId, out var resp))
-            throw new InvalidOperationException($"No response for call ID {callId}");
-        if (resp.method == "error")
-            throw new InvalidOperationException($"JMAP error: {resp.args}");
-        if (resp.method != expectedMethod)
-            throw new InvalidOperationException(
-                $"JMAP method mismatch: expected {expectedMethod}, got {resp.method}");
-        return resp.args.Deserialize<T>(JmapSerializerOptions.Default)
-            ?? throw new InvalidOperationException($"Failed to deserialize {expectedMethod} response");
-    }
-
     public async Task<string> GetStateAsync(string homeNodeId, CancellationToken ct = default)
     {
         var result = await CallAsync<GetResponse<FileNode>>(
-            FileNodeUsing, "FileNode/get", new { accountId = AccountId, ids = new[] { homeNodeId } }, ct);
+            FileNodeUsing, "FileNode/get", new { accountId = _accountId, ids = new[] { homeNodeId } }, ct);
         return result.State;
     }
 
     public async Task<Stream> DownloadBlobAsync(string blobId, string? type = null, string? name = null, CancellationToken ct = default)
     {
-        var url = Session.GetDownloadUrl(AccountId, blobId, type, name);
-        var response = await _http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
+        var url = Session.GetDownloadUrl(_accountId, blobId, type, name);
+        var response = await Http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
         response.EnsureSuccessStatusCode();
         return await response.Content.ReadAsStreamAsync(ct);
     }
 
     public async Task<(Stream data, bool isPartial)> DownloadBlobRangeAsync(string blobId, long offset, long length, string? type = null, string? name = null, CancellationToken ct = default)
     {
-        var url = Session.GetDownloadUrl(AccountId, blobId, type, name);
+        var url = Session.GetDownloadUrl(_accountId, blobId, type, name);
         var request = new HttpRequestMessage(HttpMethod.Get, url);
         request.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(offset, offset + length - 1);
 
-        var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+        var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
         response.EnsureSuccessStatusCode();
 
         var stream = await response.Content.ReadAsStreamAsync(ct);
@@ -283,10 +268,10 @@ public class JmapClient : IJmapClient
 
     public async Task<string> UploadBlobAsync(Stream data, string contentType, CancellationToken ct = default)
     {
-        var url = Session.GetUploadUrl(AccountId);
+        var url = Session.GetUploadUrl(_accountId);
         var content = new StreamContent(data);
         content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(contentType);
-        var response = await _http.PostAsync(url, content, ct);
+        var response = await Http.PostAsync(url, content, ct);
         response.EnsureSuccessStatusCode();
         var json = await response.Content.ReadAsStringAsync(ct);
         var upload = JsonSerializer.Deserialize<UploadResponse>(json, JmapSerializerOptions.Default)
@@ -299,7 +284,7 @@ public class JmapClient : IJmapClient
         var setResponse = await CallAsync<SetResponse>(
             FileNodeUsing, "FileNode/set", new
             {
-                accountId = AccountId,
+                accountId = _accountId,
                 create = new Dictionary<string, object>
                 {
                     ["c0"] = new { parentId, blobId, name, type },
@@ -317,11 +302,10 @@ public class JmapClient : IJmapClient
 
     public async Task<FileNode> ReplaceFileNodeBlobAsync(string nodeId, string parentId, string name, string blobId, string? type = null, CancellationToken ct = default)
     {
-        // Content is immutable — destroy old node and create replacement atomically.
         var setResponse = await CallAsync<SetResponse>(
             FileNodeUsing, "FileNode/set", new
             {
-                accountId = AccountId,
+                accountId = _accountId,
                 onDestroyRemoveChildren = true,
                 destroy = new[] { nodeId },
                 create = new Dictionary<string, object>
@@ -346,7 +330,7 @@ public class JmapClient : IJmapClient
         var setResponse = await CallAsync<SetResponse>(
             FileNodeUsing, "FileNode/set", new
             {
-                accountId = AccountId,
+                accountId = _accountId,
                 update = new Dictionary<string, object>
                 {
                     [nodeId] = new { parentId, name = newName },
@@ -362,7 +346,7 @@ public class JmapClient : IJmapClient
         var setResponse = await CallAsync<SetResponse>(
             FileNodeUsing, "FileNode/set", new
             {
-                accountId = AccountId,
+                accountId = _accountId,
                 onDestroyRemoveChildren = true,
                 destroy = new[] { nodeId },
             }, ct);
@@ -377,7 +361,7 @@ public class JmapClient : IJmapClient
         var request = new HttpRequestMessage(HttpMethod.Get, url);
         request.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("text/event-stream"));
 
-        using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+        using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
         response.EnsureSuccessStatusCode();
 
         using var stream = await response.Content.ReadAsStreamAsync(ct);
@@ -390,14 +374,13 @@ public class JmapClient : IJmapClient
         {
             var line = await reader.ReadLineAsync(ct);
             if (line == null)
-                break; // Stream ended
+                break;
 
             if (line.StartsWith(':'))
-                continue; // SSE comment / ping
+                continue;
 
             if (line.Length == 0)
             {
-                // Blank line = end of event
                 if (eventType == "state" && dataBuffer != null)
                 {
                     var newState = ParseStateChangeData(dataBuffer);
@@ -426,16 +409,13 @@ public class JmapClient : IJmapClient
             using var doc = JsonDocument.Parse(data);
             var root = doc.RootElement;
             if (root.TryGetProperty("changed", out var changed) &&
-                changed.TryGetProperty(AccountId, out var account) &&
+                changed.TryGetProperty(_accountId, out var account) &&
                 account.TryGetProperty("FileNode", out var state))
             {
                 return state.GetString();
             }
         }
-        catch (JsonException)
-        {
-            // Malformed JSON — skip
-        }
+        catch (JsonException) { }
         return null;
     }
 
@@ -444,15 +424,13 @@ public class JmapClient : IJmapClient
     {
         var blobArgs = new Dictionary<string, object?>
         {
-            ["accountId"] = AccountId,
+            ["accountId"] = _accountId,
             ["ids"] = new[] { blobId },
             ["properties"] = properties,
         };
 
-        if (offset.HasValue)
-            blobArgs["offset"] = offset.Value;
-        if (length.HasValue)
-            blobArgs["length"] = length.Value;
+        if (offset.HasValue) blobArgs["offset"] = offset.Value;
+        if (length.HasValue) blobArgs["length"] = length.Value;
 
         var blobResponse = await CallAsync<BlobGetResponse>(BlobUsing, "Blob/get", blobArgs, ct);
         if (blobResponse.NotFound.Length > 0)
@@ -464,39 +442,8 @@ public class JmapClient : IJmapClient
     }
 
     /// <summary>
-    /// Returns all accounts in this session that have the FileNode capability.
-    /// Each entry contains the accountId, display name, and whether it's the
-    /// primary account for FileNode.
+    /// AccountScopedJmapClient does not own the parent's HttpClient.
+    /// Dispose is a no-op.
     /// </summary>
-    public List<(string AccountId, string Name, bool IsPrimary)> GetFileNodeAccounts()
-    {
-        var primary = Session.PrimaryAccounts.GetValueOrDefault(FileNodeCapability);
-        var result = new List<(string, string, bool)>();
-        foreach (var (accountId, account) in Session.Accounts)
-        {
-            if (account.AccountCapabilities.ContainsKey(FileNodeCapability))
-                result.Add((accountId, account.Name, accountId == primary));
-        }
-        return result;
-    }
-
-    /// <summary>
-    /// Returns an <see cref="AccountScopedJmapClient"/> that shares this client's
-    /// HttpClient and session but targets a different account.
-    /// </summary>
-    public AccountScopedJmapClient ForAccount(string accountId)
-    {
-        if (!Session.Accounts.ContainsKey(accountId))
-            throw new ArgumentException($"Account {accountId} not found in session");
-        return new AccountScopedJmapClient(this, accountId);
-    }
-
-    // Expose internals needed by AccountScopedJmapClient
-    internal HttpClient Http => _http;
-    internal ref int NextCallIdRef => ref _nextCallId;
-
-    public void Dispose()
-    {
-        _http.Dispose();
-    }
+    public void Dispose() { }
 }
