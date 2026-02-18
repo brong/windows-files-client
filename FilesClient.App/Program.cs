@@ -116,6 +116,9 @@ class Program
             var hwnd = GetConsoleWindow();
             if (hwnd != IntPtr.Zero)
             {
+                // Start hidden — user can show via tray menu
+                ShowWindow(hwnd, 0 /* SW_HIDE */);
+
                 var sysMenu = GetSystemMenu(hwnd, false);
                 if (sysMenu != IntPtr.Zero)
                     DeleteMenu(sysMenu, SC_CLOSE, MF_BYCOMMAND);

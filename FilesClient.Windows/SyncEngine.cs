@@ -329,25 +329,59 @@ public class SyncEngine : IDisposable
         ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_SYNC_INCREMENTAL);
         _homeNodeId = cache.HomeNodeId;
 
-        // Rebuild mappings from cache
+        // Rebuild mappings from cache, verifying items exist on disk with matching metadata
         Console.WriteLine($"Restoring {cache.Entries.Count} mappings from cache...");
-        foreach (var (nodeId, relativePath) in cache.Entries)
+        int matchCount = 0;
+        int mismatchCount = 0;
+        int missingCount = 0;
+        var directories = new List<string>();
+        foreach (var (nodeId, entry) in cache.Entries)
         {
-            var fullPath = Path.Combine(_syncRootPath, relativePath);
+            var fullPath = Path.Combine(_syncRootPath, entry.Path);
+
+            if (entry.IsFolder)
+            {
+                if (!Directory.Exists(fullPath))
+                {
+                    missingCount++;
+                    continue;
+                }
+                directories.Add(fullPath);
+                matchCount++;
+            }
+            else
+            {
+                if (!File.Exists(fullPath))
+                {
+                    missingCount++;
+                    continue;
+                }
+                var info = new FileInfo(fullPath);
+                if (info.Length != entry.Size || info.LastWriteTimeUtc != entry.Modified)
+                {
+                    // File changed while app was stopped — still restore mapping
+                    // but the FileChangeWatcher will pick up the difference after Connect()
+                    mismatchCount++;
+                }
+                else
+                    matchCount++;
+            }
+
             _nodeIdToPath[nodeId] = fullPath;
             _pathToNodeId[fullPath] = nodeId;
         }
+        int fileCount = cache.Entries.Values.Count(e => !e.IsFolder) - missingCount;
+        Console.WriteLine($"  {matchCount} matched, {mismatchCount} changed, {missingCount} missing");
 
-        // Walk directories: mark ALWAYS_FULL + detect pinned
-        var directories = new List<string>();
-        foreach (var path in _nodeIdToPath.Values)
+        // If no files on disk, cache is stale — fall back to full fetch
+        if (fileCount <= 0 && cache.Entries.Values.Any(e => !e.IsFolder))
+            throw new InvalidOperationException("Cache stale: no file placeholders on disk");
+
+        // Mark directories as ALWAYS_FULL
+        foreach (var dir in directories)
         {
-            if (Directory.Exists(path))
-            {
-                directories.Add(path);
-                try { MarkDirectoryAlwaysFull(path); }
-                catch { /* directory might not be a placeholder */ }
-            }
+            try { MarkDirectoryAlwaysFull(dir); }
+            catch { /* directory might not be a placeholder */ }
         }
 
         // Catch up with server
