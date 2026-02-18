@@ -258,11 +258,19 @@ public class SyncEngine : IDisposable
                 _pathToNodeId[childPath] = child.Id;
                 _nodeIdToPath[child.Id] = childPath;
 
-                // Mark pre-existing items as in-sync (handles stale state from previous runs)
+                // Ensure pre-existing items are proper placeholders and in-sync
                 if (Path.Exists(childPath) && !newChildren.Contains(child))
                 {
                     try { SetInSync(childPath); }
-                    catch { /* not a placeholder — ignore */ }
+                    catch
+                    {
+                        // Not a placeholder yet — convert it
+                        try { ConvertToPlaceholder(childPath, child.Id, child.IsFolder); }
+                        catch (Exception ex)
+                        {
+                            Console.Error.WriteLine($"  Convert failed for {child.Name}: {ex.Message}");
+                        }
+                    }
                 }
             }
         }
@@ -377,11 +385,23 @@ public class SyncEngine : IDisposable
         if (fileCount <= 0 && cache.Entries.Values.Any(e => !e.IsFolder))
             throw new InvalidOperationException("Cache stale: no file placeholders on disk");
 
-        // Mark directories as ALWAYS_FULL
-        foreach (var dir in directories)
+        // Ensure directories are placeholders and marked ALWAYS_FULL
+        foreach (var (dir, nodeId) in directories.Select(d => (d, _pathToNodeId[d])))
         {
             try { MarkDirectoryAlwaysFull(dir); }
-            catch { /* directory might not be a placeholder */ }
+            catch
+            {
+                // Not a placeholder — convert it first
+                try
+                {
+                    ConvertToPlaceholder(dir, nodeId, isDirectory: true);
+                    Console.WriteLine($"  Converted directory to placeholder: {dir}");
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"  Convert failed for {dir}: {ex.Message}");
+                }
+            }
         }
 
         // Catch up with server
