@@ -12,6 +12,48 @@ class Program
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool AllocConsole();
 
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetConsoleWindow();
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsWindowVisible(IntPtr hWnd);
+
+    private delegate bool ConsoleCtrlHandlerDelegate(int dwCtrlType);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetConsoleCtrlHandler(ConsoleCtrlHandlerDelegate? handler, bool add);
+
+    // Must be a static field to prevent GC of the delegate
+    private static ConsoleCtrlHandlerDelegate? _consoleCtrlHandler;
+
+    internal static bool IsDebugMode { get; private set; }
+
+    internal static void ShowDebugConsole()
+    {
+        var hwnd = GetConsoleWindow();
+        if (hwnd != IntPtr.Zero)
+            ShowWindow(hwnd, 5 /* SW_SHOW */);
+    }
+
+    internal static void HideDebugConsole()
+    {
+        var hwnd = GetConsoleWindow();
+        if (hwnd != IntPtr.Zero)
+            ShowWindow(hwnd, 0 /* SW_HIDE */);
+    }
+
+    internal static bool IsDebugConsoleVisible()
+    {
+        var hwnd = GetConsoleWindow();
+        return hwnd != IntPtr.Zero && IsWindowVisible(hwnd);
+    }
+
     static async Task<int> Main(string[] args)
     {
         string? token = null;
@@ -59,7 +101,23 @@ class Program
 
         // Allocate a console window in debug mode (since OutputType is WinExe)
         if (debug)
+        {
             AllocConsole();
+            IsDebugMode = true;
+
+            // Intercept CTRL_CLOSE_EVENT (user clicks X on console window) to hide
+            // instead of terminating the process
+            _consoleCtrlHandler = (int ctrlType) =>
+            {
+                if (ctrlType == 2 /* CTRL_CLOSE_EVENT */)
+                {
+                    HideDebugConsole();
+                    return true; // Prevent termination
+                }
+                return false;
+            };
+            SetConsoleCtrlHandler(_consoleCtrlHandler, true);
+        }
 
         AppLogger.Initialize(debug);
 
