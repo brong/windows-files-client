@@ -425,6 +425,20 @@ public class JmapClient : IJmapClient
 
     public async IAsyncEnumerable<string> WatchForChangesAsync([EnumeratorCancellation] CancellationToken ct = default)
     {
+        await foreach (var (accountId, state) in WatchAllAccountChangesAsync(ct))
+        {
+            if (accountId == AccountId)
+                yield return state;
+        }
+    }
+
+    /// <summary>
+    /// Single SSE connection that yields (accountId, state) for all accounts
+    /// with FileNode capability in this session.
+    /// </summary>
+    public async IAsyncEnumerable<(string AccountId, string State)> WatchAllAccountChangesAsync(
+        [EnumeratorCancellation] CancellationToken ct = default)
+    {
         var url = Session.GetEventSourceUrl("FileNode", "no", "60");
         var request = new HttpRequestMessage(HttpMethod.Get, url);
         request.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("text/event-stream"));
@@ -452,9 +466,8 @@ public class JmapClient : IJmapClient
                 // Blank line = end of event
                 if (eventType == "state" && dataBuffer != null)
                 {
-                    var newState = ParseStateChangeData(dataBuffer);
-                    if (newState != null)
-                        yield return newState;
+                    foreach (var change in ParseAllStateChanges(dataBuffer))
+                        yield return change;
                 }
                 eventType = null;
                 dataBuffer = null;
@@ -471,24 +484,28 @@ public class JmapClient : IJmapClient
         }
     }
 
-    private string? ParseStateChangeData(string data)
+    private static List<(string AccountId, string State)> ParseAllStateChanges(string data)
     {
+        var results = new List<(string, string)>();
         try
         {
             using var doc = JsonDocument.Parse(data);
             var root = doc.RootElement;
-            if (root.TryGetProperty("changed", out var changed) &&
-                changed.TryGetProperty(AccountId, out var account) &&
-                account.TryGetProperty("FileNode", out var state))
+            if (root.TryGetProperty("changed", out var changed))
             {
-                return state.GetString();
+                foreach (var account in changed.EnumerateObject())
+                {
+                    if (account.Value.TryGetProperty("FileNode", out var state))
+                    {
+                        var s = state.GetString();
+                        if (s != null)
+                            results.Add((account.Name, s));
+                    }
+                }
             }
         }
-        catch (JsonException)
-        {
-            // Malformed JSON — skip
-        }
-        return null;
+        catch (JsonException) { }
+        return results;
     }
 
     public async Task<BlobDataItem> GetBlobAsync(string blobId, string[] properties,

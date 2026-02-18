@@ -1,3 +1,4 @@
+using System.Threading.Channels;
 using FilesClient.Jmap;
 using FilesClient.Windows;
 
@@ -13,6 +14,8 @@ sealed class AccountSupervisor : IDisposable
     private readonly string _syncRootPath;
     private readonly string _displayName;
     private readonly bool _debug;
+    private readonly Channel<string> _stateChannel = Channel.CreateBounded<string>(
+        new BoundedChannelOptions(16) { FullMode = BoundedChannelFullMode.DropOldest });
 
     private JmapQueue? _queue;
     private SyncEngine? _engine;
@@ -76,6 +79,15 @@ sealed class AccountSupervisor : IDisposable
         _loopTask = Task.Run(() => SyncLoopAsync(state, _loopCts.Token));
     }
 
+    /// <summary>
+    /// Push a state change from the shared push watcher.
+    /// Empty string = "poll now regardless of state".
+    /// </summary>
+    internal void PushState(string state) => _stateChannel.Writer.TryWrite(state);
+
+    internal void NotifyConnectivityLost() => _engine?.ReportConnectivityLost();
+    internal void NotifyConnectivityRestored() => _engine?.ReportConnectivityRestored();
+
     public async Task StopAsync()
     {
         if (_loopCts != null)
@@ -95,65 +107,33 @@ sealed class AccountSupervisor : IDisposable
     private async Task SyncLoopAsync(string initialState, CancellationToken ct)
     {
         string currentState = initialState;
-        int consecutiveFailures = 0;
-        const int maxRetries = 3;
 
-        Console.WriteLine($"[{_displayName}] Watching for changes...");
+        Console.WriteLine($"[{_displayName}] Waiting for state changes...");
 
         while (!ct.IsCancellationRequested)
         {
             try
             {
-                Console.WriteLine($"[{_displayName}] Connecting to push notifications...");
-                await foreach (var newState in _jmapClient.WatchForChangesAsync(ct))
+                var newState = await _stateChannel.Reader.ReadAsync(ct);
+
+                // Empty string = forced poll (e.g. after push reconnect)
+                if (newState.Length > 0 && string.Equals(newState, currentState, StringComparison.Ordinal))
                 {
-                    consecutiveFailures = 0;
-
-                    // Skip redundant polls when EventSource yields the same state
-                    if (string.Equals(newState, currentState, StringComparison.Ordinal))
-                    {
-                        Console.WriteLine($"[{_displayName}] State unchanged ({currentState}), skipping poll");
-                        continue;
-                    }
-
-                    try
-                    {
-                        currentState = await _engine!.PollChangesAsync(currentState, ct);
-                    }
-                    catch (Exception ex) when (ex is not OperationCanceledException)
-                    {
-                        Console.Error.WriteLine($"[{_displayName}] Change poll error: {ex.Message}");
-                    }
+                    Console.WriteLine($"[{_displayName}] State unchanged ({currentState}), skipping poll");
+                    continue;
                 }
-                consecutiveFailures++;
-                Console.WriteLine($"[{_displayName}] Push connection closed, reconnecting ({consecutiveFailures}/{maxRetries})...");
+
+                try
+                {
+                    currentState = await _engine!.PollChangesAsync(currentState, ct);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    Console.Error.WriteLine($"[{_displayName}] Change poll error: {ex.Message}");
+                }
             }
             catch (OperationCanceledException) { break; }
-            catch (Exception ex)
-            {
-                consecutiveFailures++;
-                Console.Error.WriteLine($"[{_displayName}] Push error ({consecutiveFailures}/{maxRetries}): {ex.Message}");
-            }
-
-            if (consecutiveFailures >= maxRetries)
-            {
-                _engine!.ReportConnectivityLost();
-                Console.Error.WriteLine($"[{_displayName}] Connection lost — retries exhausted, will keep trying...");
-            }
-
-            try
-            {
-                await Task.Delay(TimeSpan.FromSeconds(3), ct);
-                currentState = await _engine!.PollChangesAsync(currentState, ct);
-                if (consecutiveFailures >= maxRetries)
-                    _engine.ReportConnectivityRestored();
-                consecutiveFailures = 0;
-            }
-            catch (OperationCanceledException) { break; }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine($"[{_displayName}] Change poll error: {ex.Message}");
-            }
+            catch (ChannelClosedException) { break; }
         }
     }
 

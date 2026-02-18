@@ -409,66 +409,12 @@ public class AccountScopedJmapClient : IJmapClient
 
     public async IAsyncEnumerable<string> WatchForChangesAsync([EnumeratorCancellation] CancellationToken ct = default)
     {
-        var url = Session.GetEventSourceUrl("FileNode", "no", "60");
-        var request = new HttpRequestMessage(HttpMethod.Get, url);
-        request.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("text/event-stream"));
-
-        using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
-        response.EnsureSuccessStatusCode();
-
-        using var stream = await response.Content.ReadAsStreamAsync(ct);
-        using var reader = new StreamReader(stream);
-
-        string? eventType = null;
-        string? dataBuffer = null;
-
-        while (!ct.IsCancellationRequested)
+        // Delegate to parent's shared SSE, filtering for this account
+        await foreach (var (accountId, state) in _parent.WatchAllAccountChangesAsync(ct))
         {
-            var line = await reader.ReadLineAsync(ct);
-            if (line == null)
-                break;
-
-            if (line.StartsWith(':'))
-                continue;
-
-            if (line.Length == 0)
-            {
-                if (eventType == "state" && dataBuffer != null)
-                {
-                    var newState = ParseStateChangeData(dataBuffer);
-                    if (newState != null)
-                        yield return newState;
-                }
-                eventType = null;
-                dataBuffer = null;
-                continue;
-            }
-
-            if (line.StartsWith("event:"))
-                eventType = line.Substring(6).Trim();
-            else if (line.StartsWith("data:"))
-            {
-                var data = line.Substring(5).Trim();
-                dataBuffer = dataBuffer == null ? data : dataBuffer + "\n" + data;
-            }
+            if (accountId == _accountId)
+                yield return state;
         }
-    }
-
-    private string? ParseStateChangeData(string data)
-    {
-        try
-        {
-            using var doc = JsonDocument.Parse(data);
-            var root = doc.RootElement;
-            if (root.TryGetProperty("changed", out var changed) &&
-                changed.TryGetProperty(_accountId, out var account) &&
-                account.TryGetProperty("FileNode", out var state))
-            {
-                return state.GetString();
-            }
-        }
-        catch (JsonException) { }
-        return null;
     }
 
     public async Task<BlobDataItem> GetBlobAsync(string blobId, string[] properties,

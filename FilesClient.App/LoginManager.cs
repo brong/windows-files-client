@@ -98,6 +98,10 @@ sealed class LoginManager : IDisposable
                 session.AccountIds.Contains(s.AccountId)).ToList();
         }
 
+        // Stop push watcher first
+        if (session != null)
+            StopPushWatcher(session);
+
         foreach (var supervisor in toStop)
         {
             try { await supervisor.StopAsync(); }
@@ -160,6 +164,7 @@ sealed class LoginManager : IDisposable
             var remaining = GetActiveAccountIds(session.LoginId);
             if (remaining.Count == 0)
             {
+                StopPushWatcher(session);
                 _credentialStore.Remove(session.LoginId);
                 lock (_lock)
                     _sessions.Remove(session);
@@ -188,13 +193,21 @@ sealed class LoginManager : IDisposable
     }
 
     /// <summary>
-    /// Stop all supervisors gracefully.
+    /// Stop all supervisors and push watchers gracefully.
     /// </summary>
     public async Task StopAllAsync()
     {
+        List<LoginSession> sessions;
         List<AccountSupervisor> all;
         lock (_lock)
+        {
+            sessions = _sessions.ToList();
             all = _supervisors.ToList();
+        }
+
+        // Stop push watchers first
+        foreach (var session in sessions)
+            StopPushWatcher(session);
 
         foreach (var supervisor in all)
         {
@@ -390,12 +403,111 @@ sealed class LoginManager : IDisposable
             }
         }
 
+        // Start shared push watcher for this session
+        StartPushWatcher(session, ct);
+
         if (persist)
             _credentialStore.Save(loginId, token, sessionUrl, enabledAccountIds);
 
         AccountsChanged?.Invoke();
         RaiseAggregateStatus();
         return loginId;
+    }
+
+    private void StartPushWatcher(LoginSession session, CancellationToken parentCt)
+    {
+        session.PushCts = CancellationTokenSource.CreateLinkedTokenSource(parentCt);
+        session.PushTask = Task.Run(() => RunPushWatcherAsync(session, session.PushCts.Token));
+    }
+
+    private void StopPushWatcher(LoginSession session)
+    {
+        session.PushCts?.Cancel();
+        if (session.PushTask != null)
+        {
+            try { session.PushTask.Wait(3000); }
+            catch { }
+        }
+        session.PushCts?.Dispose();
+        session.PushCts = null;
+        session.PushTask = null;
+    }
+
+    private async Task RunPushWatcherAsync(LoginSession session, CancellationToken ct)
+    {
+        var username = session.Client.Session.Username;
+        Console.WriteLine($"[Push:{username}] Starting shared push watcher");
+
+        int backoffMs = 1000;
+        const int maxBackoffMs = 60000;
+        bool wasDisconnected = false;
+
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                if (wasDisconnected)
+                {
+                    Console.WriteLine($"[Push:{username}] Reconnected");
+                    NotifySupervisorsConnectivity(session, restored: true);
+                    wasDisconnected = false;
+                }
+
+                backoffMs = 1000; // Reset on successful connection
+
+                await foreach (var (accountId, state) in session.Client.WatchAllAccountChangesAsync(ct))
+                {
+                    AccountSupervisor? supervisor;
+                    lock (_lock)
+                        supervisor = _supervisors.FirstOrDefault(s => s.AccountId == accountId);
+                    supervisor?.PushState(state);
+                }
+
+                // Stream ended normally — reconnect
+                Console.WriteLine($"[Push:{username}] SSE stream ended, reconnecting...");
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[Push:{username}] SSE error: {ex.Message}");
+
+                if (!wasDisconnected)
+                {
+                    wasDisconnected = true;
+                    NotifySupervisorsConnectivity(session, restored: false);
+                }
+
+                try { await Task.Delay(backoffMs, ct); }
+                catch (OperationCanceledException) { break; }
+
+                backoffMs = Math.Min(backoffMs * 2, maxBackoffMs);
+            }
+        }
+
+        Console.WriteLine($"[Push:{username}] Push watcher stopped");
+    }
+
+    private void NotifySupervisorsConnectivity(LoginSession session, bool restored)
+    {
+        List<AccountSupervisor> supervisors;
+        lock (_lock)
+            supervisors = _supervisors.Where(s => session.AccountIds.Contains(s.AccountId)).ToList();
+
+        foreach (var s in supervisors)
+        {
+            if (restored)
+            {
+                s.NotifyConnectivityRestored();
+                s.PushState(""); // Force poll after reconnect
+            }
+            else
+            {
+                s.NotifyConnectivityLost();
+            }
+        }
     }
 
     private void RaiseAggregateStatus()
@@ -447,6 +559,9 @@ sealed class LoginManager : IDisposable
 
         lock (_lock)
         {
+            foreach (var session in _sessions)
+                StopPushWatcher(session);
+
             foreach (var supervisor in _supervisors)
                 supervisor.Dispose();
             _supervisors.Clear();
@@ -468,6 +583,8 @@ sealed class LoginSession
     public string SessionUrl { get; }
     public string Token { get; }
     public List<string> AccountIds { get; }
+    public CancellationTokenSource? PushCts { get; set; }
+    public Task? PushTask { get; set; }
 
     public LoginSession(string loginId, JmapClient client, string sessionUrl, string token, List<string> accountIds)
     {
