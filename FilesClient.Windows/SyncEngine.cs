@@ -264,11 +264,20 @@ public class SyncEngine : IDisposable
                     try { SetInSync(childPath); }
                     catch
                     {
-                        // Not a placeholder yet — convert it
-                        try { ConvertToPlaceholder(childPath, child.Id, child.IsFolder); }
-                        catch (Exception ex)
+                        // Check if it's already a placeholder — if so, just set in-sync failed
+                        // for another reason (e.g. sync root not connected yet); skip it.
+                        if (ReadPlaceholderNodeId(childPath) != null)
                         {
-                            Console.Error.WriteLine($"  Convert failed for {child.Name}: {ex.Message}");
+                            // Already a placeholder — nothing more to do
+                        }
+                        else
+                        {
+                            // Not a placeholder yet — convert it
+                            try { ConvertToPlaceholder(childPath, child.Id, child.IsFolder); }
+                            catch (Exception ex)
+                            {
+                                Console.Error.WriteLine($"  Convert failed for {child.Name}: {ex.Message}");
+                            }
                         }
                     }
                 }
@@ -284,7 +293,30 @@ public class SyncEngine : IDisposable
             if (string.Equals(localParentPath, _syncRootPath, StringComparison.OrdinalIgnoreCase))
                 continue;
             try { MarkDirectoryAlwaysFull(localParentPath); }
-            catch { /* directory might not be a placeholder */ }
+            catch
+            {
+                if (ReadPlaceholderNodeId(localParentPath) != null)
+                {
+                    try { SetInSync(localParentPath); }
+                    catch { }
+                }
+                else
+                {
+                    var nodeId = _pathToNodeId.GetValueOrDefault(localParentPath);
+                    if (nodeId != null)
+                    {
+                        try
+                        {
+                            ConvertToPlaceholder(localParentPath, nodeId, isDirectory: true);
+                            MarkDirectoryAlwaysFull(localParentPath);
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.Error.WriteLine($"  Convert+mark failed for {localParentPath}: {ex.Message}");
+                        }
+                    }
+                }
+            }
         }
 
         DetectAndHydratePinnedDirectories(tree.Select(t => t.localParentPath));
@@ -391,15 +423,23 @@ public class SyncEngine : IDisposable
             try { MarkDirectoryAlwaysFull(dir); }
             catch
             {
-                // Not a placeholder — convert it first
-                try
+                // Check if it's already a placeholder — if so, just set in-sync
+                if (ReadPlaceholderNodeId(dir) != null)
                 {
-                    ConvertToPlaceholder(dir, nodeId, isDirectory: true);
-                    Console.WriteLine($"  Converted directory to placeholder: {dir}");
+                    try { SetInSync(dir); }
+                    catch { }
                 }
-                catch (Exception ex)
+                else
                 {
-                    Console.Error.WriteLine($"  Convert failed for {dir}: {ex.Message}");
+                    try
+                    {
+                        ConvertToPlaceholder(dir, nodeId, isDirectory: true);
+                        Console.WriteLine($"  Converted directory to placeholder: {dir}");
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.Error.WriteLine($"  Convert failed for {dir}: {ex.Message}");
+                    }
                 }
             }
         }
@@ -543,7 +583,14 @@ public class SyncEngine : IDisposable
                 else
                 {
                     try { SetInSync(expectedPath); }
-                    catch { /* not a placeholder — ignore */ }
+                    catch
+                    {
+                        if (ReadPlaceholderNodeId(expectedPath) == null)
+                        {
+                            try { ConvertToPlaceholder(expectedPath, child.Id, child.IsFolder); }
+                            catch { }
+                        }
+                    }
                 }
             }
 
@@ -557,7 +604,30 @@ public class SyncEngine : IDisposable
             if (string.Equals(localParentPath, _syncRootPath, StringComparison.OrdinalIgnoreCase))
                 continue;
             try { MarkDirectoryAlwaysFull(localParentPath); }
-            catch { /* directory might not be a placeholder */ }
+            catch
+            {
+                if (ReadPlaceholderNodeId(localParentPath) != null)
+                {
+                    try { SetInSync(localParentPath); }
+                    catch { }
+                }
+                else
+                {
+                    var nodeId = _pathToNodeId.GetValueOrDefault(localParentPath);
+                    if (nodeId != null)
+                    {
+                        try
+                        {
+                            ConvertToPlaceholder(localParentPath, nodeId, isDirectory: true);
+                            MarkDirectoryAlwaysFull(localParentPath);
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.Error.WriteLine($"  Convert+mark failed for {localParentPath}: {ex.Message}");
+                        }
+                    }
+                }
+            }
         }
 
         return state;
