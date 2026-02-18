@@ -79,7 +79,17 @@ public class OutboxProcessor : IDisposable
             await ProcessChangeAsync(change, ct);
             _outbox.MarkCompleted(change.Id);
         }
-        catch (OperationCanceledException) { }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            // HTTP timeout or other non-shutdown cancellation — treat as transient failure
+            Console.Error.WriteLine($"Outbox timeout for {change.LocalPath ?? change.NodeId}");
+            _outbox.MarkFailed(change.Id, "Operation timed out");
+        }
+        catch (OperationCanceledException)
+        {
+            // App shutdown — remove from processing so state is clean
+            _outbox.MarkFailed(change.Id, "Cancelled");
+        }
         catch (Exception ex)
         {
             Console.Error.WriteLine($"Outbox process error for {change.LocalPath ?? change.NodeId}: {ex.Message}");

@@ -318,24 +318,27 @@ public class SyncOutbox : IDisposable
                     && (e.NextRetryAfter == null || e.NextRetryAfter <= now))
                 .ToList();
 
-            // 1. Folder creates — shallowest first
+            // 1. Folder creates — shallowest first, skip if parent folder is still pending
             var folderCreate = ready
                 .Where(e => e.IsFolder && !e.IsDeleted && e.LocalPath != null
-                    && e.NodeId == null) // not yet on server
+                    && e.NodeId == null // not yet on server
+                    && !HasPendingParentCreateLocked(e.LocalPath))
                 .OrderBy(e => e.LocalPath!.Count(c => c == Path.DirectorySeparatorChar))
                 .FirstOrDefault();
             if (folderCreate != null) return folderCreate;
 
-            // 2. Content uploads — FIFO
+            // 2. Content uploads — FIFO, skip if parent folder is still pending
             var upload = ready
-                .Where(e => e.IsDirtyContent && !e.IsDeleted)
+                .Where(e => e.IsDirtyContent && !e.IsDeleted
+                    && !HasPendingParentCreateLocked(e.LocalPath))
                 .OrderBy(e => e.CreatedAt)
                 .FirstOrDefault();
             if (upload != null) return upload;
 
-            // 3. Pure moves — FIFO
+            // 3. Pure moves — FIFO, skip if parent folder is still pending
             var move = ready
-                .Where(e => e.IsDirtyLocation && !e.IsDirtyContent && !e.IsDeleted)
+                .Where(e => e.IsDirtyLocation && !e.IsDirtyContent && !e.IsDeleted
+                    && !HasPendingParentCreateLocked(e.LocalPath))
                 .OrderBy(e => e.CreatedAt)
                 .FirstOrDefault();
             if (move != null) return move;
@@ -451,6 +454,20 @@ public class SyncOutbox : IDisposable
         {
             Console.Error.WriteLine($"Failed to save outbox: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// Check if the parent directory of a path has a pending or in-progress folder create.
+    /// Must be called under _lock.
+    /// </summary>
+    private bool HasPendingParentCreateLocked(string? localPath)
+    {
+        if (localPath == null) return false;
+        var parentDir = Path.GetDirectoryName(localPath);
+        if (parentDir == null) return false;
+        return _byPath.TryGetValue(parentDir, out var parentId)
+            && _entries.TryGetValue(parentId, out var parentEntry)
+            && parentEntry.IsFolder && !parentEntry.IsDeleted && parentEntry.NodeId == null;
     }
 
     private void RemoveEntryLocked(PendingChange entry)
