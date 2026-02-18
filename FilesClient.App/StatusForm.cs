@@ -131,7 +131,12 @@ sealed class StatusForm : Form
         _listView.BeginUpdate();
         _listView.Items.Clear();
 
-        foreach (var entry in snapshot)
+        // Sort: most upload progress first, then oldest first
+        var sorted = snapshot.OrderByDescending(e =>
+            processingIds.Contains(e.Id) ? (_outbox.GetProgress(e.Id) ?? -1) : -2)
+            .ThenBy(e => e.CreatedAt);
+
+        foreach (var entry in sorted)
         {
             var name = entry.LocalPath != null
                 ? Path.GetFileName(entry.LocalPath)
