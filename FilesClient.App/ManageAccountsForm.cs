@@ -117,6 +117,11 @@ sealed class ManageAccountsForm : Form
     {
         var supervisors = _loginManager.Supervisors;
 
+        // Preserve selection across refresh
+        var selectedAccountId = (_listView.SelectedItems.Count > 0
+            ? (_listView.SelectedItems[0].Tag as AccountSupervisor)?.AccountId
+            : null);
+
         _listView.BeginUpdate();
         _listView.Items.Clear();
 
@@ -136,6 +141,8 @@ sealed class ManageAccountsForm : Form
             item.SubItems.Add(s.SyncRootPath);
             item.SubItems.Add(statusText);
             item.Tag = s;
+            if (s.AccountId == selectedAccountId)
+                item.Selected = true;
             _listView.Items.Add(item);
         }
 
