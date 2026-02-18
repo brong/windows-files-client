@@ -188,12 +188,18 @@ public class OutboxProcessor : IDisposable
                 throw new InvalidOperationException($"Cannot resolve parent for {change.LocalPath}");
 
             Console.WriteLine($"Outbox: uploading modified file {fileName}");
+            using var activityCts1 = CancellationTokenSource.CreateLinkedTokenSource(ct);
             using var fileStream = new FileStream(change.LocalPath, FileMode.Open, FileAccess.Read,
                 FileShare.ReadWrite | FileShare.Delete);
             using var stream = new ProgressStream(fileStream, fileStream.Length,
-                percent => _outbox.UpdateProgress(change.Id, percent));
+                percent => _outbox.UpdateProgress(change.Id, percent),
+                onActivity: () => activityCts1.CancelAfter(TimeSpan.FromSeconds(30)));
             var blobId = await _queue.EnqueueAsync(QueuePriority.Background,
-                () => _jmapClient.UploadBlobAsync(stream, contentType, ct), ct);
+                () =>
+                {
+                    activityCts1.CancelAfter(TimeSpan.FromSeconds(30));
+                    return _jmapClient.UploadBlobAsync(stream, contentType, activityCts1.Token);
+                }, ct);
             var newNode = await _queue.EnqueueAsync(QueuePriority.Background,
                 () => _jmapClient.ReplaceFileNodeBlobAsync(change.NodeId, parentId, fileName, blobId, contentType, ct), ct);
 
@@ -224,12 +230,18 @@ public class OutboxProcessor : IDisposable
                 throw new InvalidOperationException($"Cannot resolve parent for {change.LocalPath}");
 
             Console.WriteLine($"Outbox: uploading new file {fileName}");
+            using var activityCts2 = CancellationTokenSource.CreateLinkedTokenSource(ct);
             using var fileStream = new FileStream(change.LocalPath, FileMode.Open, FileAccess.Read,
                 FileShare.ReadWrite | FileShare.Delete);
             using var stream = new ProgressStream(fileStream, fileStream.Length,
-                percent => _outbox.UpdateProgress(change.Id, percent));
+                percent => _outbox.UpdateProgress(change.Id, percent),
+                onActivity: () => activityCts2.CancelAfter(TimeSpan.FromSeconds(30)));
             var blobId = await _queue.EnqueueAsync(QueuePriority.Background,
-                () => _jmapClient.UploadBlobAsync(stream, contentType, ct), ct);
+                () =>
+                {
+                    activityCts2.CancelAfter(TimeSpan.FromSeconds(30));
+                    return _jmapClient.UploadBlobAsync(stream, contentType, activityCts2.Token);
+                }, ct);
             var node = await _queue.EnqueueAsync(QueuePriority.Background,
                 () => _jmapClient.CreateFileNodeAsync(parentId, blobId, fileName, contentType, ct), ct);
 

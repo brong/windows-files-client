@@ -44,13 +44,19 @@ sealed class StatusForm : Form
             Dock = DockStyle.Fill,
             View = View.Details,
             FullRowSelect = true,
-            HeaderStyle = ColumnHeaderStyle.Nonclickable,
+            HeaderStyle = ColumnHeaderStyle.Clickable,
             ShowItemToolTips = true,
+            OwnerDraw = true,
         };
         _listView.Columns.Add("Name", 200);
         _listView.Columns.Add("Action", 100);
         _listView.Columns.Add("Status", 100);
         _listView.Columns.Add("Updated", 120);
+
+        _listView.DrawColumnHeader += (_, e) => e.DrawDefault = true;
+        _listView.DrawItem += (_, _) => { };
+        _listView.DrawSubItem += OnDrawSubItem;
+
         Controls.Add(_listView);
 
         // Bottom panel with Close button
@@ -144,11 +150,12 @@ sealed class StatusForm : Form
 
             var action = DeriveAction(entry);
             var isProcessing = processingIds.Contains(entry.Id);
+            int? progress = null;
             string status;
             if (isProcessing)
             {
-                var progress = _outbox.GetProgress(entry.Id);
-                status = progress.HasValue ? $"Uploading {progress.Value}%" : "Syncing...";
+                progress = _outbox.GetProgress(entry.Id);
+                status = progress.HasValue ? "" : "Syncing...";
             }
             else
             {
@@ -157,11 +164,15 @@ sealed class StatusForm : Form
 
             var item = new ListViewItem(name);
             item.SubItems.Add(action);
-            item.SubItems.Add(status);
+            var statusSubItem = item.SubItems.Add(status);
+            if (progress.HasValue)
+                statusSubItem.Tag = progress.Value;
             item.SubItems.Add(FormatRelativeTime(entry.UpdatedAt, now));
 
-            // Tooltip: full path + last error
+            // Tooltip: full path + progress + last error
             var tooltip = entry.LocalPath ?? entry.NodeId ?? "";
+            if (progress.HasValue)
+                tooltip += $"\nUploading {progress.Value}%";
             if (entry.LastError != null)
                 tooltip += $"\nError: {entry.LastError}";
             item.ToolTipText = tooltip;
@@ -177,6 +188,41 @@ sealed class StatusForm : Form
 
         _listView.EndUpdate();
         _hasActiveUploads = processingIds.Count > 0;
+    }
+
+    private void OnDrawSubItem(object? sender, DrawListViewSubItemEventArgs e)
+    {
+        if (e.ColumnIndex == 2 && e.SubItem?.Tag is int percent)
+        {
+            var g = e.Graphics!;
+            var bounds = e.Bounds;
+
+            // Clear cell background
+            using (var bgBrush = new SolidBrush(_listView.BackColor))
+                g.FillRectangle(bgBrush, bounds);
+
+            // Thin progress bar centered vertically
+            var barHeight = Math.Max(4, bounds.Height / 3);
+            var barY = bounds.Y + (bounds.Height - barHeight) / 2;
+            var trackRect = new Rectangle(bounds.X + 4, barY, bounds.Width - 8, barHeight);
+
+            // Track
+            using (var trackBrush = new SolidBrush(Color.FromArgb(228, 228, 228)))
+                g.FillRectangle(trackBrush, trackRect);
+
+            // Fill
+            if (percent > 0)
+            {
+                var fillWidth = (int)(trackRect.Width * percent / 100.0);
+                var fillRect = new Rectangle(trackRect.X, trackRect.Y, fillWidth, trackRect.Height);
+                using var fillBrush = new SolidBrush(Color.DodgerBlue);
+                g.FillRectangle(fillBrush, fillRect);
+            }
+        }
+        else
+        {
+            e.DrawDefault = true;
+        }
     }
 
     private static string DeriveAction(PendingChange entry)
