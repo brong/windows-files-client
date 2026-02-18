@@ -302,9 +302,9 @@ public class SyncOutbox : IDisposable
     /// Returns null if nothing is ready.
     ///
     /// Processing order:
-    /// 1. Folder creates — shallowest first (parents before children)
-    /// 2. Content uploads — FIFO
-    /// 3. Pure moves (location dirty, content clean) — FIFO
+    /// 1. Folder creates — shallowest first, then alphabetical by name
+    /// 2. Content uploads — alphabetical by name within same parent
+    /// 3. Pure moves — alphabetical by name within same parent
     /// 4. Deletes — deepest first (children before parents)
     /// </summary>
     public PendingChange? DequeueNext()
@@ -318,28 +318,31 @@ public class SyncOutbox : IDisposable
                     && (e.NextRetryAfter == null || e.NextRetryAfter <= now))
                 .ToList();
 
-            // 1. Folder creates — shallowest first, skip if parent folder is still pending
+            // 1. Folder creates — shallowest first, then alphabetical, skip if parent pending
             var folderCreate = ready
                 .Where(e => e.IsFolder && !e.IsDeleted && e.LocalPath != null
                     && e.NodeId == null // not yet on server
                     && !HasPendingParentCreateLocked(e.LocalPath))
                 .OrderBy(e => e.LocalPath!.Count(c => c == Path.DirectorySeparatorChar))
+                .ThenBy(e => Path.GetFileName(e.LocalPath), StringComparer.OrdinalIgnoreCase)
                 .FirstOrDefault();
             if (folderCreate != null) return folderCreate;
 
-            // 2. Content uploads — FIFO, skip if parent folder is still pending
+            // 2. Content uploads — alphabetical within same parent, skip if parent pending
             var upload = ready
                 .Where(e => e.IsDirtyContent && !e.IsDeleted
                     && !HasPendingParentCreateLocked(e.LocalPath))
-                .OrderBy(e => e.CreatedAt)
+                .OrderBy(e => Path.GetDirectoryName(e.LocalPath), StringComparer.OrdinalIgnoreCase)
+                .ThenBy(e => Path.GetFileName(e.LocalPath), StringComparer.OrdinalIgnoreCase)
                 .FirstOrDefault();
             if (upload != null) return upload;
 
-            // 3. Pure moves — FIFO, skip if parent folder is still pending
+            // 3. Pure moves — alphabetical within same parent, skip if parent pending
             var move = ready
                 .Where(e => e.IsDirtyLocation && !e.IsDirtyContent && !e.IsDeleted
                     && !HasPendingParentCreateLocked(e.LocalPath))
-                .OrderBy(e => e.CreatedAt)
+                .OrderBy(e => Path.GetDirectoryName(e.LocalPath), StringComparer.OrdinalIgnoreCase)
+                .ThenBy(e => Path.GetFileName(e.LocalPath), StringComparer.OrdinalIgnoreCase)
                 .FirstOrDefault();
             if (move != null) return move;
 
