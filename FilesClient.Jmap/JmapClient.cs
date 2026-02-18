@@ -52,7 +52,7 @@ public class JmapClient : IJmapClient
             Console.Error.WriteLine("[JMAP] Debug logging enabled");
             handler = new DebugLoggingHandler(handler);
         }
-        _http = new HttpClient(handler);
+        _http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(30) };
     }
 
     public async Task ConnectAsync(string sessionUrl, CancellationToken ct = default)

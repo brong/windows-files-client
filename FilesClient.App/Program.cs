@@ -143,6 +143,10 @@ class Program
 
         using var loginManager = new LoginManager(debug);
 
+        // Show tray icon immediately — before any network calls
+        using var trayIcon = new TrayIcon(cts, iconPath, loginManager);
+        trayIcon.Start();
+
         // Dev: --token adds a transient (non-persisted) login
         if (token != null)
         {
@@ -154,14 +158,10 @@ class Program
             catch (Exception ex)
             {
                 Console.Error.WriteLine($"Failed to connect: {ex.Message}");
-                return 1;
             }
         }
 
         await loginManager.StartAsync(iconPath, clean, cts.Token);
-
-        using var trayIcon = new TrayIcon(cts, iconPath, loginManager);
-        trayIcon.Start();
 
         // If no accounts configured, open the manage accounts dialog
         if (loginManager.Supervisors.Count == 0 && token == null)
