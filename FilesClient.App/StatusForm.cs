@@ -17,6 +17,9 @@ sealed class StatusForm : Form
         _outbox = outbox;
         _currentStatus = initialStatus;
 
+        Font = new Font("Segoe UI", 9f);
+        AutoScaleMode = AutoScaleMode.Dpi;
+
         Text = "Fastmail Files - Pending Changes";
         Size = new Size(600, 400);
         MinimumSize = new Size(400, 250);
@@ -30,7 +33,7 @@ sealed class StatusForm : Form
             Dock = DockStyle.Top,
             Height = 30,
             Padding = new Padding(8, 8, 8, 0),
-            Font = new Font(Font.FontFamily, 9.5f),
+            Font = new Font("Segoe UI", 9.5f),
         };
         Controls.Add(_headerLabel);
 
@@ -58,7 +61,7 @@ sealed class StatusForm : Form
         var closeButton = new Button
         {
             Text = "Close",
-            Width = 75,
+            AutoSize = true,
             Height = 28,
             Anchor = AnchorStyles.Right | AnchorStyles.Bottom,
         };

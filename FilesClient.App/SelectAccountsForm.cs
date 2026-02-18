@@ -15,8 +15,11 @@ sealed class SelectAccountsForm : Form
     {
         _accounts = accounts;
 
+        Font = new Font("Segoe UI", 9f);
+        AutoScaleMode = AutoScaleMode.Dpi;
+
         Text = "Select Accounts to Sync";
-        Size = new Size(400, 300);
+        Size = new Size(420, 320);
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;
@@ -33,8 +36,8 @@ sealed class SelectAccountsForm : Form
         _checkedListBox = new CheckedListBox
         {
             Location = new Point(12, 35),
-            Width = 360,
-            Height = 160,
+            Size = new Size(380, 180),
+            Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
             CheckOnClick = true,
         };
 
@@ -52,11 +55,12 @@ sealed class SelectAccountsForm : Form
         var okButton = new Button
         {
             Text = "OK",
-            Width = 80,
+            AutoSize = true,
             Height = 28,
-            Location = new Point(292, 205),
+            Anchor = AnchorStyles.Bottom | AnchorStyles.Right,
             DialogResult = DialogResult.OK,
         };
+        okButton.Location = new Point(310, 225);
         okButton.Click += (_, _) =>
         {
             SelectedAccountIds = new HashSet<string>();
@@ -70,11 +74,12 @@ sealed class SelectAccountsForm : Form
         var cancelButton = new Button
         {
             Text = "Cancel",
-            Width = 80,
+            AutoSize = true,
             Height = 28,
-            Location = new Point(200, 205),
+            Anchor = AnchorStyles.Bottom | AnchorStyles.Right,
             DialogResult = DialogResult.Cancel,
         };
+        cancelButton.Location = new Point(220, 225);
 
         Controls.AddRange([label, _checkedListBox, okButton, cancelButton]);
         AcceptButton = okButton;

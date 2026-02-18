@@ -57,6 +57,10 @@ class Program
 
     static async Task<int> Main(string[] args)
     {
+        Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
+        Application.EnableVisualStyles();
+        Application.SetCompatibleTextRenderingDefault(false);
+
         string? token = null;
         string sessionUrl = DefaultSessionUrl;
         bool debug = false;

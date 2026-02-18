@@ -19,8 +19,11 @@ sealed class ManageAccountsForm : Form
         _loginManager = loginManager;
         _iconPath = iconPath;
 
+        Font = new Font("Segoe UI", 9f);
+        AutoScaleMode = AutoScaleMode.Dpi;
+
         Text = "Fastmail Files - Manage Accounts";
-        Size = new Size(550, 350);
+        Size = new Size(620, 350);
         MinimumSize = new Size(500, 250);
         StartPosition = FormStartPosition.CenterScreen;
         ShowInTaskbar = true;
@@ -34,8 +37,8 @@ sealed class ManageAccountsForm : Form
             MultiSelect = false,
         };
         _listView.Columns.Add("Account", 200);
-        _listView.Columns.Add("Sync Folder", 180);
-        _listView.Columns.Add("Status", 80);
+        _listView.Columns.Add("Sync Folder", 220);
+        _listView.Columns.Add("Status", 100);
         _listView.SelectedIndexChanged += (_, _) => UpdateButtonState();
 
         var bottomPanel = new Panel
@@ -45,21 +48,30 @@ sealed class ManageAccountsForm : Form
             Padding = new Padding(8),
         };
 
+        var flowPanel = new FlowLayoutPanel
+        {
+            FlowDirection = FlowDirection.LeftToRight,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Location = new Point(4, 6),
+            WrapContents = false,
+        };
+
         _addButton = new Button
         {
             Text = "Add...",
-            Width = 65,
+            AutoSize = true,
             Height = 28,
-            Location = new Point(8, 8),
+            Margin = new Padding(4, 0, 4, 0),
         };
         _addButton.Click += OnAddClicked;
 
         _cleanUpButton = new Button
         {
             Text = "Clean up",
-            Width = 75,
+            AutoSize = true,
             Height = 28,
-            Location = new Point(80, 8),
+            Margin = new Padding(4, 0, 4, 0),
             Enabled = false,
         };
         _cleanUpButton.Click += OnCleanUpClicked;
@@ -67,9 +79,9 @@ sealed class ManageAccountsForm : Form
         _removeLoginButton = new Button
         {
             Text = "Remove login",
-            Width = 100,
+            AutoSize = true,
             Height = 28,
-            Location = new Point(162, 8),
+            Margin = new Padding(4, 0, 4, 0),
             Enabled = false,
         };
         _removeLoginButton.Click += OnRemoveLoginClicked;
@@ -77,24 +89,27 @@ sealed class ManageAccountsForm : Form
         _configureButton = new Button
         {
             Text = "Configure...",
-            Width = 90,
+            AutoSize = true,
             Height = 28,
-            Location = new Point(269, 8),
+            Margin = new Padding(4, 0, 4, 0),
             Enabled = false,
         };
         _configureButton.Click += OnConfigureClicked;
 
+        flowPanel.Controls.AddRange([_addButton, _cleanUpButton, _removeLoginButton, _configureButton]);
+
         var closeButton = new Button
         {
             Text = "Close",
-            Width = 75,
+            AutoSize = true,
             Height = 28,
             Anchor = AnchorStyles.Right | AnchorStyles.Top,
         };
         closeButton.Location = new Point(bottomPanel.Width - closeButton.Width - 12, 8);
         closeButton.Click += (_, _) => Close();
 
-        bottomPanel.Controls.AddRange([_addButton, _cleanUpButton, _removeLoginButton, _configureButton, closeButton]);
+        bottomPanel.Controls.Add(flowPanel);
+        bottomPanel.Controls.Add(closeButton);
         Controls.Add(bottomPanel);
         Controls.Add(_listView);
 

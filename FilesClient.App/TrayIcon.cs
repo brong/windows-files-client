@@ -147,8 +147,6 @@ sealed class TrayIcon : IDisposable
 
     private void RunMessageLoop()
     {
-        Application.SetHighDpiMode(HighDpiMode.SystemAware);
-
         _baseIcon = LoadBaseIcon();
 
         _notifyIcon = new NotifyIcon

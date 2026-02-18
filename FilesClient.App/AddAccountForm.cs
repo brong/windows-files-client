@@ -18,8 +18,11 @@ sealed class AddAccountForm : Form
         _loginManager = loginManager;
         _iconPath = iconPath;
 
+        Font = new Font("Segoe UI", 9f);
+        AutoScaleMode = AutoScaleMode.Dpi;
+
         Text = "Add Account";
-        Size = new Size(450, 240);
+        Size = new Size(470, 260);
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;
@@ -34,47 +37,52 @@ sealed class AddAccountForm : Form
         };
         _tokenBox = new TextBox
         {
-            Location = new Point(12, 35),
-            Width = 410,
+            Location = new Point(12, 38),
+            Width = 430,
+            Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top,
             UseSystemPasswordChar = true,
         };
 
         var urlLabel = new Label
         {
             Text = "Session URL (optional):",
-            Location = new Point(12, 65),
+            Location = new Point(12, 68),
             AutoSize = true,
         };
         _sessionUrlBox = new TextBox
         {
-            Location = new Point(12, 85),
-            Width = 410,
+            Location = new Point(12, 91),
+            Width = 430,
+            Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top,
             Text = DefaultSessionUrl,
         };
 
         _connectButton = new Button
         {
             Text = "Connect",
-            Width = 90,
+            AutoSize = true,
             Height = 28,
-            Location = new Point(332, 120),
+            Anchor = AnchorStyles.Bottom | AnchorStyles.Right,
         };
+        _connectButton.Location = new Point(370, 135);
         _connectButton.Click += OnConnectClicked;
 
         var cancelButton = new Button
         {
             Text = "Cancel",
-            Width = 75,
+            AutoSize = true,
             Height = 28,
-            Location = new Point(245, 120),
+            Anchor = AnchorStyles.Bottom | AnchorStyles.Right,
             DialogResult = DialogResult.Cancel,
         };
+        cancelButton.Location = new Point(280, 135);
 
         _statusLabel = new Label
         {
-            Location = new Point(12, 125),
-            Width = 220,
+            Location = new Point(12, 140),
+            Width = 250,
             AutoSize = false,
+            Anchor = AnchorStyles.Left | AnchorStyles.Bottom,
             ForeColor = Color.Gray,
         };
 
