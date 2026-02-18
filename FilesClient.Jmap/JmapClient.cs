@@ -13,7 +13,7 @@ public class JmapClient : IJmapClient
     private int _nextCallId;
 
     public const string CoreCapability = "urn:ietf:params:jmap:core";
-    public const string FileNodeCapability = "urn:ietf:params:jmap:filenode";
+    public const string FileNodeCapability = "https://www.fastmail.com/dev/filenode";
     public const string BlobCapability = "urn:ietf:params:jmap:blob";
     private static readonly string[] FileNodeUsing = [CoreCapability, FileNodeCapability];
     private static readonly string[] BlobUsing = [CoreCapability, BlobCapability];

@@ -693,6 +693,11 @@ public class SyncEngine : IDisposable
             {
                 try
                 {
+                    const FileAttributes dehydratedFlag = (FileAttributes)0x00400000;
+                    var attrs = File.GetAttributes(path);
+                    if ((attrs & dehydratedFlag) != 0)
+                        return; // Already dehydrated (e.g. by OS via NOTIFY_DEHYDRATE)
+
                     DehydratePlaceholderWithRetry(path);
                     Console.WriteLine($"Dehydrated: {Path.GetFileName(path)}");
                 }
