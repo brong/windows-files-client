@@ -420,6 +420,25 @@ public class SyncOutbox : IDisposable
         RaisePendingCountChanged();
     }
 
+    /// <summary>Mark a change as permanently rejected (e.g. permission denied). Removes from outbox.</summary>
+    public void MarkRejected(Guid id, string reason)
+    {
+        _uploadProgress.TryRemove(id, out _);
+
+        lock (_lock)
+        {
+            _processingIds.Remove(id);
+            if (_entries.TryGetValue(id, out var entry))
+            {
+                Console.WriteLine($"Outbox: rejected {entry.LocalPath ?? entry.NodeId}: {reason}");
+                RemoveEntryLocked(entry);
+                MarkDirtyAndSignal();
+            }
+        }
+
+        RaisePendingCountChanged();
+    }
+
     /// <summary>Update transient upload progress for a pending change.</summary>
     public void UpdateProgress(Guid id, int percent) => _uploadProgress[id] = percent;
 

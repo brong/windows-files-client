@@ -32,6 +32,8 @@ public class SyncEngine : IDisposable
     // Directories the user has pinned ("Always keep on this device")
     // Value is a CancellationTokenSource used to cancel in-progress hydration when unpinned.
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _pinnedDirectories = new(StringComparer.OrdinalIgnoreCase);
+    // Folders where myRights.mayWrite is false — user cannot create/delete/rename children
+    private readonly ConcurrentDictionary<string, byte> _readOnlyPaths = new(StringComparer.OrdinalIgnoreCase);
     // Directories currently being hydrated by HydrateDehydratedFiles — used to
     // suppress duplicate hydration from OnDirectoryPopulated firing concurrently.
     private readonly ConcurrentDictionary<string, byte> _hydratingDirectories = new(StringComparer.OrdinalIgnoreCase);
@@ -189,6 +191,7 @@ public class SyncEngine : IDisposable
                 _pathToNodeId.Clear();
                 _nodeIdToPath.Clear();
                 _pinnedDirectories.Clear();
+                _readOnlyPaths.Clear();
             }
         }
         else
@@ -221,6 +224,11 @@ public class SyncEngine : IDisposable
         Console.WriteLine($"Fetched {allNodes.Length} FileNodes, state: {state}");
 
         BuildTreeAndCreatePlaceholders(allNodes);
+
+        // Track permissions on the home node (sync root folder itself)
+        var homeNode = allNodes.FirstOrDefault(n => n.Id == _homeNodeId);
+        if (homeNode != null)
+            TrackFolderPermissions(homeNode, _syncRootPath);
 
         SaveNodeCache(state);
         ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_IDLE);
@@ -271,6 +279,7 @@ public class SyncEngine : IDisposable
                 var childPath = Path.Combine(localParentPath, PlaceholderManager.SanitizeName(child.Name));
                 _pathToNodeId[childPath] = child.Id;
                 _nodeIdToPath[child.Id] = childPath;
+                TrackFolderPermissions(child, childPath);
 
                 // Ensure pre-existing items are proper placeholders and in-sync
                 if (Path.Exists(childPath) && !newChildren.Contains(child))
@@ -591,6 +600,7 @@ public class SyncEngine : IDisposable
 
                 _pathToNodeId[expectedPath] = child.Id;
                 _nodeIdToPath[child.Id] = expectedPath;
+                TrackFolderPermissions(child, expectedPath);
 
                 if (!Path.Exists(expectedPath))
                     newChildren.Add(child);
@@ -703,6 +713,9 @@ public class SyncEngine : IDisposable
                 _pathToNodeId[newPath] = node.Id;
                 _nodeIdToPath[node.Id] = newPath;
 
+                // Clean up old read-only tracking on rename
+                _readOnlyPaths.TryRemove(oldPath, out _);
+
                 try
                 {
                     if (isDirectory)
@@ -722,12 +735,15 @@ public class SyncEngine : IDisposable
                 {
                     Console.Error.WriteLine($"  Failed to rename {oldPath} → {newPath}: {ex.Message}");
                 }
+
+                TrackFolderPermissions(node, newPath);
             }
             else
             {
                 // No rename — just ensure mappings are up-to-date
                 _pathToNodeId[newPath] = node.Id;
                 _nodeIdToPath[node.Id] = newPath;
+                TrackFolderPermissions(node, newPath);
                 if (!Path.Exists(newPath))
                     _placeholderManager.CreatePlaceholders(parentPath, [node]);
                 else
@@ -757,6 +773,7 @@ public class SyncEngine : IDisposable
             var childPath = Path.Combine(parentPath, PlaceholderManager.SanitizeName(node.Name));
             _pathToNodeId[childPath] = node.Id;
             _nodeIdToPath[node.Id] = childPath;
+            TrackFolderPermissions(node, childPath);
             if (!Path.Exists(childPath))
             {
                 _placeholderManager.CreatePlaceholders(parentPath, [node]);
@@ -789,6 +806,7 @@ public class SyncEngine : IDisposable
             if (_nodeIdToPath.TryRemove(destroyedId, out var localPath))
             {
                 _pathToNodeId.TryRemove(localPath, out _);
+                _readOnlyPaths.TryRemove(localPath, out _);
                 DeleteLocalItem(localPath);
             }
             else
@@ -810,6 +828,25 @@ public class SyncEngine : IDisposable
         foreach (var change in changes)
         {
             var isDirectory = Directory.Exists(change.FullPath);
+
+            // Reject local changes in read-only folders
+            var parentDir = Path.GetDirectoryName(change.FullPath);
+            if (parentDir != null && _readOnlyPaths.ContainsKey(parentDir))
+            {
+                Console.WriteLine($"Ignoring local change in read-only folder: {change.FullPath}");
+                try
+                {
+                    if (isDirectory && Directory.Exists(change.FullPath))
+                        Directory.Delete(change.FullPath, recursive: true);
+                    else if (!isDirectory && File.Exists(change.FullPath))
+                        File.Delete(change.FullPath);
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"Failed to remove rejected local file: {ex.Message}");
+                }
+                continue;
+            }
 
             // Skip echo from our own placeholder conversion/update
             if (!isDirectory && _recentlyUploaded.TryRemove(change.FullPath, out var uploadedWriteTime))
@@ -848,6 +885,14 @@ public class SyncEngine : IDisposable
             return Task.FromResult(true);
         }
 
+        // Reject delete if parent folder is read-only
+        var deleteParentDir = Path.GetDirectoryName(path);
+        if (deleteParentDir != null && _readOnlyPaths.ContainsKey(deleteParentDir))
+        {
+            Console.WriteLine($"NOTIFY_DELETE: rejected (folder is read-only): {path}");
+            return Task.FromResult(false);
+        }
+
         Console.WriteLine($"NOTIFY_DELETE: queuing delete for node {nodeId}: {path}");
 
         // Enqueue child deletes for directories
@@ -875,6 +920,25 @@ public class SyncEngine : IDisposable
         {
             Console.WriteLine($"NOTIFY_RENAME: allowing untracked rename: {source} → {target}");
             return Task.FromResult(true);
+        }
+
+        // Reject rename if source parent is read-only (can't remove from it)
+        var sourceParent = Path.GetDirectoryName(source);
+        if (sourceParent != null && _readOnlyPaths.ContainsKey(sourceParent))
+        {
+            Console.WriteLine($"NOTIFY_RENAME: rejected (source folder is read-only): {source}");
+            return Task.FromResult(false);
+        }
+
+        // Reject rename if target parent is read-only (can't add to it)
+        if (targetInScope)
+        {
+            var targetParent = Path.GetDirectoryName(target);
+            if (targetParent != null && _readOnlyPaths.ContainsKey(targetParent))
+            {
+                Console.WriteLine($"NOTIFY_RENAME: rejected (target folder is read-only): {target}");
+                return Task.FromResult(false);
+            }
         }
 
         // Move out of sync root → queue as delete
@@ -1423,6 +1487,39 @@ public class SyncEngine : IDisposable
             ".zip" => "application/zip",
             _ => "application/octet-stream",
         };
+    }
+
+    private static void SetDirectoryReadOnly(string path, bool readOnly)
+    {
+        try
+        {
+            if (!Directory.Exists(path)) return;
+            var attrs = File.GetAttributes(path);
+            var newAttrs = readOnly
+                ? attrs | FileAttributes.ReadOnly
+                : attrs & ~FileAttributes.ReadOnly;
+            if (attrs != newAttrs)
+                File.SetAttributes(path, newAttrs);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Failed to set read-only={readOnly} on {path}: {ex.Message}");
+        }
+    }
+
+    private void TrackFolderPermissions(FileNode node, string localPath)
+    {
+        if (!node.IsFolder) return;
+        if (node.MyRights != null && !node.MyRights.MayWrite)
+        {
+            _readOnlyPaths[localPath] = 0;
+            SetDirectoryReadOnly(localPath, true);
+        }
+        else
+        {
+            if (_readOnlyPaths.TryRemove(localPath, out _))
+                SetDirectoryReadOnly(localPath, false);
+        }
     }
 
     /// <summary>

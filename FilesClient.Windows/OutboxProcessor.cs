@@ -108,6 +108,25 @@ public class OutboxProcessor : IDisposable
             Console.WriteLine($"Outbox: file not ready for {Path.GetFileName(change.LocalPath)}, will retry ({ex.Message})");
             _outbox.MarkRetry(change.Id);
         }
+        catch (Exception ex) when (!ct.IsCancellationRequested
+            && (ex.Message.Contains("forbidden") || ex.Message.Contains("Forbidden")))
+        {
+            Console.Error.WriteLine($"Outbox: permission denied for {change.LocalPath ?? change.NodeId}: {ex.Message}");
+            _outbox.MarkRejected(change.Id, ex.Message);
+
+            // Clean up local file that can't be synced (only new untracked files)
+            if (change.LocalPath != null && change.NodeId == null)
+            {
+                try
+                {
+                    if (change.IsFolder && Directory.Exists(change.LocalPath))
+                        Directory.Delete(change.LocalPath, recursive: true);
+                    else if (File.Exists(change.LocalPath))
+                        File.Delete(change.LocalPath);
+                }
+                catch { }
+            }
+        }
         catch (ObjectDisposedException) when (ct.IsCancellationRequested)
         {
             // Shutdown — resource already disposed, nothing to do

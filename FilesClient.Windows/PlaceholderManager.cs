@@ -67,7 +67,10 @@ internal class PlaceholderManager
 
                 if (node.IsFolder)
                 {
-                    info.FsMetadata.BasicInfo.FileAttributes = (uint)FileAttributes.Directory;
+                    var folderAttrs = FileAttributes.Directory;
+                    if (node.MyRights != null && !node.MyRights.MayWrite)
+                        folderAttrs |= FileAttributes.ReadOnly;
+                    info.FsMetadata.BasicInfo.FileAttributes = (uint)folderAttrs;
                     info.Flags |= CF_PLACEHOLDER_CREATE_FLAGS.CF_PLACEHOLDER_CREATE_FLAG_DISABLE_ON_DEMAND_POPULATION;
                 }
                 else
