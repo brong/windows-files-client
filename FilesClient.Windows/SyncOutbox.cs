@@ -459,6 +459,13 @@ public class SyncOutbox : IDisposable
             return _byNodeId.ContainsKey(nodeId);
     }
 
+    /// <summary>Check if there's a pending change for the given local path.</summary>
+    public bool HasPendingForPath(string localPath)
+    {
+        lock (_lock)
+            return _byPath.ContainsKey(localPath);
+    }
+
     /// <summary>Wait for work to be available, or until timeout/cancellation.</summary>
     public void WaitForWork(TimeSpan timeout, CancellationToken ct)
     {

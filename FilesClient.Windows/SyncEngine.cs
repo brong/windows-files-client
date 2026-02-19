@@ -825,6 +825,15 @@ public class SyncEngine : IDisposable
 
             if (_nodeIdToPath.TryRemove(destroyedId, out var localPath))
             {
+                // Don't delete the local file if the outbox has a pending
+                // upload for this path — the nodeId may have changed (e.g.
+                // onExists:"replace" destroyed the old node) but the outbox
+                // still intends to upload the user's local content.
+                if (_outbox.HasPendingForPath(localPath))
+                {
+                    Console.WriteLine($"  Skipping delete for {destroyedId} (outbox pending for path): {localPath}");
+                    continue;
+                }
                 _pathToNodeId.TryRemove(localPath, out _);
                 _readOnlyPaths.TryRemove(localPath, out _);
                 var destroyParentDir = Path.GetDirectoryName(localPath);
