@@ -42,9 +42,9 @@ Implemented: blocking pre-rename callback with veto support and `TARGET_IN_SCOPE
 
 ### 8. RecycleBinUri
 
-`StorageProviderSyncRootInfo.RecycleBinUri` — point to Fastmail's web trash so Explorer can show "Recover from cloud" after deletes.
+~~Server-side trash: local deletes move nodes to the JMAP `role:"trash"` folder with `onExists:"rename"` instead of permanently destroying them. Remote trash moves (from web UI or other clients) are detected in PollChanges and cleaned up locally.~~ ✓ Done
 
-**Requires spec support:** see [Spec Dependencies](#spec-dependencies) below.
+`StorageProviderSyncRootInfo.RecycleBinUri` — point to Fastmail's web trash so Explorer can show "Recover from cloud" after deletes. **Requires spec support:** see [Spec Dependencies](#spec-dependencies) below.
 
 ### 9. Custom columns in Explorer
 
