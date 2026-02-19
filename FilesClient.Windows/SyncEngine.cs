@@ -59,6 +59,13 @@ public class SyncEngine : IDisposable
     public static void Clean(string syncRootPath, string accountId)
         => SyncRoot.Clean(syncRootPath, accountId);
 
+    /// <summary>
+    /// Detach a sync root: delete dehydrated placeholder files, remove empty
+    /// directories, and unregister the sync root. Hydrated files are left in place.
+    /// </summary>
+    public static void Detach(string syncRootPath, string accountId)
+        => SyncRoot.Detach(syncRootPath, accountId);
+
     private void ReportStatus(CF_SYNC_PROVIDER_STATUS status)
     {
         _syncRoot.UpdateProviderStatus(status);

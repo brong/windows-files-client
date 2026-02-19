@@ -46,6 +46,21 @@ sealed class IpcCommandHandler
             case GetLoginAccountsCommand cmd:
                 return HandleGetLoginAccounts(cmd);
 
+            case UpdateLoginCommand cmd:
+                return await HandleUpdateLoginAsync(cmd, ct);
+
+            case DetachAccountCommand cmd:
+                return await HandleDetachAccountAsync(cmd);
+
+            case RefreshAccountCommand cmd:
+                return await HandleRefreshAccountAsync(cmd, ct);
+
+            case CleanAccountCommand cmd:
+                return await HandleCleanAccountAsync(cmd, ct);
+
+            case EnableAccountCommand cmd:
+                return await HandleEnableAccountAsync(cmd, ct);
+
             default:
                 Console.Error.WriteLine($"[IPC] Unknown command type: {command.GetType().Name}");
                 return null;
@@ -206,6 +221,71 @@ sealed class IpcCommandHandler
             new DiscoveredAccount(a.AccountId, a.Name, a.IsPrimary)).ToList();
         var active = _loginManager.GetActiveAccountIds(cmd.LoginId);
         return new LoginAccountsResultEvent(cmd.LoginId, discovered, active, null);
+    }
+
+    private async Task<IpcEvent> HandleUpdateLoginAsync(UpdateLoginCommand cmd, CancellationToken ct)
+    {
+        try
+        {
+            await _loginManager.UpdateLoginAsync(cmd.LoginId, cmd.SessionUrl, cmd.Token, IconPath, ct);
+            return new CommandResultEvent("updateLogin", true, null);
+        }
+        catch (Exception ex)
+        {
+            return new CommandResultEvent("updateLogin", false, ex.Message);
+        }
+    }
+
+    private async Task<IpcEvent> HandleDetachAccountAsync(DetachAccountCommand cmd)
+    {
+        try
+        {
+            await _loginManager.DetachAccountAsync(cmd.AccountId);
+            return new CommandResultEvent("detachAccount", true, null);
+        }
+        catch (Exception ex)
+        {
+            return new CommandResultEvent("detachAccount", false, ex.Message);
+        }
+    }
+
+    private async Task<IpcEvent> HandleRefreshAccountAsync(RefreshAccountCommand cmd, CancellationToken ct)
+    {
+        try
+        {
+            await _loginManager.RefreshAccountAsync(cmd.AccountId, IconPath, ct);
+            return new CommandResultEvent("refreshAccount", true, null);
+        }
+        catch (Exception ex)
+        {
+            return new CommandResultEvent("refreshAccount", false, ex.Message);
+        }
+    }
+
+    private async Task<IpcEvent> HandleCleanAccountAsync(CleanAccountCommand cmd, CancellationToken ct)
+    {
+        try
+        {
+            await _loginManager.CleanAccountAsync(cmd.AccountId, IconPath, ct);
+            return new CommandResultEvent("cleanAccount", true, null);
+        }
+        catch (Exception ex)
+        {
+            return new CommandResultEvent("cleanAccount", false, ex.Message);
+        }
+    }
+
+    private async Task<IpcEvent> HandleEnableAccountAsync(EnableAccountCommand cmd, CancellationToken ct)
+    {
+        try
+        {
+            await _loginManager.EnableAccountAsync(cmd.LoginId, cmd.AccountId, IconPath, ct);
+            return new CommandResultEvent("enableAccount", true, null);
+        }
+        catch (Exception ex)
+        {
+            return new CommandResultEvent("enableAccount", false, ex.Message);
+        }
     }
 
     private static AccountStatus MapStatus(SyncStatus status) => status switch

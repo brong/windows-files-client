@@ -59,6 +59,16 @@ public sealed record GetOutboxCommand(string AccountId) : IpcCommand;
 
 public sealed record GetLoginAccountsCommand(string LoginId) : IpcCommand;
 
+public sealed record UpdateLoginCommand(string LoginId, string SessionUrl, string Token) : IpcCommand;
+
+public sealed record DetachAccountCommand(string AccountId) : IpcCommand;
+
+public sealed record RefreshAccountCommand(string AccountId) : IpcCommand;
+
+public sealed record CleanAccountCommand(string AccountId) : IpcCommand;
+
+public sealed record EnableAccountCommand(string LoginId, string AccountId) : IpcCommand;
+
 // ---- Service -> UI events ----
 
 public abstract record IpcEvent;

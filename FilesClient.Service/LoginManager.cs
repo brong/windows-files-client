@@ -217,6 +217,397 @@ sealed class LoginManager : IDisposable
     }
 
     /// <summary>
+    /// Update credentials for an existing login: reconnect with new token/URL,
+    /// rediscover accounts, restart existing supervisors, detach removed accounts.
+    /// </summary>
+    public async Task UpdateLoginAsync(string loginId, string sessionUrl, string token,
+        string? iconPath = null, CancellationToken ct = default)
+    {
+        LoginSession? oldSession;
+        List<AccountSupervisor> oldSupervisors;
+
+        lock (_lock)
+        {
+            oldSession = _sessions.FirstOrDefault(s => s.LoginId == loginId);
+            if (oldSession == null)
+                throw new InvalidOperationException($"Login {loginId} not found");
+            oldSupervisors = _supervisors.Where(s => oldSession.AccountIds.Contains(s.AccountId)).ToList();
+        }
+
+        // Stop push watcher
+        StopPushWatcher(oldSession);
+
+        // Stop all supervisors (but don't clean sync roots)
+        foreach (var supervisor in oldSupervisors)
+        {
+            try { await supervisor.StopAsync(); }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Error stopping supervisor {supervisor.DisplayName}: {ex.Message}");
+            }
+        }
+
+        // Connect with new credentials
+        var jmapClient = new JmapClient(token, _debug);
+        await jmapClient.ConnectAsync(sessionUrl, ct);
+
+        var newAccounts = jmapClient.GetFileNodeAccounts();
+        var newAccountIds = newAccounts.Select(a => a.AccountId).ToHashSet();
+
+        // Determine previously-synced accounts
+        var previouslyActive = oldSupervisors.Select(s => s.AccountId).ToHashSet();
+
+        // Dispose old supervisors
+        foreach (var supervisor in oldSupervisors)
+            supervisor.Dispose();
+
+        lock (_lock)
+        {
+            foreach (var supervisor in oldSupervisors)
+                _supervisors.Remove(supervisor);
+            _sessions.Remove(oldSession);
+        }
+
+        oldSession.Client.Dispose();
+
+        // Detach accounts no longer on server
+        foreach (var accountId in previouslyActive.Where(id => !newAccountIds.Contains(id)))
+        {
+            Console.WriteLine($"Account {accountId} removed from server, detaching...");
+            var displayName = oldSupervisors.FirstOrDefault(s => s.AccountId == accountId)?.DisplayName ?? accountId;
+            var syncRootPath = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                SanitizeFolderName(displayName));
+            try
+            {
+                SyncEngine.Detach(syncRootPath, accountId);
+                var scopeKey = $"{oldSession.Client.Session.Username}/{accountId}";
+                NodeCache.Delete(scopeKey);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Failed to detach {accountId}: {ex.Message}");
+            }
+        }
+
+        // Create new session
+        var newSession = new LoginSession(loginId, jmapClient, sessionUrl, token,
+            newAccounts.Select(a => a.AccountId).ToList());
+        lock (_lock)
+            _sessions.Add(newSession);
+
+        // Restart supervisors for accounts still on server that were previously synced
+        var enabledAccountIds = new HashSet<string>();
+        foreach (var (accountId, accountName, isPrimary) in newAccounts)
+        {
+            if (!previouslyActive.Contains(accountId))
+                continue;
+
+            enabledAccountIds.Add(accountId);
+
+            IJmapClient client = isPrimary
+                ? jmapClient
+                : jmapClient.ForAccount(accountId);
+
+            var displayName = $"{accountName} Files";
+            var syncRootPath = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                SanitizeFolderName(displayName));
+
+            var supervisor = new AccountSupervisor(client, syncRootPath, displayName, _debug);
+            supervisor.StatusChanged += _ => RaiseAggregateStatus();
+            supervisor.PendingCountChanged += _ => RaiseAggregateStatus();
+
+            lock (_lock)
+                _supervisors.Add(supervisor);
+
+            try
+            {
+                await supervisor.StartAsync(iconPath, clean: false, ct);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Failed to restart supervisor for {displayName}: {ex.Message}");
+                lock (_lock)
+                    _supervisors.Remove(supervisor);
+                supervisor.Dispose();
+            }
+        }
+
+        // Restart push watcher
+        StartPushWatcher(newSession, ct);
+
+        // Update credential store
+        _credentialStore.Save(loginId, token, sessionUrl, enabledAccountIds);
+
+        AccountsChanged?.Invoke();
+        RaiseAggregateStatus();
+    }
+
+    /// <summary>
+    /// Detach a single account: stop syncing, delete dehydrated placeholders,
+    /// remove empty folders, unregister sync root, leave hydrated files.
+    /// </summary>
+    public async Task DetachAccountAsync(string accountId)
+    {
+        AccountSupervisor? supervisor;
+        LoginSession? session;
+
+        lock (_lock)
+        {
+            supervisor = _supervisors.FirstOrDefault(s => s.AccountId == accountId);
+            session = _sessions.FirstOrDefault(s => s.AccountIds.Contains(accountId));
+        }
+
+        if (supervisor == null)
+            return;
+
+        try { await supervisor.StopAsync(); }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Error stopping supervisor {supervisor.DisplayName}: {ex.Message}");
+        }
+
+        // Detach: delete dehydrated files, empty dirs, unregister sync root
+        try
+        {
+            Console.WriteLine($"Detaching sync root for {supervisor.DisplayName}...");
+            SyncEngine.Detach(supervisor.SyncRootPath, supervisor.AccountId);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Error detaching sync root for {supervisor.DisplayName}: {ex.Message}");
+        }
+
+        supervisor.Dispose();
+
+        lock (_lock)
+            _supervisors.Remove(supervisor);
+
+        // Delete node cache
+        var scopeKey = $"{supervisor.Username}/{supervisor.AccountId}";
+        NodeCache.Delete(scopeKey);
+
+        // Update or remove the stored credential
+        if (session != null)
+        {
+            var remaining = GetActiveAccountIds(session.LoginId);
+            if (remaining.Count == 0)
+            {
+                StopPushWatcher(session);
+                _credentialStore.Remove(session.LoginId);
+                lock (_lock)
+                    _sessions.Remove(session);
+            }
+            else
+            {
+                _credentialStore.Save(session.LoginId, session.Token, session.SessionUrl, remaining);
+            }
+        }
+
+        AccountsChanged?.Invoke();
+        RaiseAggregateStatus();
+    }
+
+    /// <summary>
+    /// Force full re-sync of an account: delete node cache, stop and restart supervisor.
+    /// Preserves existing sync root and local files.
+    /// </summary>
+    public async Task RefreshAccountAsync(string accountId, string? iconPath = null, CancellationToken ct = default)
+    {
+        AccountSupervisor? supervisor;
+        LoginSession? session;
+
+        lock (_lock)
+        {
+            supervisor = _supervisors.FirstOrDefault(s => s.AccountId == accountId);
+            session = _sessions.FirstOrDefault(s => s.AccountIds.Contains(accountId));
+        }
+
+        if (supervisor == null || session == null)
+            throw new InvalidOperationException($"Account {accountId} not found");
+
+        // Stop supervisor
+        try { await supervisor.StopAsync(); }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Error stopping supervisor {supervisor.DisplayName}: {ex.Message}");
+        }
+
+        // Delete node cache so next start does a full fetch
+        var scopeKey = $"{supervisor.Username}/{supervisor.AccountId}";
+        NodeCache.Delete(scopeKey);
+
+        var displayName = supervisor.DisplayName;
+        var syncRootPath = supervisor.SyncRootPath;
+        var accounts = session.Client.GetFileNodeAccounts();
+        var isPrimary = accounts.FirstOrDefault(a => a.AccountId == accountId).IsPrimary;
+
+        supervisor.Dispose();
+        lock (_lock)
+            _supervisors.Remove(supervisor);
+
+        // Create new supervisor
+        IJmapClient client = isPrimary
+            ? session.Client
+            : session.Client.ForAccount(accountId);
+
+        var newSupervisor = new AccountSupervisor(client, syncRootPath, displayName, _debug);
+        newSupervisor.StatusChanged += _ => RaiseAggregateStatus();
+        newSupervisor.PendingCountChanged += _ => RaiseAggregateStatus();
+
+        lock (_lock)
+            _supervisors.Add(newSupervisor);
+
+        try
+        {
+            await newSupervisor.StartAsync(iconPath, clean: false, ct);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Failed to restart supervisor for {displayName}: {ex.Message}");
+            lock (_lock)
+                _supervisors.Remove(newSupervisor);
+            newSupervisor.Dispose();
+            throw;
+        }
+
+        AccountsChanged?.Invoke();
+        RaiseAggregateStatus();
+    }
+
+    /// <summary>
+    /// Clean an account: stop supervisor, delete all local files and sync root,
+    /// then recreate from scratch.
+    /// </summary>
+    public async Task CleanAccountAsync(string accountId, string? iconPath = null, CancellationToken ct = default)
+    {
+        AccountSupervisor? supervisor;
+        LoginSession? session;
+
+        lock (_lock)
+        {
+            supervisor = _supervisors.FirstOrDefault(s => s.AccountId == accountId);
+            session = _sessions.FirstOrDefault(s => s.AccountIds.Contains(accountId));
+        }
+
+        if (supervisor == null || session == null)
+            throw new InvalidOperationException($"Account {accountId} not found");
+
+        // Stop supervisor
+        try { await supervisor.StopAsync(); }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Error stopping supervisor {supervisor.DisplayName}: {ex.Message}");
+        }
+
+        // Clean: unregister + delete all files
+        CleanSupervisorSyncRoot(supervisor);
+
+        var displayName = supervisor.DisplayName;
+        var syncRootPath = supervisor.SyncRootPath;
+        var username = supervisor.Username;
+        var accounts = session.Client.GetFileNodeAccounts();
+        var isPrimary = accounts.FirstOrDefault(a => a.AccountId == accountId).IsPrimary;
+
+        supervisor.Dispose();
+        lock (_lock)
+            _supervisors.Remove(supervisor);
+
+        // Delete node cache
+        var scopeKey = $"{username}/{accountId}";
+        NodeCache.Delete(scopeKey);
+
+        // Create new supervisor (fresh start, empty dir)
+        IJmapClient client = isPrimary
+            ? session.Client
+            : session.Client.ForAccount(accountId);
+
+        var newSupervisor = new AccountSupervisor(client, syncRootPath, displayName, _debug);
+        newSupervisor.StatusChanged += _ => RaiseAggregateStatus();
+        newSupervisor.PendingCountChanged += _ => RaiseAggregateStatus();
+
+        lock (_lock)
+            _supervisors.Add(newSupervisor);
+
+        try
+        {
+            await newSupervisor.StartAsync(iconPath, clean: false, ct);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Failed to restart supervisor for {displayName}: {ex.Message}");
+            lock (_lock)
+                _supervisors.Remove(newSupervisor);
+            newSupervisor.Dispose();
+            throw;
+        }
+
+        AccountsChanged?.Invoke();
+        RaiseAggregateStatus();
+    }
+
+    /// <summary>
+    /// Enable (start syncing) a previously non-synced account for a given login.
+    /// </summary>
+    public async Task EnableAccountAsync(string loginId, string accountId,
+        string? iconPath = null, CancellationToken ct = default)
+    {
+        LoginSession? session;
+        lock (_lock)
+        {
+            session = _sessions.FirstOrDefault(s => s.LoginId == loginId);
+            if (session == null)
+                throw new InvalidOperationException($"Login {loginId} not found");
+
+            // Check not already active
+            if (_supervisors.Any(s => s.AccountId == accountId))
+                throw new InvalidOperationException($"Account {accountId} is already syncing");
+        }
+
+        var accounts = session.Client.GetFileNodeAccounts();
+        var account = accounts.FirstOrDefault(a => a.AccountId == accountId);
+        if (account.AccountId == null)
+            throw new InvalidOperationException($"Account {accountId} not found on server");
+
+        IJmapClient client = account.IsPrimary
+            ? session.Client
+            : session.Client.ForAccount(accountId);
+
+        var displayName = $"{account.Name} Files";
+        var syncRootPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            SanitizeFolderName(displayName));
+
+        var supervisor = new AccountSupervisor(client, syncRootPath, displayName, _debug);
+        supervisor.StatusChanged += _ => RaiseAggregateStatus();
+        supervisor.PendingCountChanged += _ => RaiseAggregateStatus();
+
+        lock (_lock)
+            _supervisors.Add(supervisor);
+
+        try
+        {
+            await supervisor.StartAsync(iconPath, clean: false, ct);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Failed to start supervisor for {displayName}: {ex.Message}");
+            lock (_lock)
+                _supervisors.Remove(supervisor);
+            supervisor.Dispose();
+            throw;
+        }
+
+        // Update credential store with new enabled set
+        var enabled = GetActiveAccountIds(loginId);
+        _credentialStore.Save(loginId, session.Token, session.SessionUrl, enabled);
+
+        AccountsChanged?.Invoke();
+        RaiseAggregateStatus();
+    }
+
+    /// <summary>
     /// Stop all supervisors and push watchers gracefully.
     /// </summary>
     public async Task StopAllAsync()

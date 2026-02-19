@@ -189,6 +189,92 @@ internal class SyncRoot : IDisposable
         }
     }
 
+    /// <summary>
+    /// Detach a sync root: delete dehydrated placeholder files, remove empty
+    /// directories (bottom-up), and unregister the sync root. Hydrated files
+    /// are left in place so the user keeps their downloaded content.
+    /// </summary>
+    public static void Detach(string syncRootPath, string accountId)
+    {
+        var userSid = WindowsIdentity.GetCurrent().User?.Value ?? "S-1-0-0";
+        var syncRootId = $"{ProviderName}!{userSid}!{accountId}";
+
+        // 1. Unregister the sync root first so placeholders become normal files
+        try
+        {
+            StorageProviderSyncRootManager.Unregister(syncRootId);
+            Console.WriteLine($"Unregistered sync root: {syncRootId}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Sync root not registered (or already cleaned): {ex.Message}");
+        }
+
+        NavPaneIntegration.CleanupStaleEntries(ProviderId);
+
+        // Brief delay for the cloud filter driver to release handles
+        Thread.Sleep(1000);
+
+        if (!Directory.Exists(syncRootPath))
+        {
+            Console.WriteLine($"Sync root directory does not exist: {syncRootPath}");
+            return;
+        }
+
+        // 2. Walk directory recursively: delete dehydrated files, leave hydrated ones
+        DeleteDehydratedFilesRecursive(syncRootPath);
+
+        // 3. Remove empty directories bottom-up
+        RemoveEmptyDirectories(syncRootPath);
+
+        Console.WriteLine($"Detach complete for: {syncRootPath}");
+    }
+
+    private const uint FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS = 0x00400000;
+
+    private static void DeleteDehydratedFilesRecursive(string path)
+    {
+        foreach (var file in Directory.EnumerateFiles(path))
+        {
+            try
+            {
+                var attrs = (uint)File.GetAttributes(file);
+                if ((attrs & FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS) != 0)
+                {
+                    // Dehydrated placeholder — delete using reparse bypass
+                    DeleteWithReparseBypass(file, isDirectory: false);
+                }
+                // Hydrated files are left in place
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"  Failed to check/delete {Path.GetFileName(file)}: {ex.Message}");
+            }
+        }
+
+        foreach (var dir in Directory.EnumerateDirectories(path))
+            DeleteDehydratedFilesRecursive(dir);
+    }
+
+    private static void RemoveEmptyDirectories(string path)
+    {
+        foreach (var dir in Directory.EnumerateDirectories(path))
+            RemoveEmptyDirectories(dir);
+
+        // Don't delete the sync root directory itself
+        if (!Directory.EnumerateFileSystemEntries(path).Any())
+        {
+            try
+            {
+                DeleteWithReparseBypass(path, isDirectory: true);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"  Failed to remove empty dir {path}: {ex.Message}");
+            }
+        }
+    }
+
     private const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
     private const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
     private const uint FILE_FLAG_DELETE_ON_CLOSE = 0x04000000;

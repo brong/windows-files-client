@@ -149,6 +149,58 @@ sealed class ServiceClient : IDisposable
         return await tcs.Task;
     }
 
+    public async Task<CommandResultEvent> UpdateLoginAsync(string loginId, string sessionUrl,
+        string token, CancellationToken ct = default)
+    {
+        var tcs = new TaskCompletionSource<CommandResultEvent>();
+        lock (_lock) _commandTcs = tcs;
+
+        using var reg = ct.Register(() => tcs.TrySetCanceled());
+        await _client.SendCommandAsync(new UpdateLoginCommand(loginId, sessionUrl, token), ct);
+        return await tcs.Task;
+    }
+
+    public async Task<CommandResultEvent> DetachAccountAsync(string accountId, CancellationToken ct = default)
+    {
+        var tcs = new TaskCompletionSource<CommandResultEvent>();
+        lock (_lock) _commandTcs = tcs;
+
+        using var reg = ct.Register(() => tcs.TrySetCanceled());
+        await _client.SendCommandAsync(new DetachAccountCommand(accountId), ct);
+        return await tcs.Task;
+    }
+
+    public async Task<CommandResultEvent> RefreshAccountAsync(string accountId, CancellationToken ct = default)
+    {
+        var tcs = new TaskCompletionSource<CommandResultEvent>();
+        lock (_lock) _commandTcs = tcs;
+
+        using var reg = ct.Register(() => tcs.TrySetCanceled());
+        await _client.SendCommandAsync(new RefreshAccountCommand(accountId), ct);
+        return await tcs.Task;
+    }
+
+    public async Task<CommandResultEvent> CleanAccountAsync(string accountId, CancellationToken ct = default)
+    {
+        var tcs = new TaskCompletionSource<CommandResultEvent>();
+        lock (_lock) _commandTcs = tcs;
+
+        using var reg = ct.Register(() => tcs.TrySetCanceled());
+        await _client.SendCommandAsync(new CleanAccountCommand(accountId), ct);
+        return await tcs.Task;
+    }
+
+    public async Task<CommandResultEvent> EnableAccountAsync(string loginId, string accountId,
+        CancellationToken ct = default)
+    {
+        var tcs = new TaskCompletionSource<CommandResultEvent>();
+        lock (_lock) _commandTcs = tcs;
+
+        using var reg = ct.Register(() => tcs.TrySetCanceled());
+        await _client.SendCommandAsync(new EnableAccountCommand(loginId, accountId), ct);
+        return await tcs.Task;
+    }
+
     public async Task<LoginAccountsResultEvent> GetLoginAccountsAsync(string loginId,
         CancellationToken ct = default)
     {

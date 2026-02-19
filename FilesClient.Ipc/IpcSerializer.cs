@@ -25,6 +25,11 @@ public static class IpcSerializer
         ["configureLogin"] = typeof(ConfigureLoginCommand),
         ["getOutbox"] = typeof(GetOutboxCommand),
         ["getLoginAccounts"] = typeof(GetLoginAccountsCommand),
+        ["updateLogin"] = typeof(UpdateLoginCommand),
+        ["detachAccount"] = typeof(DetachAccountCommand),
+        ["refreshAccount"] = typeof(RefreshAccountCommand),
+        ["cleanAccount"] = typeof(CleanAccountCommand),
+        ["enableAccount"] = typeof(EnableAccountCommand),
     };
 
     private static readonly Dictionary<string, Type> EventTypes = new()
