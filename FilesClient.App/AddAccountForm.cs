@@ -16,11 +16,12 @@ sealed class AddAccountForm : Form
     {
         _serviceClient = serviceClient;
 
-        Font = new Font("Segoe UI", 9f);
-        AutoScaleMode = AutoScaleMode.Dpi;
+        Font = SystemFonts.MessageBoxFont ?? new Font("Segoe UI", 9f);
+        AutoScaleMode = AutoScaleMode.Font;
 
         Text = "Add Account";
-        Size = new Size(470, 260);
+        var em = Font.Height;
+        Size = new Size(32 * em, 17 * em);
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;

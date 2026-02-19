@@ -15,11 +15,12 @@ sealed class SelectAccountsForm : Form
     {
         _accounts = accounts;
 
-        Font = new Font("Segoe UI", 9f);
-        AutoScaleMode = AutoScaleMode.Dpi;
+        Font = SystemFonts.MessageBoxFont ?? new Font("Segoe UI", 9f);
+        AutoScaleMode = AutoScaleMode.Font;
 
         Text = "Select Accounts to Sync";
-        Size = new Size(420, 320);
+        var em = Font.Height;
+        Size = new Size(28 * em, 21 * em);
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;

@@ -48,11 +48,10 @@ sealed class ManageAccountsForm : Form
     {
         _serviceClient = serviceClient;
 
-        Font = new Font("Segoe UI", 9f);
-        AutoScaleMode = AutoScaleMode.Dpi;
+        Font = SystemFonts.MessageBoxFont ?? new Font("Segoe UI", 9f);
+        AutoScaleMode = AutoScaleMode.Font;
 
         Text = "Fastmail Files - Manage Accounts";
-        Size = new Size(820, 480);
         MinimumSize = new Size(700, 400);
         StartPosition = FormStartPosition.CenterScreen;
         ShowInTaskbar = true;
@@ -94,7 +93,7 @@ sealed class ManageAccountsForm : Form
 
         _loginIdLabel = new Label
         {
-            Font = new Font(Font.FontFamily, 10f, FontStyle.Bold),
+            Font = new Font(Font, FontStyle.Bold),
             AutoSize = true,
             Margin = new Padding(0, 0, 0, 12),
         };
@@ -117,7 +116,6 @@ sealed class ManageAccountsForm : Form
 
         _sessionUrlBox = new TextBox
         {
-            Width = 380,
             Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top,
             Margin = new Padding(0, 0, 0, 10),
         };
@@ -132,7 +130,6 @@ sealed class ManageAccountsForm : Form
 
         _tokenBox = new TextBox
         {
-            Width = 380,
             UseSystemPasswordChar = true,
             Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top,
             Margin = new Padding(0, 0, 0, 14),
@@ -187,7 +184,7 @@ sealed class ManageAccountsForm : Form
 
         _syncedAccountName = new Label
         {
-            Font = new Font(Font.FontFamily, 10f, FontStyle.Bold),
+            Font = new Font(Font, FontStyle.Bold),
             AutoSize = true,
             Margin = new Padding(0, 0, 0, 12),
         };
@@ -203,7 +200,6 @@ sealed class ManageAccountsForm : Form
         _syncFolderLabel = new Label
         {
             AutoSize = true,
-            MaximumSize = new Size(400, 0),
             ForeColor = Color.FromArgb(80, 80, 80),
             Margin = new Padding(0, 0, 0, 16),
         };
@@ -798,6 +794,83 @@ sealed class ManageAccountsForm : Form
         _removeButton.Enabled = enabled;
         _refreshButton.Enabled = enabled;
         _cleanButton.Enabled = enabled;
+    }
+
+    protected override void OnLoad(EventArgs e)
+    {
+        base.OnLoad(e);
+        AutoSizeToContent();
+    }
+
+    private void AutoSizeToContent()
+    {
+        var em = Font.Height; // base unit — scales with font size
+
+        // Measure the widest tree node text
+        int maxNodeWidth = 0;
+        int indent = _treeView.Indent + em; // expand glyph + padding
+        using (var g = _treeView.CreateGraphics())
+        {
+            foreach (TreeNode root in _treeView.Nodes)
+            {
+                var rootFont = root.NodeFont ?? _treeView.Font;
+                var w = (int)Math.Ceiling(g.MeasureString(root.Text, rootFont).Width);
+                maxNodeWidth = Math.Max(maxNodeWidth, w);
+
+                foreach (TreeNode child in root.Nodes)
+                {
+                    var childFont = child.NodeFont ?? _treeView.Font;
+                    var cw = (int)Math.Ceiling(g.MeasureString(child.Text, childFont).Width);
+                    maxNodeWidth = Math.Max(maxNodeWidth, cw + indent);
+                }
+            }
+        }
+
+        // Tree view width: measured content + scrollbar + padding
+        var scrollBarWidth = SystemInformation.VerticalScrollBarWidth;
+        var treeWidth = Math.Max(maxNodeWidth + scrollBarWidth + em, 20 * em);
+
+        // Measure widest right-panel content (login IDs shown as bold headers)
+        var minDetailWidth = 28 * em; // enough for typical session URLs
+        int maxDetailWidth = minDetailWidth;
+        using (var g2 = _detailPanel.CreateGraphics())
+        {
+            using var boldFont = new Font(Font, FontStyle.Bold);
+            foreach (TreeNode root in _treeView.Nodes)
+            {
+                if (root.Tag is LoginNode ln)
+                {
+                    var w = (int)Math.Ceiling(g2.MeasureString(ln.LoginId, boldFont).Width);
+                    maxDetailWidth = Math.Max(maxDetailWidth, w);
+                }
+            }
+        }
+        var detailWidth = maxDetailWidth + 2 * em; // breathing room
+
+        // Total: tree + splitter + detail + form chrome
+        var formChrome = Width - ClientSize.Width;
+        var idealWidth = treeWidth + 4 + detailWidth + _detailPanel.Padding.Horizontal + formChrome;
+
+        // Clamp to screen working area (leave some margin)
+        var screen = Screen.FromControl(this).WorkingArea;
+        var screenMargin = 5 * em;
+        var maxWidth = screen.Width - screenMargin;
+        var maxHeight = screen.Height - screenMargin;
+
+        var finalWidth = Math.Clamp(idealWidth, MinimumSize.Width, maxWidth);
+        var idealHeight = 32 * em; // ~32 lines tall
+        var finalHeight = Math.Clamp(idealHeight, MinimumSize.Height, maxHeight);
+
+        Size = new Size(finalWidth, finalHeight);
+        _treeView.Width = treeWidth;
+
+        // Re-center after resize
+        if (StartPosition == FormStartPosition.CenterScreen)
+        {
+            Location = new Point(
+                screen.X + (screen.Width - finalWidth) / 2,
+                screen.Y + (screen.Height - finalHeight) / 2);
+        }
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)

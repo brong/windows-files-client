@@ -18,12 +18,13 @@ sealed class StatusForm : Form
         _accountId = accountId;
         _serviceClient = serviceClient;
 
-        Font = new Font("Segoe UI", 9f);
-        AutoScaleMode = AutoScaleMode.Dpi;
+        Font = SystemFonts.MessageBoxFont ?? new Font("Segoe UI", 9f);
+        AutoScaleMode = AutoScaleMode.Font;
 
         Text = "Fastmail Files - Pending Changes";
-        Size = new Size(600, 400);
-        MinimumSize = new Size(400, 250);
+        var em = Font.Height;
+        Size = new Size(40 * em, 26 * em);
+        MinimumSize = new Size(26 * em, 16 * em);
         StartPosition = FormStartPosition.CenterScreen;
         ShowInTaskbar = true;
 
@@ -32,9 +33,9 @@ sealed class StatusForm : Form
         {
             Text = FormatHeader(accountLabel),
             Dock = DockStyle.Top,
-            Height = 30,
-            Padding = new Padding(8, 8, 8, 0),
-            Font = new Font("Segoe UI", 9.5f),
+            Height = (int)(em * 2.2),
+            Padding = new Padding(em / 2, em / 2, em / 2, 0),
+            Font = new Font(Font.FontFamily, Font.SizeInPoints + 0.5f),
         };
         Controls.Add(_headerLabel);
 
@@ -48,10 +49,10 @@ sealed class StatusForm : Form
             ShowItemToolTips = true,
             OwnerDraw = true,
         };
-        _listView.Columns.Add("Name", 200);
-        _listView.Columns.Add("Action", 100);
-        _listView.Columns.Add("Status", 100);
-        _listView.Columns.Add("Updated", 120);
+        _listView.Columns.Add("Name", 13 * em);
+        _listView.Columns.Add("Action", 7 * em);
+        _listView.Columns.Add("Status", 7 * em);
+        _listView.Columns.Add("Updated", 8 * em);
 
         _listView.DrawColumnHeader += (_, e) => e.DrawDefault = true;
         _listView.DrawItem += (_, _) => { };
