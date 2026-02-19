@@ -383,6 +383,22 @@ public class SyncOutbox : IDisposable
         RaisePendingCountChanged();
     }
 
+    /// <summary>Re-queue a change for retry without incrementing error count.</summary>
+    public void MarkRetry(Guid id, int delayMs = 1000)
+    {
+        lock (_lock)
+        {
+            _processingIds.Remove(id);
+            if (_entries.TryGetValue(id, out var entry))
+            {
+                entry.NextRetryAfter = DateTime.UtcNow.AddMilliseconds(delayMs);
+                MarkDirtyAndSignal();
+            }
+        }
+
+        RaisePendingCountChanged();
+    }
+
     /// <summary>Mark a change as failed with exponential backoff.</summary>
     public void MarkFailed(Guid id, string error)
     {
@@ -466,11 +482,16 @@ public class SyncOutbox : IDisposable
     private bool HasPendingParentCreateLocked(string? localPath)
     {
         if (localPath == null) return false;
-        var parentDir = Path.GetDirectoryName(localPath);
-        if (parentDir == null) return false;
-        return _byPath.TryGetValue(parentDir, out var parentId)
-            && _entries.TryGetValue(parentId, out var parentEntry)
-            && parentEntry.IsFolder && !parentEntry.IsDeleted && parentEntry.NodeId == null;
+        var dir = Path.GetDirectoryName(localPath);
+        while (dir != null)
+        {
+            if (_byPath.TryGetValue(dir, out var parentId)
+                && _entries.TryGetValue(parentId, out var parentEntry)
+                && parentEntry.IsFolder && !parentEntry.IsDeleted && parentEntry.NodeId == null)
+                return true;
+            dir = Path.GetDirectoryName(dir);
+        }
+        return false;
     }
 
     private void RemoveEntryLocked(PendingChange entry)

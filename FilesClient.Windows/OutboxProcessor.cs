@@ -76,8 +76,11 @@ public class OutboxProcessor : IDisposable
     {
         try
         {
-            await ProcessChangeAsync(change, ct);
-            _outbox.MarkCompleted(change.Id);
+            var completed = await ProcessChangeAsync(change, ct);
+            if (completed)
+                _outbox.MarkCompleted(change.Id);
+            else
+                _outbox.MarkRetry(change.Id);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
@@ -101,31 +104,24 @@ public class OutboxProcessor : IDisposable
         }
     }
 
-    private async Task ProcessChangeAsync(PendingChange change, CancellationToken ct)
+    private async Task<bool> ProcessChangeAsync(PendingChange change, CancellationToken ct)
     {
         if (change.IsDeleted)
         {
             await ProcessDeleteAsync(change, ct);
-            return;
+            return true;
         }
 
         if (change.IsFolder && change.NodeId == null)
-        {
-            await ProcessFolderCreateAsync(change, ct);
-            return;
-        }
+            return await ProcessFolderCreateAsync(change, ct);
 
         if (change.IsDirtyContent)
-        {
-            await ProcessUploadAsync(change, ct);
-            return;
-        }
+            return await ProcessUploadAsync(change, ct);
 
         if (change.IsDirtyLocation)
-        {
-            await ProcessMoveAsync(change, ct);
-            return;
-        }
+            return await ProcessMoveAsync(change, ct);
+
+        return true;
     }
 
     private async Task ProcessDeleteAsync(PendingChange change, CancellationToken ct)
@@ -146,17 +142,18 @@ public class OutboxProcessor : IDisposable
         }
     }
 
-    private async Task ProcessFolderCreateAsync(PendingChange change, CancellationToken ct)
+    private async Task<bool> ProcessFolderCreateAsync(PendingChange change, CancellationToken ct)
     {
         if (change.LocalPath == null || !Directory.Exists(change.LocalPath))
-            return; // Folder no longer exists
+            return true; // Folder no longer exists — nothing to do
 
         var folderName = Path.GetFileName(change.LocalPath);
         var parentDir = Path.GetDirectoryName(change.LocalPath)!;
         var parentId = _engine.ResolveParentNodeId(parentDir);
         if (parentId == null)
         {
-            throw new InvalidOperationException($"Cannot resolve parent for {change.LocalPath}");
+            Console.WriteLine($"Outbox: parent not yet available for {folderName}, will retry");
+            return false;
         }
 
         Console.WriteLine($"Outbox: creating folder {folderName}");
@@ -166,14 +163,15 @@ public class OutboxProcessor : IDisposable
         SyncEngine.ConvertToPlaceholder(change.LocalPath, node.Id, isDirectory: true);
         _engine.UpdateMappings(change.LocalPath, null, node.Id);
         Console.WriteLine($"Outbox: created folder {folderName} → node {node.Id}");
+        return true;
     }
 
-    private async Task ProcessUploadAsync(PendingChange change, CancellationToken ct)
+    private async Task<bool> ProcessUploadAsync(PendingChange change, CancellationToken ct)
     {
         if (change.LocalPath == null || !File.Exists(change.LocalPath))
         {
             Console.WriteLine($"Outbox: skipping upload, file no longer exists: {change.LocalPath}");
-            return; // File gone — delete entry will handle server cleanup
+            return true; // File gone — delete entry will handle server cleanup
         }
 
         var fileName = Path.GetFileName(change.LocalPath);
@@ -185,7 +183,10 @@ public class OutboxProcessor : IDisposable
             // Modified existing file
             var parentId = _engine.ResolveParentNodeId(parentDir);
             if (parentId == null)
-                throw new InvalidOperationException($"Cannot resolve parent for {change.LocalPath}");
+            {
+                Console.WriteLine($"Outbox: parent not yet available for {fileName}, will retry");
+                return false;
+            }
 
             Console.WriteLine($"Outbox: uploading modified file {fileName}");
             using var fileStream = new FileStream(change.LocalPath, FileMode.Open, FileAccess.Read,
@@ -226,7 +227,10 @@ public class OutboxProcessor : IDisposable
             // New file
             var parentId = _engine.ResolveParentNodeId(parentDir);
             if (parentId == null)
-                throw new InvalidOperationException($"Cannot resolve parent for {change.LocalPath}");
+            {
+                Console.WriteLine($"Outbox: parent not yet available for {fileName}, will retry");
+                return false;
+            }
 
             Console.WriteLine($"Outbox: uploading new file {fileName}");
             using var fileStream = new FileStream(change.LocalPath, FileMode.Open, FileAccess.Read,
@@ -248,17 +252,22 @@ public class OutboxProcessor : IDisposable
             SyncEngine.SetInSync(change.LocalPath);
             Console.WriteLine($"Outbox: created {fileName} → node {node.Id}");
         }
+
+        return true;
     }
 
-    private async Task ProcessMoveAsync(PendingChange change, CancellationToken ct)
+    private async Task<bool> ProcessMoveAsync(PendingChange change, CancellationToken ct)
     {
         if (change.NodeId == null || change.LocalPath == null)
-            return;
+            return true;
 
         var parentDir = Path.GetDirectoryName(change.LocalPath)!;
         var parentId = _engine.ResolveParentNodeId(parentDir);
         if (parentId == null)
-            throw new InvalidOperationException($"Cannot resolve parent for {change.LocalPath}");
+        {
+            Console.WriteLine($"Outbox: parent not yet available for {Path.GetFileName(change.LocalPath)}, will retry");
+            return false;
+        }
 
         var newName = Path.GetFileName(change.LocalPath);
         Console.WriteLine($"Outbox: moving node {change.NodeId} → {parentId}/{newName}");
@@ -274,6 +283,8 @@ public class OutboxProcessor : IDisposable
             // Node no longer exists on server — treat as success
             Console.WriteLine($"Outbox: node {change.NodeId} not found on server during move");
         }
+
+        return true;
     }
 
     public void Dispose()
