@@ -73,11 +73,20 @@ public sealed class IpcPipeClient : IDisposable
 
     private async Task ConnectAndReadLoopAsync(CancellationToken ct)
     {
+        bool wasConnected = false;
+
         while (!ct.IsCancellationRequested)
         {
-            bool wasConnected = false;
             try
             {
+                Cleanup();
+                if (wasConnected)
+                {
+                    wasConnected = false;
+                    ConnectionChanged?.Invoke(false);
+                    await Task.Delay(IpcConstants.ReconnectDelayMs, ct);
+                }
+
                 await ConnectAsync(ct);
                 wasConnected = true;
                 ConnectionChanged?.Invoke(true);
@@ -141,27 +150,21 @@ public sealed class IpcPipeClient : IDisposable
             }
             catch (TimeoutException)
             {
-                // ConnectAsync timed out — service not available yet, retry immediately
-                // (the connect timeout already served as the wait)
+                // ConnectAsync timed out — service not available yet, will retry
             }
             catch (Exception ex)
             {
                 Console.Error.WriteLine($"[IPC Client] Connection error: {ex.Message}");
-            }
-
-            // Disconnected — clean up and retry
-            Cleanup();
-            if (wasConnected)
-                ConnectionChanged?.Invoke(false);
-
-            // Only delay before retry if we had a successful connection that dropped —
-            // if we never connected (timeout), the connect attempt already waited
-            if (wasConnected && !ct.IsCancellationRequested)
-            {
-                try { await Task.Delay(IpcConstants.ReconnectDelayMs, ct); }
+                // Brief delay to avoid tight spin on unexpected errors
+                try { await Task.Delay(1000, ct); }
                 catch (OperationCanceledException) { break; }
             }
         }
+
+        // Final cleanup on exit
+        Cleanup();
+        if (wasConnected)
+            ConnectionChanged?.Invoke(false);
     }
 
     private async Task ConnectAsync(CancellationToken ct)
