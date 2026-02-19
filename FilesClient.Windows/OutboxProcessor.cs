@@ -14,6 +14,8 @@ public class OutboxProcessor : IDisposable
     private Task? _loopTask;
     private volatile bool _online = true;
     private readonly SemaphoreSlim _workerSlots = new(MaxConcurrency, MaxConcurrency);
+    private readonly object _workerLock = new();
+    private readonly List<Task> _workerTasks = new();
 
     public OutboxProcessor(SyncOutbox outbox, SyncEngine engine, IJmapClient jmapClient, JmapQueue queue)
     {
@@ -59,8 +61,9 @@ public class OutboxProcessor : IDisposable
                 }
 
                 _outbox.MarkProcessing(change.Id);
-                // Fire-and-forget — the worker releases its slot when done
-                _ = ProcessWorkerAsync(change, ct);
+                var task = ProcessWorkerAsync(change, ct);
+                lock (_workerLock)
+                    _workerTasks.Add(task);
             }
             catch (OperationCanceledException) { break; }
             catch (Exception ex)
@@ -105,14 +108,18 @@ public class OutboxProcessor : IDisposable
             Console.WriteLine($"Outbox: file not ready for {Path.GetFileName(change.LocalPath)}, will retry ({ex.Message})");
             _outbox.MarkRetry(change.Id);
         }
-        catch (Exception ex)
+        catch (ObjectDisposedException) when (ct.IsCancellationRequested)
+        {
+            // Shutdown — resource already disposed, nothing to do
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             Console.Error.WriteLine($"Outbox process error for {change.LocalPath ?? change.NodeId}: {ex.Message}");
             _outbox.MarkFailed(change.Id, ex.Message);
         }
         finally
         {
-            _workerSlots.Release();
+            try { _workerSlots.Release(); } catch (ObjectDisposedException) { }
         }
     }
 
@@ -306,6 +313,14 @@ public class OutboxProcessor : IDisposable
             _cts.Cancel();
             try { _loopTask?.Wait(3000); }
             catch { /* shutdown */ }
+
+            // Wait for in-flight workers to observe cancellation
+            Task[] workers;
+            lock (_workerLock)
+                workers = _workerTasks.ToArray();
+            try { Task.WaitAll(workers, 5000); }
+            catch { /* shutdown */ }
+
             _cts.Dispose();
         }
         _workerSlots.Dispose();
