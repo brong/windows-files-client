@@ -33,7 +33,8 @@ public class SyncEngine : IDisposable
     // Value is a CancellationTokenSource used to cancel in-progress hydration when unpinned.
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _pinnedDirectories = new(StringComparer.OrdinalIgnoreCase);
     // Folders where myRights.mayWrite is false — user cannot create/delete/rename children
-    private readonly ConcurrentDictionary<string, byte> _readOnlyPaths = new(StringComparer.OrdinalIgnoreCase);
+    // Value is the cached FilesRights for serialization to the node cache.
+    private readonly ConcurrentDictionary<string, FilesRights> _readOnlyPaths = new(StringComparer.OrdinalIgnoreCase);
     // Directories currently being hydrated by HydrateDehydratedFiles — used to
     // suppress duplicate hydration from OnDirectoryPopulated firing concurrently.
     private readonly ConcurrentDictionary<string, byte> _hydratingDirectories = new(StringComparer.OrdinalIgnoreCase);
@@ -415,6 +416,8 @@ public class SyncEngine : IDisposable
                     continue;
                 }
                 directories.Add(fullPath);
+                if (entry.MyRights is { MayWrite: false })
+                    _readOnlyPaths[fullPath] = entry.MyRights;
                 matchCount++;
             }
             else
@@ -1552,7 +1555,7 @@ public class SyncEngine : IDisposable
         if (!node.IsFolder) return;
         if (node.MyRights != null && !node.MyRights.MayWrite)
         {
-            _readOnlyPaths[localPath] = 0;
+            _readOnlyPaths[localPath] = node.MyRights;
             SetDirectoryReadOnly(localPath, true);
         }
         else if (_readOnlyPaths.TryRemove(localPath, out _))
@@ -1597,7 +1600,7 @@ public class SyncEngine : IDisposable
         private readonly string? _path;
         private readonly bool _wasProtected;
 
-        public SuspendProtectionScope(string? path, ConcurrentDictionary<string, byte> readOnlyPaths)
+        public SuspendProtectionScope(string? path, ConcurrentDictionary<string, FilesRights> readOnlyPaths)
         {
             _path = path;
             _wasProtected = path != null && readOnlyPaths.ContainsKey(path);
@@ -1910,7 +1913,8 @@ public class SyncEngine : IDisposable
 
     private void SaveNodeCache(string state)
     {
-        NodeCache.Save(_scopeKey, _homeNodeId, state, _nodeIdToPath, _syncRootPath);
+        NodeCache.Save(_scopeKey, _homeNodeId, state, _nodeIdToPath, _syncRootPath,
+            _readOnlyPaths);
     }
 
     public void Dispose()

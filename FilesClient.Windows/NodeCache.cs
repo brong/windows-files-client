@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using FilesClient.Jmap.Models;
 
 namespace FilesClient.Windows;
 
@@ -16,12 +17,16 @@ public record CacheEntry
 
     [JsonPropertyName("isFolder")]
     public bool IsFolder { get; init; }
+
+    [JsonPropertyName("myRights")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public FilesRights? MyRights { get; init; }
 }
 
 public record CacheSnapshot
 {
     [JsonPropertyName("v")]
-    public int Version { get; init; } = 2;
+    public int Version { get; init; } = 3;
 
     [JsonPropertyName("homeNodeId")]
     public string HomeNodeId { get; init; } = "";
@@ -54,7 +59,7 @@ public static class NodeCache
         {
             var json = File.ReadAllText(path);
             var snapshot = JsonSerializer.Deserialize<CacheSnapshot>(json);
-            if (snapshot == null || snapshot.Version != 2
+            if (snapshot == null || snapshot.Version != 3
                 || string.IsNullOrEmpty(snapshot.HomeNodeId)
                 || string.IsNullOrEmpty(snapshot.State))
                 return null;
@@ -69,7 +74,8 @@ public static class NodeCache
     }
 
     public static void Save(string scopeKey, string homeNodeId, string state,
-        IReadOnlyDictionary<string, string> nodeIdToPath, string syncRootPath)
+        IReadOnlyDictionary<string, string> nodeIdToPath, string syncRootPath,
+        IReadOnlyDictionary<string, FilesRights>? folderRights = null)
     {
         var path = GetCachePath(scopeKey);
         var dir = System.IO.Path.GetDirectoryName(path)!;
@@ -87,10 +93,13 @@ public static class NodeCache
             {
                 if (Directory.Exists(fullPath))
                 {
+                    FilesRights? rights = null;
+                    folderRights?.TryGetValue(fullPath, out rights);
                     entries[nodeId] = new CacheEntry
                     {
                         Path = relativePath,
                         IsFolder = true,
+                        MyRights = rights,
                     };
                 }
                 else if (File.Exists(fullPath))
