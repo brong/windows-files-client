@@ -59,6 +59,8 @@ public sealed record GetOutboxCommand(string AccountId) : IpcCommand;
 
 public sealed record GetLoginAccountsCommand(string LoginId) : IpcCommand;
 
+public sealed record RefreshLoginAccountsCommand(string LoginId) : IpcCommand;
+
 public sealed record UpdateLoginCommand(string LoginId, string SessionUrl, string Token) : IpcCommand;
 
 public sealed record DetachAccountCommand(string AccountId) : IpcCommand;

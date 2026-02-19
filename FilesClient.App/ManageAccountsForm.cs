@@ -38,11 +38,13 @@ sealed class ManageAccountsForm : Form
 
     // Data model
     private record LoginNode(string LoginId);
-    private record AccountNode(string LoginId, string AccountId, string Name, bool IsSynced, AccountInfo? SyncInfo);
+    private record AccountNode(string LoginId, string AccountId, string Name,
+        bool IsSynced, bool IsMissing, AccountInfo? SyncInfo);
 
     // Discovered accounts per login (populated async on form open)
     private readonly Dictionary<string, List<DiscoveredAccount>> _discoveredAccounts = new();
     private readonly Dictionary<string, LoginAccountsResultEvent> _loginAccountResults = new();
+    private readonly HashSet<string> _refreshedLogins = new();
 
     public ManageAccountsForm(ServiceClient serviceClient)
     {
@@ -323,14 +325,16 @@ sealed class ManageAccountsForm : Form
         _refreshTimer.Start();
 
         RefreshTree();
-        _ = DiscoverAllLoginAccountsAsync();
+        _ = RefreshAllLoginAccountsAsync();
     }
 
-    private async Task DiscoverAllLoginAccountsAsync()
+    private async Task RefreshAllLoginAccountsAsync()
     {
-        var accounts = _serviceClient.Accounts;
-        var loginIds = accounts.Select(a => a.LoginId).Where(id => !string.IsNullOrEmpty(id)).Distinct().ToList();
+        var loginIds = _serviceClient.Accounts
+            .Select(a => a.LoginId)
+            .Where(id => !string.IsNullOrEmpty(id)).Distinct().ToList();
 
+        // Phase 1: cached accounts (fast)
         foreach (var loginId in loginIds)
         {
             try
@@ -340,16 +344,28 @@ sealed class ManageAccountsForm : Form
                 if (result.Accounts != null)
                     _discoveredAccounts[loginId] = result.Accounts;
             }
+            catch { }
+        }
+        if (InvokeRequired) BeginInvoke(RefreshTree); else RefreshTree();
+
+        // Phase 2: fresh from server (slow)
+        foreach (var loginId in loginIds)
+        {
+            try
+            {
+                var result = await _serviceClient.RefreshLoginAccountsAsync(loginId);
+                _loginAccountResults[loginId] = result;
+                if (result.Accounts != null)
+                    _discoveredAccounts[loginId] = result.Accounts;
+                _refreshedLogins.Add(loginId);
+            }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"Failed to discover accounts for {loginId}: {ex.Message}");
+                Console.Error.WriteLine($"Failed to refresh accounts for {loginId}: {ex.Message}");
+                _refreshedLogins.Add(loginId);
             }
         }
-
-        if (InvokeRequired)
-            BeginInvoke(RefreshTree);
-        else
-            RefreshTree();
+        if (InvokeRequired) BeginInvoke(RefreshTree); else RefreshTree();
     }
 
     private void RefreshTree()
@@ -404,9 +420,16 @@ sealed class ManageAccountsForm : Form
             }
             else
             {
+                var discoveredIds = _discoveredAccounts.TryGetValue(loginId, out var disc)
+                    ? disc.Select(d => d.AccountId).ToHashSet() : null;
+                var loginRefreshed = _refreshedLogins.Contains(loginId);
+
                 foreach (var account in syncedAccounts)
                 {
-                    var statusText = account.Status switch
+                    var isMissing = loginRefreshed && discoveredIds != null
+                        && !discoveredIds.Contains(account.AccountId);
+
+                    var statusText = isMissing ? "Missing on server" : account.Status switch
                     {
                         AccountStatus.Idle when account.PendingCount > 0 => $"{account.PendingCount} pending",
                         AccountStatus.Idle => "Up to date",
@@ -419,19 +442,20 @@ sealed class ManageAccountsForm : Form
                     var node = new TreeNode($"{account.DisplayName} \u2014 {statusText}")
                     {
                         Tag = new AccountNode(loginId, account.AccountId, account.DisplayName,
-                            IsSynced: true, SyncInfo: account),
+                            IsSynced: true, IsMissing: isMissing, SyncInfo: account),
+                        ForeColor = isMissing ? Color.FromArgb(200, 120, 0) : default,
                     };
                     loginTreeNode.Nodes.Add(node);
                 }
 
-                if (_discoveredAccounts.TryGetValue(loginId, out var discovered))
+                if (disc != null)
                 {
-                    foreach (var disc in discovered.Where(d => !syncedIds.Contains(d.AccountId)))
+                    foreach (var d in disc.Where(d => !syncedIds.Contains(d.AccountId)))
                     {
-                        var node = new TreeNode($"{disc.Name} \u2014 Not synced")
+                        var node = new TreeNode($"{d.Name} \u2014 Not synced")
                         {
-                            Tag = new AccountNode(loginId, disc.AccountId, disc.Name,
-                                IsSynced: false, SyncInfo: null),
+                            Tag = new AccountNode(loginId, d.AccountId, d.Name,
+                                IsSynced: false, IsMissing: false, SyncInfo: null),
                             ForeColor = Color.Gray,
                         };
                         loginTreeNode.Nodes.Add(node);
@@ -502,15 +526,29 @@ sealed class ManageAccountsForm : Form
                 _syncedAccountPanel.Visible = true;
                 var info = accountNode.SyncInfo;
                 _syncedAccountName.Text = info.DisplayName;
-                _accountStatusLabel.Text = info.Status switch
+
+                if (accountNode.IsMissing)
                 {
-                    AccountStatus.Idle when info.PendingCount > 0 => $"Status: {info.PendingCount} pending",
-                    AccountStatus.Idle => "Status: Up to date",
-                    AccountStatus.Syncing => "Status: Syncing",
-                    AccountStatus.Error => $"Status: Error \u2014 {info.StatusDetail}",
-                    AccountStatus.Disconnected => "Status: Offline",
-                    _ => "Status: Unknown",
-                };
+                    _accountStatusLabel.Text = "This account is no longer available on the server.";
+                    _accountStatusLabel.ForeColor = Color.FromArgb(200, 120, 0);
+                    _refreshButton.Visible = false;
+                    _cleanButton.Visible = false;
+                }
+                else
+                {
+                    _accountStatusLabel.Text = info.Status switch
+                    {
+                        AccountStatus.Idle when info.PendingCount > 0 => $"Status: {info.PendingCount} pending",
+                        AccountStatus.Idle => "Status: Up to date",
+                        AccountStatus.Syncing => "Status: Syncing",
+                        AccountStatus.Error => $"Status: Error \u2014 {info.StatusDetail}",
+                        AccountStatus.Disconnected => "Status: Offline",
+                        _ => "Status: Unknown",
+                    };
+                    _accountStatusLabel.ForeColor = default;
+                    _refreshButton.Visible = true;
+                    _cleanButton.Visible = true;
+                }
                 _syncFolderLabel.Text = $"Folder: {info.SyncRootPath}";
             }
             else
@@ -529,7 +567,7 @@ sealed class ManageAccountsForm : Form
     {
         using var addForm = new AddAccountForm(_serviceClient);
         if (addForm.ShowDialog(this) == DialogResult.OK)
-            _ = DiscoverAllLoginAccountsAsync();
+            _ = RefreshAllLoginAccountsAsync();
     }
 
     private async void OnUpdateCredentialsClicked(object? sender, EventArgs e)
@@ -564,7 +602,7 @@ sealed class ManageAccountsForm : Form
             else
             {
                 _tokenBox.Text = "";
-                _ = DiscoverAllLoginAccountsAsync();
+                _ = RefreshAllLoginAccountsAsync();
             }
         }
         catch (Exception ex)

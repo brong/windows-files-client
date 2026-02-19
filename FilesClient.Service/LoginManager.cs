@@ -669,6 +669,25 @@ sealed class LoginManager : IDisposable
     }
 
     /// <summary>
+    /// Fetch fresh accounts from the server for an existing login without
+    /// modifying the cached session or disrupting active supervisors.
+    /// </summary>
+    public async Task<List<(string AccountId, string Name, bool IsPrimary)>> RefreshLoginAccountsAsync(
+        string loginId, CancellationToken ct = default)
+    {
+        string sessionUrl, token;
+        lock (_lock)
+        {
+            var session = _sessions.FirstOrDefault(s => s.LoginId == loginId);
+            if (session == null)
+                throw new InvalidOperationException($"Login {loginId} not found");
+            sessionUrl = session.SessionUrl;
+            token = session.Token;
+        }
+        return await DiscoverAccountsAsync(sessionUrl, token, ct);
+    }
+
+    /// <summary>
     /// Reconfigure which accounts are synced for a given login.
     /// Stops disabled supervisors, starts newly enabled ones, updates credential.
     /// </summary>

@@ -208,6 +208,17 @@ sealed class ServiceClient : IDisposable
         return await tcs.Task;
     }
 
+    public async Task<LoginAccountsResultEvent> RefreshLoginAccountsAsync(string loginId,
+        CancellationToken ct = default)
+    {
+        var tcs = new TaskCompletionSource<LoginAccountsResultEvent>();
+        lock (_lock) _loginAccountsTcs = tcs;
+
+        using var reg = ct.Register(() => tcs.TrySetCanceled());
+        await _client.SendCommandAsync(new RefreshLoginAccountsCommand(loginId), ct);
+        return await tcs.Task;
+    }
+
     public async Task<LoginAccountsResultEvent> GetLoginAccountsAsync(string loginId,
         CancellationToken ct = default)
     {

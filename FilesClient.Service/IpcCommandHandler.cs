@@ -46,6 +46,9 @@ sealed class IpcCommandHandler
             case GetLoginAccountsCommand cmd:
                 return HandleGetLoginAccounts(cmd);
 
+            case RefreshLoginAccountsCommand cmd:
+                return await HandleRefreshLoginAccountsAsync(cmd, ct);
+
             case UpdateLoginCommand cmd:
                 return await HandleUpdateLoginAsync(cmd, ct);
 
@@ -221,6 +224,23 @@ sealed class IpcCommandHandler
             new DiscoveredAccount(a.AccountId, a.Name, a.IsPrimary)).ToList();
         var active = _loginManager.GetActiveAccountIds(cmd.LoginId);
         return new LoginAccountsResultEvent(cmd.LoginId, discovered, active, null);
+    }
+
+    private async Task<IpcEvent> HandleRefreshLoginAccountsAsync(
+        RefreshLoginAccountsCommand cmd, CancellationToken ct)
+    {
+        try
+        {
+            var accounts = await _loginManager.RefreshLoginAccountsAsync(cmd.LoginId, ct);
+            var discovered = accounts.Select(a =>
+                new DiscoveredAccount(a.AccountId, a.Name, a.IsPrimary)).ToList();
+            var active = _loginManager.GetActiveAccountIds(cmd.LoginId);
+            return new LoginAccountsResultEvent(cmd.LoginId, discovered, active, null);
+        }
+        catch (Exception ex)
+        {
+            return new LoginAccountsResultEvent(cmd.LoginId, null, null, ex.Message);
+        }
     }
 
     private async Task<IpcEvent> HandleUpdateLoginAsync(UpdateLoginCommand cmd, CancellationToken ct)
