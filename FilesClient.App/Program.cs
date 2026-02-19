@@ -108,10 +108,13 @@ class Program
         var iconPath = await DownloadIconAsync(cts.Token);
 
         using var serviceClient = new ServiceClient();
-        serviceClient.Start(cts.Token);
 
         using var trayIcon = new TrayIcon(cts, iconPath, serviceClient);
         trayIcon.Start();
+
+        // Start IPC connection AFTER tray icon is ready, so _syncContext is set
+        // and all events will be properly marshalled to the UI thread.
+        serviceClient.Start(cts.Token);
 
         // If not connected after a brief wait, show manage accounts
         _ = Task.Run(async () =>

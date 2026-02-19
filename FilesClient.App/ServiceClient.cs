@@ -66,6 +66,21 @@ sealed class ServiceClient : IDisposable
         _client.Start(ct);
     }
 
+    /// <summary>
+    /// Send a ping to detect broken pipe. Fire-and-forget safe.
+    /// If the write fails, the IPC client will detect the dead pipe
+    /// and fire ConnectionChanged(false).
+    /// </summary>
+    public async Task CheckConnectionAsync()
+    {
+        try
+        {
+            if (_connected)
+                await _client.SendCommandAsync(new GetStatusCommand());
+        }
+        catch { /* write failure triggers disconnect detection */ }
+    }
+
     public async Task StopAsync()
     {
         await _client.StopAsync();

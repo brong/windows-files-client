@@ -21,9 +21,9 @@ public class AccountScopedJmapClient : IJmapClient
     {
         _parent = parent;
         _accountId = accountId;
-        var accountName = parent.Session.Accounts.TryGetValue(accountId, out var acct)
-            ? acct.Name : parent.Session.Username;
-        _context = new JmapContext(accountName, accountId);
+        // Use the login username (not the account display name) so the scope key
+        // is stable and consistent with the primary account's JmapContext.
+        _context = new JmapContext(parent.Session.Username, accountId);
     }
 
     public JmapContext Context => _context;

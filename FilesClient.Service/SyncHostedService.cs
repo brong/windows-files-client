@@ -29,56 +29,65 @@ sealed class SyncHostedService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        Console.WriteLine("FastmailFiles service starting...");
-
-        // Download icon for sync root
-        _iconPath = await DownloadIconAsync(stoppingToken);
-
-        _loginManager = new LoginManager(_debug);
-        _handler = new IpcCommandHandler(_loginManager, _iconPath);
-
-        // Hook LoginManager events to broadcast IPC updates
-        _loginManager.AccountsChanged += OnAccountsChanged;
-        _loginManager.AggregateStatusChanged += OnAggregateStatusChanged;
-
-        // Hook per-supervisor status changes (subscribe on existing and future supervisors)
-        _loginManager.AccountsChanged += SubscribeSupervisorEvents;
-
-        // Start IPC server
-        _ipcServer = new IpcPipeServer(_handler.HandleAsync);
-        _ipcServer.Start(stoppingToken);
-        Console.WriteLine($"IPC server listening on pipe: {IpcConstants.PipeName}");
-
-        // Dev: --token adds a transient (non-persisted) login
-        if (_token != null)
+        try
         {
-            try
+            Console.WriteLine("FastmailFiles service starting...");
+
+            // Start IPC server first so the tray app can connect immediately
+            _loginManager = new LoginManager(_debug);
+            _handler = new IpcCommandHandler(_loginManager, null);
+            _ipcServer = new IpcPipeServer(_handler.HandleAsync);
+            _ipcServer.Start(stoppingToken);
+            Console.WriteLine($"IPC server listening on pipe: {IpcConstants.PipeName}");
+
+            // Download icon for sync root (can be slow on first run)
+            _iconPath = await DownloadIconAsync(stoppingToken);
+            _handler.IconPath = _iconPath;
+
+            // Hook LoginManager events to broadcast IPC updates
+            _loginManager.AccountsChanged += OnAccountsChanged;
+            _loginManager.AggregateStatusChanged += OnAggregateStatusChanged;
+
+            // Hook per-supervisor status changes (subscribe on existing and future supervisors)
+            _loginManager.AccountsChanged += SubscribeSupervisorEvents;
+
+            // Dev: --token adds a transient (non-persisted) login
+            if (_token != null)
             {
-                await _loginManager.AddLoginAsync(_sessionUrl, _token,
-                    persist: false, iconPath: _iconPath, clean: _clean, ct: stoppingToken);
+                try
+                {
+                    await _loginManager.AddLoginAsync(_sessionUrl, _token,
+                        persist: false, iconPath: _iconPath, clean: _clean, ct: stoppingToken);
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"Failed to connect: {ex.Message}");
+                }
             }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine($"Failed to connect: {ex.Message}");
-            }
+
+            // Load stored credentials
+            await _loginManager.StartAsync(_iconPath, _clean, stoppingToken);
+
+            Console.WriteLine("FastmailFiles service running");
+
+            // Wait until stopped
+            try { await Task.Delay(Timeout.Infinite, stoppingToken); }
+            catch (OperationCanceledException) { }
         }
-
-        // Load stored credentials
-        await _loginManager.StartAsync(_iconPath, _clean, stoppingToken);
-
-        Console.WriteLine("FastmailFiles service running");
-
-        // Wait until stopped
-        try { await Task.Delay(Timeout.Infinite, stoppingToken); }
-        catch (OperationCanceledException) { }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Console.Error.WriteLine($"Fatal error in service: {ex}");
+            throw;
+        }
 
         Console.WriteLine("FastmailFiles service stopping...");
 
-        await _loginManager.StopAllAsync();
+        if (_loginManager != null)
+            await _loginManager.StopAllAsync();
         if (_ipcServer != null)
             await _ipcServer.StopAsync();
 
-        _loginManager.Dispose();
+        _loginManager?.Dispose();
 
         Console.WriteLine("FastmailFiles service stopped");
     }

@@ -10,12 +10,12 @@ namespace FilesClient.Service;
 sealed class IpcCommandHandler
 {
     private readonly LoginManager _loginManager;
-    private readonly string? _iconPath;
+    public string? IconPath { get; set; }
 
     public IpcCommandHandler(LoginManager loginManager, string? iconPath)
     {
         _loginManager = loginManager;
-        _iconPath = iconPath;
+        IconPath = iconPath;
     }
 
     public async Task<IpcEvent?> HandleAsync(IpcCommand command, CancellationToken ct)
@@ -105,7 +105,7 @@ sealed class IpcCommandHandler
         {
             var loginId = await _loginManager.AddLoginAsync(
                 cmd.SessionUrl, cmd.Token,
-                persist: true, iconPath: _iconPath,
+                persist: true, iconPath: IconPath,
                 enabledAccountIds: cmd.EnabledAccountIds, ct: ct);
             return new AddLoginResultEvent(true, loginId, null);
         }
@@ -160,7 +160,7 @@ sealed class IpcCommandHandler
     {
         try
         {
-            await _loginManager.ConfigureLoginAsync(cmd.LoginId, cmd.EnabledAccountIds, _iconPath, ct: ct);
+            await _loginManager.ConfigureLoginAsync(cmd.LoginId, cmd.EnabledAccountIds, IconPath, ct: ct);
             return new CommandResultEvent("configureLogin", true, null);
         }
         catch (Exception ex)

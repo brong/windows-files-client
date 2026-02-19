@@ -16,6 +16,7 @@ sealed class TrayIcon : IDisposable
     private readonly ManualResetEventSlim _ready = new();
     private Thread? _thread;
     private NotifyIcon? _notifyIcon;
+    private ContextMenuStrip? _contextMenu;
     private SynchronizationContext? _syncContext;
     private Icon? _baseIcon;
     private IntPtr _currentHIcon;
@@ -56,7 +57,6 @@ sealed class TrayIcon : IDisposable
         _syncContext?.Post(_ =>
         {
             if (_notifyIcon == null) return;
-            _notifyIcon.ContextMenuStrip = BuildContextMenu();
             RefreshTooltip();
         }, null);
     }
@@ -75,7 +75,6 @@ sealed class TrayIcon : IDisposable
         _syncContext?.Post(_ =>
         {
             if (_notifyIcon == null) return;
-            _notifyIcon.ContextMenuStrip = BuildContextMenu();
             RefreshTooltip();
         }, null);
     }
@@ -169,11 +168,21 @@ sealed class TrayIcon : IDisposable
     {
         _baseIcon = LoadBaseIcon();
 
+        _contextMenu = new ContextMenuStrip();
+        _contextMenu.Opening += (_, _) =>
+        {
+            // Rebuild menu items with fresh state each time user opens the menu
+            PopulateContextMenu();
+            // Kick off a connection check — if the pipe is dead this will
+            // trigger ConnectionChanged(false) shortly after
+            _ = _serviceClient.CheckConnectionAsync();
+        };
+
         _notifyIcon = new NotifyIcon
         {
             Visible = true,
             Text = "Fastmail Files - Starting...",
-            ContextMenuStrip = BuildContextMenu(),
+            ContextMenuStrip = _contextMenu,
         };
 
         SetIconWithDot(Color.Gray);
@@ -181,12 +190,25 @@ sealed class TrayIcon : IDisposable
         _syncContext = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
         _ready.Set();
 
+        // One-shot timer to refresh UI once the message loop is pumping
+        // and the service client has had time to connect and receive status.
+        var initTimer = new System.Windows.Forms.Timer { Interval = 1000 };
+        initTimer.Tick += (_, _) =>
+        {
+            initTimer.Stop();
+            initTimer.Dispose();
+            RefreshTooltip();
+        };
+        initTimer.Start();
+
         Application.Run();
 
         // Cleanup after Application.ExitThread()
         _notifyIcon.Visible = false;
         _notifyIcon.Dispose();
         _notifyIcon = null;
+        _contextMenu.Dispose();
+        _contextMenu = null;
         DestroyCurrentHIcon();
         _baseIcon?.Dispose();
     }
@@ -234,14 +256,16 @@ sealed class TrayIcon : IDisposable
         }
     }
 
-    private ContextMenuStrip BuildContextMenu()
+    private void PopulateContextMenu()
     {
-        var menu = new ContextMenuStrip();
+        if (_contextMenu == null) return;
+        _contextMenu.Items.Clear();
+
         var connected = _serviceClient.IsConnected;
 
         if (!connected)
         {
-            menu.Items.Add(new ToolStripMenuItem("Service not running") { Enabled = false });
+            _contextMenu.Items.Add(new ToolStripMenuItem("Service not running") { Enabled = false });
         }
         else
         {
@@ -251,18 +275,18 @@ sealed class TrayIcon : IDisposable
             if (accounts.Count == 0 && connecting.Count == 0)
             {
                 var noAccounts = new ToolStripMenuItem("No accounts configured") { Enabled = false };
-                menu.Items.Add(noAccounts);
+                _contextMenu.Items.Add(noAccounts);
             }
             else if (accounts.Count == 0)
             {
                 foreach (var loginId in connecting)
-                    menu.Items.Add(new ToolStripMenuItem($"{loginId} \u2014 Connecting...") { Enabled = false });
+                    _contextMenu.Items.Add(new ToolStripMenuItem($"{loginId} \u2014 Connecting...") { Enabled = false });
             }
             else if (accounts.Count == 1 && connecting.Count == 0)
             {
                 var a = accounts[0];
-                menu.Items.Add($"Open {a.DisplayName}", null, (_, _) => OpenSyncFolder(a.SyncRootPath));
-                menu.Items.Add("View pending changes...", null, (_, _) => ShowStatusForm(a));
+                _contextMenu.Items.Add($"Open {a.DisplayName}", null, (_, _) => OpenSyncFolder(a.SyncRootPath));
+                _contextMenu.Items.Add("View pending changes...", null, (_, _) => ShowStatusForm(a));
             }
             else
             {
@@ -272,43 +296,37 @@ sealed class TrayIcon : IDisposable
                     var captured = a;
                     sub.DropDownItems.Add("Open sync folder", null, (_, _) => OpenSyncFolder(captured.SyncRootPath));
                     sub.DropDownItems.Add("View pending changes...", null, (_, _) => ShowStatusForm(captured));
-                    menu.Items.Add(sub);
+                    _contextMenu.Items.Add(sub);
                 }
                 foreach (var loginId in connecting)
-                    menu.Items.Add(new ToolStripMenuItem($"{loginId} \u2014 Connecting...") { Enabled = false });
+                    _contextMenu.Items.Add(new ToolStripMenuItem($"{loginId} \u2014 Connecting...") { Enabled = false });
             }
         }
 
-        menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("Manage accounts...", null, (_, _) => OpenManageAccountsForm());
+        _contextMenu.Items.Add(new ToolStripSeparator());
+        _contextMenu.Items.Add("Manage accounts...", null, (_, _) => OpenManageAccountsForm());
 
         if (Program.IsDebugMode)
         {
             var consoleLabel = Program.IsDebugConsoleVisible()
                 ? "Hide debug console"
                 : "Show debug console";
-            menu.Items.Add(consoleLabel, null, (_, _) =>
+            _contextMenu.Items.Add(consoleLabel, null, (_, _) =>
             {
                 if (Program.IsDebugConsoleVisible())
                     Program.HideDebugConsole();
                 else
                     Program.ShowDebugConsole();
-
-                // Rebuild menu to update the label
-                if (_notifyIcon != null)
-                    _notifyIcon.ContextMenuStrip = BuildContextMenu();
             });
         }
 
-        menu.Items.Add(new ToolStripSeparator());
+        _contextMenu.Items.Add(new ToolStripSeparator());
 
-        menu.Items.Add("Exit", null, (_, _) =>
+        _contextMenu.Items.Add("Exit", null, (_, _) =>
         {
             _cts.Cancel();
             Application.ExitThread();
         });
-
-        return menu;
     }
 
     private static void OpenSyncFolder(string path)

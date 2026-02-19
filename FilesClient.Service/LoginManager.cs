@@ -70,6 +70,7 @@ sealed class LoginManager : IDisposable
             {
                 lock (_lock)
                     _connectingLoginIds.Remove(login.LoginId);
+                AccountsChanged?.Invoke();
             }
         }
     }

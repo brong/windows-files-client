@@ -83,13 +83,34 @@ public sealed class IpcPipeClient : IDisposable
                 // Request initial status
                 await SendCommandAsync(new GetStatusCommand(), ct);
 
+                // Use a linked CTS so the keepalive can cancel reads on pipe failure
+                using var readCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+
+                // Keepalive: periodically ping to detect broken pipes
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        while (!readCts.Token.IsCancellationRequested)
+                        {
+                            await Task.Delay(15_000, readCts.Token);
+                            await SendCommandAsync(new GetStatusCommand(), readCts.Token);
+                        }
+                    }
+                    catch
+                    {
+                        // Write failed — pipe is dead, cancel the read loop
+                        try { readCts.Cancel(); } catch { }
+                    }
+                }, readCts.Token);
+
                 // Read events until disconnected
-                while (!ct.IsCancellationRequested && _pipe?.IsConnected == true)
+                while (!readCts.Token.IsCancellationRequested && _pipe?.IsConnected == true)
                 {
                     string? line;
                     try
                     {
-                        line = await _reader!.ReadLineAsync(ct);
+                        line = await _reader!.ReadLineAsync(readCts.Token);
                     }
                     catch (OperationCanceledException) { break; }
                     catch (IOException) { break; }

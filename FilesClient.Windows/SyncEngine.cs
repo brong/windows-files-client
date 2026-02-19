@@ -165,10 +165,13 @@ public class SyncEngine : IDisposable
 
     public async Task<string> PopulateAsync(CancellationToken ct)
     {
+        Console.WriteLine($"PopulateAsync: scopeKey={_scopeKey}, syncRoot={_syncRootPath}");
+
         // Try warm start from cache
         var cache = NodeCache.Load(_scopeKey);
         if (cache != null)
         {
+            Console.WriteLine($"Cache found: {cache.Entries.Count} entries, state={cache.State}");
             try
             {
                 return await PopulateFromCacheAsync(cache, ct);
@@ -180,6 +183,10 @@ public class SyncEngine : IDisposable
                 _nodeIdToPath.Clear();
                 _pinnedDirectories.Clear();
             }
+        }
+        else
+        {
+            Console.WriteLine("No cache found, starting full fetch");
         }
 
         // Full fetch (cold start)

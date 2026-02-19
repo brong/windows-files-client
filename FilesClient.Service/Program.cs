@@ -1,6 +1,7 @@
 using FilesClient.Service;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Hosting.WindowsServices;
 
 var options = new ServiceOptions();
 
@@ -40,16 +41,26 @@ options.Token ??= Environment.GetEnvironmentVariable("FASTMAIL_TOKEN");
 AppLogger.Initialize(options.Debug);
 Console.WriteLine($"FastmailFiles service process starting (debug={options.Debug})");
 
-var builder = Host.CreateApplicationBuilder([]);
-
-builder.Services.AddSingleton(options);
-builder.Services.AddHostedService<SyncHostedService>();
-
-builder.Services.AddWindowsService(cfg =>
+var builder = new HostBuilder();
+builder.ConfigureServices(services =>
 {
-    cfg.ServiceName = "FastmailFiles";
+    services.AddSingleton(options);
+    services.AddHostedService<SyncHostedService>();
 });
 
+if (WindowsServiceHelpers.IsWindowsService())
+{
+    builder.ConfigureServices(services =>
+    {
+        services.AddWindowsService(cfg =>
+        {
+            cfg.ServiceName = "FastmailFiles";
+        });
+    });
+}
+
+Console.WriteLine("Building host...");
 var host = builder.Build();
+Console.WriteLine("Starting host...");
 await host.RunAsync();
 return 0;

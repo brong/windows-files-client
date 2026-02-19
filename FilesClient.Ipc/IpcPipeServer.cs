@@ -106,6 +106,7 @@ public sealed class IpcPipeServer : IDisposable
                     IpcConstants.BufferSize,
                     IpcConstants.BufferSize);
 
+                Console.WriteLine($"[IPC] Pipe created, waiting for connection on: {_pipeName}");
                 await pipe.WaitForConnectionAsync(ct);
 
                 var client = new ConnectedClient(pipe);
