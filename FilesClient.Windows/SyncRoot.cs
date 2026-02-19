@@ -380,6 +380,7 @@ internal class SyncRoot : IDisposable
                 acl.RemoveAccessRule(rule);
 
             dirInfo.SetAccessControl(acl);
+            Console.WriteLine($"  {(protect ? "Protected" : "Unprotected")} folder: {path}");
         }
         catch (Exception ex)
         {
