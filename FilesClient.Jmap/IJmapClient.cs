@@ -13,6 +13,7 @@ public interface IJmapClient : IDisposable
     /// </summary>
     string? PreferredDigestAlgorithm { get; }
     Task<string> FindHomeNodeIdAsync(CancellationToken ct = default);
+    Task<string?> FindTrashNodeIdAsync(CancellationToken ct = default);
     Task<FileNode[]> GetFileNodesAsync(string[] ids, CancellationToken ct = default);
     Task<FileNode[]> GetChildrenAsync(string parentId, CancellationToken ct = default);
     Task<ChangesResponse> GetChangesAsync(string sinceState, CancellationToken ct = default);
@@ -27,7 +28,7 @@ public interface IJmapClient : IDisposable
     Task<string> UploadBlobAsync(Stream data, string contentType, CancellationToken ct = default);
     Task<FileNode> CreateFileNodeAsync(string parentId, string? blobId, string name, string? type = null, string? onExists = null, CancellationToken ct = default);
     Task<FileNode> ReplaceFileNodeBlobAsync(string nodeId, string parentId, string name, string blobId, string? type = null, CancellationToken ct = default);
-    Task MoveFileNodeAsync(string nodeId, string parentId, string newName, CancellationToken ct = default);
+    Task MoveFileNodeAsync(string nodeId, string parentId, string newName, string? onExists = null, CancellationToken ct = default);
     Task DestroyFileNodeAsync(string nodeId, CancellationToken ct = default);
     IAsyncEnumerable<string> WatchForChangesAsync(CancellationToken ct = default);
     /// <summary>

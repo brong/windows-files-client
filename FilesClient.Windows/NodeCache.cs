@@ -26,10 +26,14 @@ public record CacheEntry
 public record CacheSnapshot
 {
     [JsonPropertyName("v")]
-    public int Version { get; init; } = 3;
+    public int Version { get; init; } = 4;
 
     [JsonPropertyName("homeNodeId")]
     public string HomeNodeId { get; init; } = "";
+
+    [JsonPropertyName("trashNodeId")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? TrashNodeId { get; init; }
 
     [JsonPropertyName("state")]
     public string State { get; init; } = "";
@@ -59,7 +63,7 @@ public static class NodeCache
         {
             var json = File.ReadAllText(path);
             var snapshot = JsonSerializer.Deserialize<CacheSnapshot>(json);
-            if (snapshot == null || snapshot.Version != 3
+            if (snapshot == null || snapshot.Version != 4
                 || string.IsNullOrEmpty(snapshot.HomeNodeId)
                 || string.IsNullOrEmpty(snapshot.State))
                 return null;
@@ -75,7 +79,8 @@ public static class NodeCache
 
     public static void Save(string scopeKey, string homeNodeId, string state,
         IReadOnlyDictionary<string, string> nodeIdToPath, string syncRootPath,
-        IReadOnlyDictionary<string, FilesRights>? folderRights = null)
+        IReadOnlyDictionary<string, FilesRights>? folderRights = null,
+        string? trashNodeId = null)
     {
         var path = GetCachePath(scopeKey);
         var dir = System.IO.Path.GetDirectoryName(path)!;
@@ -125,8 +130,9 @@ public static class NodeCache
 
         var snapshot = new CacheSnapshot
         {
-            Version = 2,
+            Version = 4,
             HomeNodeId = homeNodeId,
+            TrashNodeId = trashNodeId,
             State = state,
             Entries = entries,
         };

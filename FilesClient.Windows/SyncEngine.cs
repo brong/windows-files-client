@@ -29,6 +29,8 @@ public class SyncEngine : IDisposable
     private readonly ConcurrentDictionary<string, string> _nodeIdToPath = new();
     // Home node ID discovered during PopulateAsync
     private string _homeNodeId = null!;
+    // Trash node ID for server-side recycle bin (null if not available)
+    private string? _trashNodeId;
     // Directories the user has pinned ("Always keep on this device")
     // Value is a CancellationTokenSource used to cancel in-progress hydration when unpinned.
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _pinnedDirectories = new(StringComparer.OrdinalIgnoreCase);
@@ -212,6 +214,12 @@ public class SyncEngine : IDisposable
         _homeNodeId = await _queue.EnqueueAsync(QueuePriority.Background,
             () => _jmapClient.FindHomeNodeIdAsync(ct), ct);
         Console.WriteLine($"Home node: {_homeNodeId}");
+
+        // Discover trash node
+        _trashNodeId = await _queue.EnqueueAsync(QueuePriority.Background,
+            () => _jmapClient.FindTrashNodeIdAsync(ct), ct);
+        Console.WriteLine($"Trash node: {_trashNodeId ?? "(none)"}");
+        _outboxProcessor.SetTrashNodeId(_trashNodeId);
 
         // Phase 1: Bulk fetch all FileNode IDs, then all nodes in pages
         Console.WriteLine("Fetching all FileNode IDs...");
@@ -397,6 +405,8 @@ public class SyncEngine : IDisposable
     {
         ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_SYNC_INCREMENTAL);
         _homeNodeId = cache.HomeNodeId;
+        _trashNodeId = cache.TrashNodeId;
+        _outboxProcessor.SetTrashNodeId(_trashNodeId);
 
         // Rebuild mappings from cache, verifying items exist on disk with matching metadata
         Console.WriteLine($"Restoring {cache.Entries.Count} mappings from cache...");
@@ -707,8 +717,35 @@ public class SyncEngine : IDisposable
 
             var oldPath = _nodeIdToPath.GetValueOrDefault(node.Id);
             var parentPath = await ResolveLocalPathAsync(node.ParentId, ct);
+
+            // Node moved out of home tree (e.g. to trash, or ancestor moved to trash)
             if (parentPath == null)
+            {
+                if (oldPath != null)
+                {
+                    Console.WriteLine($"  Removed from sync tree: {oldPath}");
+                    // Clean up descendant mappings for folders
+                    if (Directory.Exists(oldPath))
+                    {
+                        var prefix = oldPath + Path.DirectorySeparatorChar;
+                        foreach (var (descPath, descNodeId) in _pathToNodeId
+                            .Where(kvp => kvp.Key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                            .ToList())
+                        {
+                            _pathToNodeId.TryRemove(descPath, out _);
+                            _nodeIdToPath.TryRemove(descNodeId, out _);
+                            _readOnlyPaths.TryRemove(descPath, out _);
+                        }
+                    }
+                    _pathToNodeId.TryRemove(oldPath, out _);
+                    _nodeIdToPath.TryRemove(node.Id, out _);
+                    _readOnlyPaths.TryRemove(oldPath, out _);
+                    var parentDir = Path.GetDirectoryName(oldPath);
+                    using (parentDir != null ? SuspendFolderProtection(parentDir) : default)
+                        DeleteLocalItem(oldPath);
+                }
                 continue;
+            }
 
             var newPath = Path.Combine(parentPath, PlaceholderManager.SanitizeName(node.Name));
 
@@ -1898,6 +1935,10 @@ public class SyncEngine : IDisposable
         if (nodeId == _homeNodeId)
             return _syncRootPath;
 
+        // Trash boundary — don't resolve paths under the trash folder
+        if (_trashNodeId != null && nodeId == _trashNodeId)
+            return null;
+
         var nodes = await _queue.EnqueueAsync(QueuePriority.Background,
             () => _jmapClient.GetFileNodesAsync([nodeId], ct), ct);
         if (nodes.Length == 0)
@@ -1914,7 +1955,7 @@ public class SyncEngine : IDisposable
     private void SaveNodeCache(string state)
     {
         NodeCache.Save(_scopeKey, _homeNodeId, state, _nodeIdToPath, _syncRootPath,
-            _readOnlyPaths);
+            _readOnlyPaths, _trashNodeId);
     }
 
     public void Dispose()

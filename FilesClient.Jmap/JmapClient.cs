@@ -144,6 +144,45 @@ public class JmapClient : IJmapClient
         return getResult.List[0].Id;
     }
 
+    public async Task<string?> FindTrashNodeIdAsync(CancellationToken ct = default)
+    {
+        var queryCallId = "c" + Interlocked.Increment(ref _nextCallId);
+        var getCallId = "c" + Interlocked.Increment(ref _nextCallId);
+
+        var request = JmapRequest.Create(FileNodeUsing,
+            ("FileNode/query", new
+            {
+                accountId = AccountId,
+                filter = new { hasRole = "trash" },
+            }, queryCallId),
+            ("FileNode/get", new Dictionary<string, object>
+            {
+                ["accountId"] = AccountId,
+                ["#ids"] = new { resultOf = queryCallId, name = "FileNode/query", path = "/ids" },
+            }, getCallId));
+
+        var json = JsonSerializer.Serialize(request, JmapSerializerOptions.Default);
+        var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+        var httpResponse = await _http.PostAsync(Session.ApiUrl, content, ct);
+        httpResponse.EnsureSuccessStatusCode();
+        var responseJson = await httpResponse.Content.ReadAsStringAsync(ct);
+        var response = JsonSerializer.Deserialize<JmapResponse>(responseJson, JmapSerializerOptions.Default)
+            ?? throw new InvalidOperationException("Failed to parse JMAP response");
+
+        var responseMap = new Dictionary<string, (string method, JsonElement args)>();
+        foreach (var entry in response.MethodResponses)
+        {
+            var respCallId = entry[2].GetString() ?? "";
+            var respMethod = entry[0].GetString() ?? "";
+            responseMap[respCallId] = (respMethod, entry[1]);
+        }
+
+        GetValidatedResult<QueryResponse>(responseMap, queryCallId, "FileNode/query");
+        var getResult = GetValidatedResult<GetResponse<FileNode>>(responseMap, getCallId, "FileNode/get");
+
+        return getResult.List.Length > 0 ? getResult.List[0].Id : null;
+    }
+
     public async Task<FileNode[]> GetFileNodesAsync(string[] ids, CancellationToken ct = default)
     {
         var result = await CallAsync<GetResponse<FileNode>>(
@@ -401,17 +440,21 @@ public class JmapClient : IJmapClient
         return created;
     }
 
-    public async Task MoveFileNodeAsync(string nodeId, string parentId, string newName, CancellationToken ct = default)
+    public async Task MoveFileNodeAsync(string nodeId, string parentId, string newName, string? onExists = null, CancellationToken ct = default)
     {
-        var setResponse = await CallAsync<SetResponse>(
-            FileNodeUsing, "FileNode/set", new
+        var args = new Dictionary<string, object>
+        {
+            ["accountId"] = AccountId,
+            ["update"] = new Dictionary<string, object>
             {
-                accountId = AccountId,
-                update = new Dictionary<string, object>
-                {
-                    [nodeId] = new { parentId, name = newName },
-                },
-            }, ct);
+                [nodeId] = new { parentId, name = newName },
+            },
+        };
+        if (onExists != null)
+            args["onExists"] = onExists;
+
+        var setResponse = await CallAsync<SetResponse>(
+            FileNodeUsing, "FileNode/set", args, ct);
 
         if (setResponse.NotUpdated != null && setResponse.NotUpdated.TryGetValue(nodeId, out var setError))
             throw new InvalidOperationException($"FileNode/set move failed: {setError.Type} — {setError.Description}");

@@ -9,7 +9,6 @@ A proof-of-concept Windows filesystem adaptor that exposes [Fastmail](https://ww
 - **On-demand hydration** — files are downloaded from Fastmail only when opened (Full hydration policy)
 - **Upload support** — files copied or modified in the sync root are automatically uploaded to Fastmail
 - **Change polling** — server-side changes are detected and reflected locally every 30 seconds
-- **Stub mode** — `--stub` flag for testing cfapi integration without a Fastmail account
 
 ## Architecture
 
@@ -18,10 +17,9 @@ The solution is split into three projects:
 ```
 FilesClient.sln
 ├── FilesClient.Jmap/          # Platform-agnostic JMAP client
-│   ├── IJmapClient.cs         # Client interface (real + stub)
-│   ├── JmapClient.cs          # Fastmail StorageNode API implementation
+│   ├── IJmapClient.cs         # Client interface
+│   ├── JmapClient.cs          # Fastmail FileNode API implementation
 │   ├── JmapSession.cs         # JMAP session/capability discovery
-│   ├── StubJmapClient.cs      # In-memory stub for testing
 │   ├── Auth/
 │   │   ├── TokenAuth.cs       # Bearer token auth handler
 │   │   └── DebugLoggingHandler.cs  # Optional HTTP traffic logging
@@ -84,16 +82,11 @@ FilesClient.App --token <fastmail-app-password>
 | `--session-url <url>` | JMAP session URL (default: `https://api.fastmail.com/jmap/session`) |
 | `--sync-root <path>` | Local sync folder path (default: `~/<username> Files`) |
 | `--debug` | Log all JMAP HTTP request/response traffic to stderr |
-| `--stub` | Use an in-memory stub client for cfapi testing without a server |
 
 ### Example
 
 ```
-# Real Fastmail account
 FilesClient.App --token fmu1-xxxxxxxxxxxxxxxx
-
-# Stub mode for testing cfapi integration
-FilesClient.App --stub
 ```
 
 The sync root folder appears in your user profile directory (e.g. `C:\Users\you\you@fastmail.com Files`) and in the Explorer navigation pane.

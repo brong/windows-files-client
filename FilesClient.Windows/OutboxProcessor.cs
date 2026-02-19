@@ -14,6 +14,7 @@ public class OutboxProcessor : IDisposable
     private CancellationTokenSource? _cts;
     private Task? _loopTask;
     private volatile bool _online = true;
+    private volatile string? _trashNodeId;
     private readonly SemaphoreSlim _workerSlots = new(MaxConcurrency, MaxConcurrency);
     private readonly object _workerLock = new();
     private readonly List<Task> _workerTasks = new();
@@ -35,6 +36,11 @@ public class OutboxProcessor : IDisposable
     public void SetOnline(bool online)
     {
         _online = online;
+    }
+
+    public void SetTrashNodeId(string? trashNodeId)
+    {
+        _trashNodeId = trashNodeId;
     }
 
     private async Task DispatchLoop(CancellationToken ct)
@@ -176,16 +182,26 @@ public class OutboxProcessor : IDisposable
         if (change.NodeId == null)
             return; // Nothing to delete on server
 
+        var name = change.LocalPath != null ? Path.GetFileName(change.LocalPath) : change.NodeId;
+
         try
         {
-            Console.WriteLine($"Outbox: destroying node {change.NodeId}");
-            await _queue.EnqueueAsync(QueuePriority.Background,
-                () => _jmapClient.DestroyFileNodeAsync(change.NodeId, ct), ct);
+            if (_trashNodeId != null)
+            {
+                Console.WriteLine($"Outbox: trashing node {change.NodeId}");
+                await _queue.EnqueueAsync(QueuePriority.Background,
+                    () => _jmapClient.MoveFileNodeAsync(change.NodeId, _trashNodeId, name, "rename", ct), ct);
+            }
+            else
+            {
+                Console.WriteLine($"Outbox: destroying node {change.NodeId}");
+                await _queue.EnqueueAsync(QueuePriority.Background,
+                    () => _jmapClient.DestroyFileNodeAsync(change.NodeId, ct), ct);
+            }
         }
         catch (Exception ex) when (ex.Message.Contains("notFound") || ex.Message.Contains("404"))
         {
-            // Already deleted on server — treat as success
-            Console.WriteLine($"Outbox: node {change.NodeId} already deleted on server");
+            Console.WriteLine($"Outbox: node {change.NodeId} already gone on server");
         }
     }
 
@@ -261,7 +277,7 @@ public class OutboxProcessor : IDisposable
                 if (newParentId != null)
                 {
                     await _queue.EnqueueAsync(QueuePriority.Background,
-                        () => _jmapClient.MoveFileNodeAsync(newNode.Id, newParentId, fileName, ct), ct);
+                        () => _jmapClient.MoveFileNodeAsync(newNode.Id, newParentId, fileName, ct: ct), ct);
                 }
             }
 
@@ -322,7 +338,7 @@ public class OutboxProcessor : IDisposable
         try
         {
             await _queue.EnqueueAsync(QueuePriority.Background,
-                () => _jmapClient.MoveFileNodeAsync(change.NodeId, parentId, newName, ct), ct);
+                () => _jmapClient.MoveFileNodeAsync(change.NodeId, parentId, newName, ct: ct), ct);
             SyncEngine.SetInSync(change.LocalPath);
         }
         catch (Exception ex) when (ex.Message.Contains("notFound") || ex.Message.Contains("404"))
