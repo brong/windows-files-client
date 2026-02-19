@@ -375,21 +375,19 @@ public class JmapClient : IJmapClient
 
     public async Task<FileNode> ReplaceFileNodeBlobAsync(string nodeId, string parentId, string name, string blobId, string? type = null, CancellationToken ct = default)
     {
-        // Content is immutable — destroy old node and create replacement atomically.
+        // Content (blobId) is immutable — create a replacement with onExists:"replace"
+        // so the server atomically replaces the existing node.
         var setResponse = await CallAsync<SetResponse>(
             FileNodeUsing, "FileNode/set", new
             {
                 accountId = AccountId,
-                onDestroyRemoveChildren = true,
-                destroy = new[] { nodeId },
+                onExists = "replace",
                 create = new Dictionary<string, object>
                 {
                     ["c0"] = new { parentId, blobId, name, type },
                 },
             }, ct);
 
-        if (setResponse.NotDestroyed != null && setResponse.NotDestroyed.TryGetValue(nodeId, out var destroyError))
-            throw new InvalidOperationException($"FileNode/set destroy failed: {destroyError.Type} — {destroyError.Description}");
         if (setResponse.NotCreated != null && setResponse.NotCreated.TryGetValue("c0", out var createError))
             throw new InvalidOperationException($"FileNode/set create failed: {createError.Type} — {createError.Description}");
 

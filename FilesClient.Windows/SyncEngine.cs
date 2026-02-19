@@ -1482,6 +1482,12 @@ public class SyncEngine : IDisposable
     {
         if (oldNodeId != null)
             _nodeIdToPath.TryRemove(oldNodeId, out _);
+        // Clean up any intermediate mapping — e.g. a remote replace arrived via
+        // PollChanges while the outbox entry was pending, remapping the path to
+        // a different nodeId that we're now replacing with onExists:"replace".
+        if (_pathToNodeId.TryGetValue(localPath, out var currentNodeId)
+            && currentNodeId != oldNodeId && currentNodeId != newNodeId)
+            _nodeIdToPath.TryRemove(currentNodeId, out _);
         _pathToNodeId[localPath] = newNodeId;
         _nodeIdToPath[newNodeId] = localPath;
     }
