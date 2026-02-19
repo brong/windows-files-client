@@ -93,7 +93,7 @@ public sealed class IpcPipeClient : IDisposable
                     {
                         while (!readCts.Token.IsCancellationRequested)
                         {
-                            await Task.Delay(15_000, readCts.Token);
+                            await Task.Delay(5_000, readCts.Token);
                             await SendCommandAsync(new GetStatusCommand(), readCts.Token);
                         }
                     }

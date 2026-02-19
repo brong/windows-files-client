@@ -67,9 +67,8 @@ sealed class ServiceClient : IDisposable
     }
 
     /// <summary>
-    /// Send a ping to detect broken pipe. Fire-and-forget safe.
-    /// If the write fails, the IPC client will detect the dead pipe
-    /// and fire ConnectionChanged(false).
+    /// Send a ping to detect broken pipe. If the write fails,
+    /// immediately transitions to disconnected state.
     /// </summary>
     public async Task CheckConnectionAsync()
     {
@@ -78,7 +77,12 @@ sealed class ServiceClient : IDisposable
             if (_connected)
                 await _client.SendCommandAsync(new GetStatusCommand());
         }
-        catch { /* write failure triggers disconnect detection */ }
+        catch
+        {
+            // Pipe is broken — update state immediately rather than
+            // waiting for the read loop's keepalive to detect it.
+            OnConnectionChanged(false);
+        }
     }
 
     public async Task StopAsync()

@@ -174,8 +174,8 @@ sealed class TrayIcon : IDisposable
             // Rebuild menu items with fresh state each time user opens the menu
             PopulateContextMenu();
             // Kick off a connection check — if the pipe is dead this will
-            // trigger ConnectionChanged(false) shortly after
-            _ = _serviceClient.CheckConnectionAsync();
+            // update state and rebuild the menu immediately after
+            _ = CheckAndRebuildMenuAsync();
         };
 
         _notifyIcon = new NotifyIcon
@@ -253,6 +253,18 @@ sealed class TrayIcon : IDisposable
         {
             DestroyIcon(_currentHIcon);
             _currentHIcon = IntPtr.Zero;
+        }
+    }
+
+    private async Task CheckAndRebuildMenuAsync()
+    {
+        var wasPreviouslyConnected = _serviceClient.IsConnected;
+        await _serviceClient.CheckConnectionAsync();
+        // If the check changed the connection state, rebuild the open menu
+        if (wasPreviouslyConnected != _serviceClient.IsConnected)
+        {
+            PopulateContextMenu();
+            RefreshTooltip();
         }
     }
 
