@@ -5,6 +5,7 @@ namespace FilesClient.Windows;
 public class OutboxProcessor : IDisposable
 {
     private const int MaxConcurrency = 4;
+    private const int MaxAttempts = 10;
 
     private readonly SyncOutbox _outbox;
     private readonly SyncEngine _engine;
@@ -134,7 +135,15 @@ public class OutboxProcessor : IDisposable
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             Console.Error.WriteLine($"Outbox process error for {change.LocalPath ?? change.NodeId}: {ex.Message}");
-            _outbox.MarkFailed(change.Id, ex.Message);
+            if (change.AttemptCount + 1 >= MaxAttempts)
+            {
+                Console.Error.WriteLine($"Outbox: giving up after {change.AttemptCount + 1} attempts: {change.LocalPath ?? change.NodeId}");
+                _outbox.MarkRejected(change.Id, $"Gave up after {change.AttemptCount + 1} attempts: {ex.Message}");
+            }
+            else
+            {
+                _outbox.MarkFailed(change.Id, ex.Message);
+            }
         }
         finally
         {

@@ -80,10 +80,10 @@ sealed class StatusForm : Form
         bottomPanel.Controls.Add(closeButton);
         Controls.Add(bottomPanel);
 
-        // Ensure correct Z-order
-        bottomPanel.BringToFront();
+        // Ensure correct Z-order for docking: edge-docked controls must be
+        // processed before Fill. WinForms docks back-to-front (highest index
+        // first), so Fill must be at the front (index 0, processed last).
         _listView.BringToFront();
-        _headerLabel.BringToFront();
 
         _serviceClient.StatusChanged += () => _dirty = true;
 
