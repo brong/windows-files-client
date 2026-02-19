@@ -127,7 +127,11 @@ internal class SyncRoot : IDisposable
     public void Dispose()
     {
         Disconnect();
-        Unregister();
+        // Do NOT Unregister here — the sync root must stay registered so that
+        // placeholder files remain valid between service restarts. Unregistering
+        // causes File.Exists() to return false for cloud file placeholders
+        // (ERROR_CLOUD_FILE_PROVIDER_NOT_RUNNING), which breaks cache warm start.
+        // Unregister is only called explicitly via Clean() or account removal.
     }
 
     /// <summary>
