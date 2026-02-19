@@ -25,6 +25,7 @@ public static class IpcSerializer
         ["configureLogin"] = typeof(ConfigureLoginCommand),
         ["getOutbox"] = typeof(GetOutboxCommand),
         ["getLoginAccounts"] = typeof(GetLoginAccountsCommand),
+        ["refreshLoginAccounts"] = typeof(RefreshLoginAccountsCommand),
         ["updateLogin"] = typeof(UpdateLoginCommand),
         ["detachAccount"] = typeof(DetachAccountCommand),
         ["refreshAccount"] = typeof(RefreshAccountCommand),

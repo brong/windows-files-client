@@ -684,7 +684,10 @@ sealed class LoginManager : IDisposable
             sessionUrl = session.SessionUrl;
             token = session.Token;
         }
-        return await DiscoverAccountsAsync(sessionUrl, token, ct);
+        Console.WriteLine($"Refreshing accounts for login {loginId} from {sessionUrl}...");
+        var accounts = await DiscoverAccountsAsync(sessionUrl, token, ct);
+        Console.WriteLine($"Refreshed login {loginId}: {accounts.Count} account(s) found");
+        return accounts;
     }
 
     /// <summary>
