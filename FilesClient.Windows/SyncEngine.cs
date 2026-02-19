@@ -228,7 +228,10 @@ public class SyncEngine : IDisposable
         // Track permissions on the home node (sync root folder itself)
         var homeNode = allNodes.FirstOrDefault(n => n.Id == _homeNodeId);
         if (homeNode != null)
+        {
             TrackFolderPermissions(homeNode, _syncRootPath);
+            ApplyWriteProtection(_syncRootPath);
+        }
 
         SaveNodeCache(state);
         ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_IDLE);
@@ -341,6 +344,8 @@ public class SyncEngine : IDisposable
                 }
             }
         }
+
+        ApplyWriteProtections();
 
         DetectAndHydratePinnedDirectories(tree.Select(t => t.localParentPath));
     }
@@ -479,6 +484,8 @@ public class SyncEngine : IDisposable
             Console.WriteLine("State too old, reconciling from server...");
             newState = await ReconcileFromServerAsync(ct);
         }
+
+        ApplyWriteProtections();
 
         // Detect and hydrate pinned directories
         DetectAndHydratePinnedDirectories(directories);
@@ -654,6 +661,8 @@ public class SyncEngine : IDisposable
             }
         }
 
+        ApplyWriteProtections();
+
         return state;
     }
 
@@ -718,15 +727,19 @@ public class SyncEngine : IDisposable
 
                 try
                 {
-                    if (isDirectory)
+                    using (SuspendFolderProtection(Path.GetDirectoryName(oldPath)))
+                    using (SuspendFolderProtection(Path.GetDirectoryName(newPath)))
                     {
-                        Directory.Move(oldPath, newPath);
-                        Console.WriteLine($"  Renamed folder: {oldPath} → {newPath}");
-                    }
-                    else if (File.Exists(oldPath))
-                    {
-                        File.Move(oldPath, newPath);
-                        Console.WriteLine($"  Renamed file: {oldPath} → {newPath}");
+                        if (isDirectory)
+                        {
+                            Directory.Move(oldPath, newPath);
+                            Console.WriteLine($"  Renamed folder: {oldPath} → {newPath}");
+                        }
+                        else if (File.Exists(oldPath))
+                        {
+                            File.Move(oldPath, newPath);
+                            Console.WriteLine($"  Renamed file: {oldPath} → {newPath}");
+                        }
                     }
                     // Re-mark as in-sync after move (cfapi may clear in-sync on rename)
                     SetInSync(newPath);
@@ -737,6 +750,7 @@ public class SyncEngine : IDisposable
                 }
 
                 TrackFolderPermissions(node, newPath);
+                ApplyWriteProtection(newPath);
             }
             else
             {
@@ -745,12 +759,16 @@ public class SyncEngine : IDisposable
                 _nodeIdToPath[node.Id] = newPath;
                 TrackFolderPermissions(node, newPath);
                 if (!Path.Exists(newPath))
-                    _placeholderManager.CreatePlaceholders(parentPath, [node]);
+                {
+                    using (SuspendFolderProtection(parentPath))
+                        _placeholderManager.CreatePlaceholders(parentPath, [node]);
+                }
                 else
                 {
                     try { SetInSync(newPath); }
                     catch { /* not a placeholder — ignore */ }
                 }
+                ApplyWriteProtection(newPath);
             }
         }
 
@@ -776,7 +794,8 @@ public class SyncEngine : IDisposable
             TrackFolderPermissions(node, childPath);
             if (!Path.Exists(childPath))
             {
-                _placeholderManager.CreatePlaceholders(parentPath, [node]);
+                using (SuspendFolderProtection(parentPath))
+                    _placeholderManager.CreatePlaceholders(parentPath, [node]);
 
                 // If this file was created under a pinned directory, hydrate it
                 if (!node.IsFolder && IsUnderPinnedDirectory(childPath))
@@ -793,6 +812,7 @@ public class SyncEngine : IDisposable
                 try { SetInSync(childPath); }
                 catch { /* not a placeholder — ignore */ }
             }
+            ApplyWriteProtection(childPath);
         }
 
         foreach (var destroyedId in changes.Destroyed)
@@ -807,7 +827,9 @@ public class SyncEngine : IDisposable
             {
                 _pathToNodeId.TryRemove(localPath, out _);
                 _readOnlyPaths.TryRemove(localPath, out _);
-                DeleteLocalItem(localPath);
+                var destroyParentDir = Path.GetDirectoryName(localPath);
+                using (destroyParentDir != null ? SuspendFolderProtection(destroyParentDir) : default)
+                    DeleteLocalItem(localPath);
             }
             else
             {
@@ -836,10 +858,13 @@ public class SyncEngine : IDisposable
                 Console.WriteLine($"Ignoring local change in read-only folder: {change.FullPath}");
                 try
                 {
-                    if (isDirectory && Directory.Exists(change.FullPath))
-                        Directory.Delete(change.FullPath, recursive: true);
-                    else if (!isDirectory && File.Exists(change.FullPath))
-                        File.Delete(change.FullPath);
+                    using (SuspendFolderProtection(parentDir))
+                    {
+                        if (isDirectory && Directory.Exists(change.FullPath))
+                            Directory.Delete(change.FullPath, recursive: true);
+                        else if (!isDirectory && File.Exists(change.FullPath))
+                            File.Delete(change.FullPath);
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -1515,10 +1540,60 @@ public class SyncEngine : IDisposable
             _readOnlyPaths[localPath] = 0;
             SetDirectoryReadOnly(localPath, true);
         }
-        else
+        else if (_readOnlyPaths.TryRemove(localPath, out _))
         {
-            if (_readOnlyPaths.TryRemove(localPath, out _))
-                SetDirectoryReadOnly(localPath, false);
+            SetDirectoryReadOnly(localPath, false);
+            SyncRoot.SetDirectoryWriteProtection(localPath, false);
+        }
+    }
+
+    /// <summary>
+    /// Apply NTFS DENY ACLs to all tracked read-only folders.
+    /// Called after bulk operations (BuildTree, Reconcile) that defer ACL application.
+    /// </summary>
+    private void ApplyWriteProtections()
+    {
+        foreach (var path in _readOnlyPaths.Keys)
+            SyncRoot.SetDirectoryWriteProtection(path, true);
+    }
+
+    /// <summary>
+    /// Apply NTFS DENY ACL to a single folder if it is tracked as read-only.
+    /// Called after incremental operations (PollChanges create/update).
+    /// </summary>
+    private void ApplyWriteProtection(string path)
+    {
+        if (_readOnlyPaths.ContainsKey(path))
+            SyncRoot.SetDirectoryWriteProtection(path, true);
+    }
+
+    /// <summary>
+    /// Temporarily lift the DENY ACL on a folder so the sync engine can
+    /// create/delete placeholders.  Returns a disposable scope that restores
+    /// the ACL when disposed.
+    /// </summary>
+    private SuspendProtectionScope SuspendFolderProtection(string? folderPath)
+    {
+        return new SuspendProtectionScope(folderPath, _readOnlyPaths);
+    }
+
+    private struct SuspendProtectionScope : IDisposable
+    {
+        private readonly string? _path;
+        private readonly bool _wasProtected;
+
+        public SuspendProtectionScope(string? path, ConcurrentDictionary<string, byte> readOnlyPaths)
+        {
+            _path = path;
+            _wasProtected = path != null && readOnlyPaths.ContainsKey(path);
+            if (_wasProtected)
+                SyncRoot.SetDirectoryWriteProtection(path!, false);
+        }
+
+        public void Dispose()
+        {
+            if (_wasProtected && _path != null)
+                SyncRoot.SetDirectoryWriteProtection(_path, true);
         }
     }
 
@@ -1825,6 +1900,14 @@ public class SyncEngine : IDisposable
 
     public void Dispose()
     {
+        // Remove NTFS DENY ACLs so folders aren't left locked after shutdown
+        foreach (var path in _readOnlyPaths.Keys)
+        {
+            SyncRoot.SetDirectoryWriteProtection(path, false);
+            SetDirectoryReadOnly(path, false);
+        }
+        _readOnlyPaths.Clear();
+
         ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_DISCONNECTED);
 
         // Cancel all in-progress hydrations

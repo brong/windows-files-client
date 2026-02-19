@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Security.AccessControl;
 using System.Security.Principal;
 using Windows.Security.Cryptography;
 using Windows.Storage;
@@ -158,7 +159,10 @@ internal class SyncRoot : IDisposable
         // 2. Clean up NavPane / shell registry entries
         NavPaneIntegration.CleanupStaleEntries(ProviderId);
 
-        // 3. Brief delay for the cloud filter driver to release handles after unregister
+        // 3. Remove NTFS DENY ACLs so files can be deleted
+        RemoveWriteProtectionRecursive(syncRootPath);
+
+        // 4. Brief delay for the cloud filter driver to release handles after unregister
         Thread.Sleep(1000);
 
         // 4. Delete all local files in the sync root directory.
@@ -211,6 +215,9 @@ internal class SyncRoot : IDisposable
         }
 
         NavPaneIntegration.CleanupStaleEntries(ProviderId);
+
+        // Remove NTFS DENY ACLs so files can be deleted/detached
+        RemoveWriteProtectionRecursive(syncRootPath);
 
         // Brief delay for the cloud filter driver to release handles
         Thread.Sleep(1000);
@@ -344,6 +351,63 @@ internal class SyncRoot : IDisposable
             {
                 Console.Error.WriteLine($"  Failed to delete {(isDirectory ? "directory " : "")}{path}: {ex.Message}");
             }
+        }
+    }
+
+    /// <summary>
+    /// Add or remove a DENY ACL on a directory to prevent the current user from
+    /// creating files/subdirectories inside it.  Uses InheritanceFlags.None so
+    /// only this directory is affected — writable children are not impacted.
+    /// </summary>
+    internal static void SetDirectoryWriteProtection(string path, bool protect)
+    {
+        try
+        {
+            if (!Directory.Exists(path)) return;
+            var dirInfo = new DirectoryInfo(path);
+            var acl = dirInfo.GetAccessControl();
+            var currentUser = WindowsIdentity.GetCurrent().User!;
+            var rule = new FileSystemAccessRule(
+                currentUser,
+                FileSystemRights.WriteData | FileSystemRights.AppendData | FileSystemRights.DeleteSubdirectoriesAndFiles,
+                InheritanceFlags.None,
+                PropagationFlags.None,
+                AccessControlType.Deny);
+
+            if (protect)
+                acl.AddAccessRule(rule);
+            else
+                acl.RemoveAccessRule(rule);
+
+            dirInfo.SetAccessControl(acl);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Failed to {(protect ? "set" : "remove")} write protection on {path}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Remove DENY ACLs from all subdirectories under the given root.
+    /// Best-effort — exceptions on individual directories are swallowed.
+    /// </summary>
+    internal static void RemoveWriteProtectionRecursive(string rootPath)
+    {
+        if (!Directory.Exists(rootPath)) return;
+        try
+        {
+            foreach (var dir in Directory.EnumerateDirectories(rootPath, "*", SearchOption.AllDirectories))
+            {
+                try { SetDirectoryWriteProtection(dir, false); }
+                catch { /* best-effort */ }
+            }
+            // Also remove from root itself
+            try { SetDirectoryWriteProtection(rootPath, false); }
+            catch { /* best-effort */ }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Failed to remove write protections under {rootPath}: {ex.Message}");
         }
     }
 }
