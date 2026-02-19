@@ -68,7 +68,8 @@ sealed class ServiceClient : IDisposable
 
     /// <summary>
     /// Send a ping to detect broken pipe. If the write fails,
-    /// immediately transitions to disconnected state.
+    /// transitions to disconnected state (unless the pipe client
+    /// has already reconnected by the time the continuation runs).
     /// </summary>
     public async Task CheckConnectionAsync()
     {
@@ -79,9 +80,11 @@ sealed class ServiceClient : IDisposable
         }
         catch
         {
-            // Pipe is broken — update state immediately rather than
-            // waiting for the read loop's keepalive to detect it.
-            OnConnectionChanged(false);
+            // Only fire disconnect if the pipe client hasn't already
+            // reconnected — avoids overwriting a successful reconnection
+            // with a stale disconnect from this earlier failed write.
+            if (!_client.IsConnected)
+                OnConnectionChanged(false);
         }
     }
 
