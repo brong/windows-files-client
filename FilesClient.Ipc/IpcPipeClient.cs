@@ -75,9 +75,11 @@ public sealed class IpcPipeClient : IDisposable
     {
         while (!ct.IsCancellationRequested)
         {
+            bool wasConnected = false;
             try
             {
                 await ConnectAsync(ct);
+                wasConnected = true;
                 ConnectionChanged?.Invoke(true);
 
                 // Request initial status
@@ -137,6 +139,11 @@ public sealed class IpcPipeClient : IDisposable
             {
                 break;
             }
+            catch (TimeoutException)
+            {
+                // ConnectAsync timed out — service not available yet, retry immediately
+                // (the connect timeout already served as the wait)
+            }
             catch (Exception ex)
             {
                 Console.Error.WriteLine($"[IPC Client] Connection error: {ex.Message}");
@@ -144,9 +151,12 @@ public sealed class IpcPipeClient : IDisposable
 
             // Disconnected — clean up and retry
             Cleanup();
-            ConnectionChanged?.Invoke(false);
+            if (wasConnected)
+                ConnectionChanged?.Invoke(false);
 
-            if (!ct.IsCancellationRequested)
+            // Only delay before retry if we had a successful connection that dropped —
+            // if we never connected (timeout), the connect attempt already waited
+            if (wasConnected && !ct.IsCancellationRequested)
             {
                 try { await Task.Delay(IpcConstants.ReconnectDelayMs, ct); }
                 catch (OperationCanceledException) { break; }
