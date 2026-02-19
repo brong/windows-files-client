@@ -93,6 +93,18 @@ public class OutboxProcessor : IDisposable
             // App shutdown — remove from processing so state is clean
             _outbox.MarkFailed(change.Id, "Cancelled");
         }
+        catch (HttpRequestException ex) when (ex.Message.Contains("copying content to a stream"))
+        {
+            // File was still being written when we opened the stream — retry silently
+            Console.WriteLine($"Outbox: file still being written for {Path.GetFileName(change.LocalPath)}, will retry");
+            _outbox.MarkRetry(change.Id);
+        }
+        catch (IOException ex) when (change.IsDirtyContent)
+        {
+            // File locked or still being copied — retry silently
+            Console.WriteLine($"Outbox: file not ready for {Path.GetFileName(change.LocalPath)}, will retry ({ex.Message})");
+            _outbox.MarkRetry(change.Id);
+        }
         catch (Exception ex)
         {
             Console.Error.WriteLine($"Outbox process error for {change.LocalPath ?? change.NodeId}: {ex.Message}");
