@@ -318,20 +318,6 @@ sealed class TrayIcon : IDisposable
         _contextMenu.Items.Add(new ToolStripSeparator());
         _contextMenu.Items.Add("Manage accounts...", null, (_, _) => OpenManageAccountsForm());
 
-        if (Program.IsDebugMode)
-        {
-            var consoleLabel = Program.IsDebugConsoleVisible()
-                ? "Hide debug console"
-                : "Show debug console";
-            _contextMenu.Items.Add(consoleLabel, null, (_, _) =>
-            {
-                if (Program.IsDebugConsoleVisible())
-                    Program.HideDebugConsole();
-                else
-                    Program.ShowDebugConsole();
-            });
-        }
-
         _contextMenu.Items.Add(new ToolStripSeparator());
 
         _contextMenu.Items.Add("Exit", null, (_, _) =>
