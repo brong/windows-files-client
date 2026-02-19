@@ -131,7 +131,7 @@ public class StubJmapClient : IJmapClient
         return Task.CompletedTask;
     }
 
-    public Task<FileNode> CreateFileNodeAsync(string parentId, string? blobId, string name, string? type = null, CancellationToken ct = default)
+    public Task<FileNode> CreateFileNodeAsync(string parentId, string? blobId, string name, string? type = null, string? onExists = null, CancellationToken ct = default)
     {
         var id = $"stub-file-{_nextId++}";
         var size = blobId != null && _blobs.TryGetValue(blobId, out var data) ? data.Length : 0;

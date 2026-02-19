@@ -205,7 +205,7 @@ public class OutboxProcessor : IDisposable
 
         Console.WriteLine($"Outbox: creating folder {folderName}");
         var node = await _queue.EnqueueAsync(QueuePriority.Background,
-            () => _jmapClient.CreateFileNodeAsync(parentId, null, folderName, null, ct), ct);
+            () => _jmapClient.CreateFileNodeAsync(parentId, null, folderName, null, null, ct), ct);
 
         SyncEngine.ConvertToPlaceholder(change.LocalPath, node.Id, isDirectory: true);
         _engine.UpdateMappings(change.LocalPath, null, node.Id);
@@ -290,7 +290,7 @@ public class OutboxProcessor : IDisposable
             var blobId = await _queue.EnqueueAsync(QueuePriority.Background,
                 () => _jmapClient.UploadBlobAsync(stream, contentType, uploadCts2.Token), ct);
             var node = await _queue.EnqueueAsync(QueuePriority.Background,
-                () => _jmapClient.CreateFileNodeAsync(parentId, blobId, fileName, contentType, ct), ct);
+                () => _jmapClient.CreateFileNodeAsync(parentId, blobId, fileName, contentType, "replace", ct), ct);
 
             SyncEngine.ConvertToPlaceholder(change.LocalPath, node.Id);
             _engine.UpdateMappings(change.LocalPath, null, node.Id);

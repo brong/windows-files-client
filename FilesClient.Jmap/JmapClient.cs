@@ -352,17 +352,21 @@ public class JmapClient : IJmapClient
         return upload.BlobId;
     }
 
-    public async Task<FileNode> CreateFileNodeAsync(string parentId, string? blobId, string name, string? type = null, CancellationToken ct = default)
+    public async Task<FileNode> CreateFileNodeAsync(string parentId, string? blobId, string name, string? type = null, string? onExists = null, CancellationToken ct = default)
     {
-        var setResponse = await CallAsync<SetResponse>(
-            FileNodeUsing, "FileNode/set", new
+        var args = new Dictionary<string, object?>
+        {
+            ["accountId"] = AccountId,
+            ["create"] = new Dictionary<string, object>
             {
-                accountId = AccountId,
-                create = new Dictionary<string, object>
-                {
-                    ["c0"] = new { parentId, blobId, name, type },
-                },
-            }, ct);
+                ["c0"] = new { parentId, blobId, name, type },
+            },
+        };
+        if (onExists != null)
+            args["onExists"] = onExists;
+
+        var setResponse = await CallAsync<SetResponse>(
+            FileNodeUsing, "FileNode/set", args, ct);
 
         if (setResponse.NotCreated != null && setResponse.NotCreated.TryGetValue("c0", out var setError))
             throw new InvalidOperationException($"FileNode/set create failed: {setError.Type} — {setError.Description}");
