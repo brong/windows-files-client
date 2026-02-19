@@ -452,6 +452,35 @@ public class SyncOutbox : IDisposable
             return (_entries.Values.ToArray(), new HashSet<Guid>(_processingIds));
     }
 
+    /// <summary>
+    /// Atomically cancel a pending delete that hasn't started processing.
+    /// Returns true if the delete was found and removed.
+    /// </summary>
+    public bool TryCancelDelete(string nodeId)
+    {
+        bool cancelled;
+        lock (_lock)
+        {
+            if (_byNodeId.TryGetValue(nodeId, out var id)
+                && _entries.TryGetValue(id, out var entry)
+                && entry.IsDeleted
+                && !_processingIds.Contains(id))
+            {
+                RemoveEntryLocked(entry);
+                MarkDirtyAndSignal();
+                cancelled = true;
+            }
+            else
+            {
+                cancelled = false;
+            }
+        }
+
+        if (cancelled)
+            RaisePendingCountChanged();
+        return cancelled;
+    }
+
     /// <summary>Check if there's a pending change for the given nodeId.</summary>
     public bool HasPendingForNodeId(string nodeId)
     {

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using FilesClient.Jmap;
 
 namespace FilesClient.Windows;
@@ -18,6 +19,13 @@ public class OutboxProcessor : IDisposable
     private readonly SemaphoreSlim _workerSlots = new(MaxConcurrency, MaxConcurrency);
     private readonly object _workerLock = new();
     private readonly List<Task> _workerTasks = new();
+
+    // Recycle Bin restore support: track recently trashed items so we can
+    // restore from server trash instead of re-uploading.
+    private record TrashedInfo(string NodeId, string? BlobId);
+    private readonly ConcurrentDictionary<string, TrashedInfo> _recentlyTrashed
+        = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, string> _trashedPathByNodeId = new();
 
     public OutboxProcessor(SyncOutbox outbox, SyncEngine engine, IJmapClient jmapClient, JmapQueue queue)
     {
@@ -41,6 +49,17 @@ public class OutboxProcessor : IDisposable
     public void SetTrashNodeId(string? trashNodeId)
     {
         _trashNodeId = trashNodeId;
+    }
+
+    /// <summary>
+    /// Record that a node was trashed locally (sent to Recycle Bin).
+    /// Called from SyncEngine.HandleDeleteRequestAsync so we can restore
+    /// from server trash instead of re-uploading if the user restores.
+    /// </summary>
+    public void RecordTrashed(string localPath, string nodeId)
+    {
+        _recentlyTrashed[localPath] = new TrashedInfo(nodeId, null);
+        _trashedPathByNodeId[nodeId] = localPath;
     }
 
     private async Task DispatchLoop(CancellationToken ct)
@@ -184,6 +203,17 @@ public class OutboxProcessor : IDisposable
 
         var name = change.LocalPath != null ? Path.GetFileName(change.LocalPath) : change.NodeId;
 
+        // Fetch blobId before trashing so we can use it for restore from Recycle Bin
+        string? blobId = null;
+        try
+        {
+            var nodes = await _queue.EnqueueAsync(QueuePriority.Background,
+                () => _jmapClient.GetFileNodesAsync([change.NodeId], ct), ct);
+            if (nodes.Length > 0)
+                blobId = nodes[0].BlobId;
+        }
+        catch { /* non-critical — best effort for restore support */ }
+
         try
         {
             if (_trashNodeId != null)
@@ -202,6 +232,14 @@ public class OutboxProcessor : IDisposable
         catch (Exception ex) when (ex.Message.Contains("notFound") || ex.Message.Contains("404"))
         {
             Console.WriteLine($"Outbox: node {change.NodeId} already gone on server");
+        }
+
+        // Update _recentlyTrashed with the blobId we fetched
+        if (blobId != null && _trashedPathByNodeId.TryGetValue(change.NodeId, out var originalPath))
+        {
+            _recentlyTrashed.AddOrUpdate(originalPath,
+                new TrashedInfo(change.NodeId, blobId),
+                (_, old) => old with { BlobId = blobId });
         }
     }
 
@@ -287,7 +325,73 @@ public class OutboxProcessor : IDisposable
         }
         else
         {
-            // New file
+            // New file — check if this is a Recycle Bin restore
+            if (_recentlyTrashed.TryRemove(change.LocalPath, out var trashedInfo))
+            {
+                _trashedPathByNodeId.TryRemove(trashedInfo.NodeId, out _);
+                Console.WriteLine($"Outbox: detected restore from Recycle Bin for {fileName} (node {trashedInfo.NodeId})");
+
+                var restoreParentId = _engine.ResolveParentNodeId(parentDir);
+                if (restoreParentId == null)
+                {
+                    Console.WriteLine($"Outbox: parent not yet available for {fileName}, will retry");
+                    // Put the trashed info back so retry finds it
+                    _recentlyTrashed[change.LocalPath] = trashedInfo;
+                    _trashedPathByNodeId[trashedInfo.NodeId] = change.LocalPath;
+                    return false;
+                }
+
+                // Step 1: Quick undo — cancel pending delete if it hasn't started processing
+                if (_outbox.TryCancelDelete(trashedInfo.NodeId))
+                {
+                    Console.WriteLine($"Outbox: cancelled pending delete for {trashedInfo.NodeId}, restoring mappings");
+                    SyncEngine.ConvertToPlaceholder(change.LocalPath, trashedInfo.NodeId);
+                    _engine.UpdateMappings(change.LocalPath, null, trashedInfo.NodeId);
+                    SyncEngine.SetInSync(change.LocalPath);
+                    return true;
+                }
+
+                // Step 2: Move back from server trash
+                try
+                {
+                    await _queue.EnqueueAsync(QueuePriority.Background,
+                        () => _jmapClient.MoveFileNodeAsync(trashedInfo.NodeId, restoreParentId, fileName, ct: ct), ct);
+                    Console.WriteLine($"Outbox: restored {fileName} from server trash (node {trashedInfo.NodeId})");
+                    SyncEngine.ConvertToPlaceholder(change.LocalPath, trashedInfo.NodeId);
+                    _engine.UpdateMappings(change.LocalPath, null, trashedInfo.NodeId);
+                    SyncEngine.SetInSync(change.LocalPath);
+                    return true;
+                }
+                catch (Exception ex) when (ex.Message.Contains("notFound") || ex.Message.Contains("404"))
+                {
+                    Console.WriteLine($"Outbox: node {trashedInfo.NodeId} not found in trash, trying blobId create");
+                }
+
+                // Step 3: Create with existing blobId (node destroyed but blob may survive)
+                if (trashedInfo.BlobId != null)
+                {
+                    try
+                    {
+                        var restoredNode = await _queue.EnqueueAsync(QueuePriority.Background,
+                            () => _jmapClient.CreateFileNodeAsync(restoreParentId, trashedInfo.BlobId, fileName, contentType, "replace", ct), ct);
+                        Console.WriteLine($"Outbox: recreated {fileName} with existing blobId → node {restoredNode.Id}");
+                        SyncEngine.ConvertToPlaceholder(change.LocalPath, restoredNode.Id);
+                        _engine.UpdateMappings(change.LocalPath, null, restoredNode.Id);
+                        _engine.RecordRecentUpload(change.LocalPath);
+                        SyncEngine.SetInSync(change.LocalPath);
+                        return true;
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Outbox: blobId create failed ({ex.Message}), falling back to upload");
+                    }
+                }
+
+                // Step 4: Fall through to normal upload
+                Console.WriteLine($"Outbox: falling back to full upload for {fileName}");
+            }
+
+            // New file — normal upload path
             var parentId = _engine.ResolveParentNodeId(parentDir);
             if (parentId == null)
             {

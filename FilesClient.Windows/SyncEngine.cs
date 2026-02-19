@@ -977,11 +977,13 @@ public class SyncEngine : IDisposable
         foreach (var (descPath, descNodeId) in descendants)
         {
             _outbox.EnqueueDelete(descPath, descNodeId);
+            _outboxProcessor.RecordTrashed(descPath, descNodeId);
             _pathToNodeId.TryRemove(descPath, out _);
             _nodeIdToPath.TryRemove(descNodeId, out _);
         }
 
         _outbox.EnqueueDelete(path, nodeId);
+        _outboxProcessor.RecordTrashed(path, nodeId);
         _pathToNodeId.TryRemove(path, out _);
         _nodeIdToPath.TryRemove(nodeId, out _);
         return Task.FromResult(true);
