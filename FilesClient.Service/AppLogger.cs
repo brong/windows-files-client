@@ -1,7 +1,7 @@
 using System.Diagnostics;
 using System.Text;
 
-namespace FilesClient.App;
+namespace FilesClient.Service;
 
 /// <summary>
 /// Redirects Console.Out and Console.Error to Windows Event Log.

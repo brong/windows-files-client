@@ -1,14 +1,19 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <OutputType>WinExe</OutputType>
+    <OutputType>Exe</OutputType>
     <TargetFramework>net9.0-windows10.0.22621</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <UseWindowsForms>true</UseWindowsForms>
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="9.*" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\FilesClient.Jmap\FilesClient.Jmap.csproj" />
+    <ProjectReference Include="..\FilesClient.Windows\FilesClient.Windows.csproj" />
     <ProjectReference Include="..\FilesClient.Ipc\FilesClient.Ipc.csproj" />
   </ItemGroup>
 

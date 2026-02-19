@@ -1,7 +1,7 @@
 using FilesClient.Jmap;
 using FilesClient.Windows;
 
-namespace FilesClient.App;
+namespace FilesClient.Service;
 
 /// <summary>
 /// Orchestrates multiple JMAP logins, discovers FileNode-capable accounts
@@ -563,7 +563,7 @@ sealed class LoginManager : IDisposable
             return _supervisors.Sum(s => s.PendingCount);
     }
 
-    private static string SanitizeFolderName(string name)
+    internal static string SanitizeFolderName(string name)
     {
         var invalid = Path.GetInvalidFileNameChars();
         var chars = name.ToCharArray();

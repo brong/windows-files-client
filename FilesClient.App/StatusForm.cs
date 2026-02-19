@@ -1,22 +1,22 @@
 using System.Drawing;
-using FilesClient.Windows;
+using FilesClient.Ipc;
 
 namespace FilesClient.App;
 
 sealed class StatusForm : Form
 {
-    private readonly SyncOutbox _outbox;
+    private readonly string _accountId;
+    private readonly ServiceClient _serviceClient;
     private readonly Label _headerLabel;
     private readonly ListView _listView;
     private readonly System.Windows.Forms.Timer _refreshTimer;
     private bool _dirty = true;
     private bool _hasActiveUploads;
-    private SyncStatus _currentStatus;
 
-    public StatusForm(string accountLabel, SyncOutbox outbox, SyncStatus initialStatus)
+    public StatusForm(string accountLabel, string accountId, ServiceClient serviceClient)
     {
-        _outbox = outbox;
-        _currentStatus = initialStatus;
+        _accountId = accountId;
+        _serviceClient = serviceClient;
 
         Font = new Font("Segoe UI", 9f);
         AutoScaleMode = AutoScaleMode.Dpi;
@@ -30,7 +30,7 @@ sealed class StatusForm : Form
         // Account header
         _headerLabel = new Label
         {
-            Text = FormatHeader(accountLabel, initialStatus),
+            Text = FormatHeader(accountLabel),
             Dock = DockStyle.Top,
             Height = 30,
             Padding = new Padding(8, 8, 8, 0),
@@ -79,33 +79,35 @@ sealed class StatusForm : Form
         bottomPanel.Controls.Add(closeButton);
         Controls.Add(bottomPanel);
 
-        // Ensure correct Z-order: header top, bottom panel bottom, list fills middle
+        // Ensure correct Z-order
         bottomPanel.BringToFront();
         _listView.BringToFront();
         _headerLabel.BringToFront();
 
-        // Subscribe to outbox changes
-        _outbox.PendingCountChanged += _ => _dirty = true;
+        _serviceClient.StatusChanged += () => _dirty = true;
 
         // Refresh timer
         _refreshTimer = new System.Windows.Forms.Timer { Interval = 500 };
-        _refreshTimer.Tick += (_, _) =>
-        {
-            if (_dirty || _hasActiveUploads)
-            {
-                _dirty = false;
-                RefreshList();
-            }
-        };
+        _refreshTimer.Tick += OnRefreshTick;
         _refreshTimer.Start();
     }
 
-    public void UpdateStatus(SyncStatus status)
+    private async void OnRefreshTick(object? sender, EventArgs e)
     {
-        _currentStatus = status;
-        var parts = _headerLabel.Text.Split(new[] { "  " }, 2, StringSplitOptions.None);
-        var account = parts.Length > 0 ? parts[0].Trim() : "";
-        _headerLabel.Text = FormatHeader(account, status);
+        if (!_dirty && !_hasActiveUploads)
+            return;
+
+        _dirty = false;
+
+        try
+        {
+            var snapshot = await _serviceClient.GetOutboxAsync(_accountId);
+            RefreshList(snapshot.Entries);
+        }
+        catch
+        {
+            // IPC not available — leave list as-is
+        }
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
@@ -123,23 +125,19 @@ sealed class StatusForm : Form
     {
         base.OnVisibleChanged(e);
         if (Visible)
-        {
-            _dirty = false;
-            RefreshList();
-        }
+            _dirty = true;
     }
 
-    private void RefreshList()
+    private void RefreshList(List<OutboxEntry> entries)
     {
-        var (snapshot, processingIds) = _outbox.GetSnapshot();
         var now = DateTime.UtcNow;
 
         _listView.BeginUpdate();
         _listView.Items.Clear();
 
         // Sort: most upload progress first, then oldest first
-        var sorted = snapshot.OrderByDescending(e =>
-            processingIds.Contains(e.Id) ? (_outbox.GetProgress(e.Id) ?? -1) : -2)
+        var sorted = entries.OrderByDescending(e =>
+            e.IsProcessing ? (e.UploadProgress ?? -1) : -2)
             .ThenBy(e => e.CreatedAt);
 
         foreach (var entry in sorted)
@@ -149,12 +147,11 @@ sealed class StatusForm : Form
                 : entry.NodeId ?? "(unknown)";
 
             var action = DeriveAction(entry);
-            var isProcessing = processingIds.Contains(entry.Id);
-            int? progress = null;
             string status;
-            if (isProcessing)
+            int? progress = null;
+            if (entry.IsProcessing)
             {
-                progress = _outbox.GetProgress(entry.Id);
+                progress = entry.UploadProgress;
                 status = progress.HasValue ? "" : "Syncing...";
             }
             else
@@ -169,7 +166,7 @@ sealed class StatusForm : Form
                 statusSubItem.Tag = progress.Value;
             item.SubItems.Add(FormatRelativeTime(entry.UpdatedAt, now));
 
-            // Tooltip: full path + progress + last error
+            // Tooltip
             var tooltip = entry.LocalPath ?? entry.NodeId ?? "";
             if (progress.HasValue)
                 tooltip += $"\nUploading {progress.Value}%";
@@ -177,8 +174,8 @@ sealed class StatusForm : Form
                 tooltip += $"\nError: {entry.LastError}";
             item.ToolTipText = tooltip;
 
-            // Color: blue for active sync, red for errors
-            if (isProcessing)
+            // Color
+            if (entry.IsProcessing)
                 item.ForeColor = Color.DodgerBlue;
             else if (entry.LastError != null)
                 item.ForeColor = Color.Red;
@@ -187,7 +184,22 @@ sealed class StatusForm : Form
         }
 
         _listView.EndUpdate();
-        _hasActiveUploads = processingIds.Count > 0;
+        _hasActiveUploads = entries.Any(e => e.IsProcessing);
+
+        // Update header status from account info
+        var account = _serviceClient.Accounts.FirstOrDefault(a => a.AccountId == _accountId);
+        if (account != null)
+        {
+            var indicator = account.Status switch
+            {
+                AccountStatus.Idle => "\u25cf Connected",
+                AccountStatus.Syncing => "\u25cf Syncing",
+                AccountStatus.Disconnected => "\u25cb Offline",
+                AccountStatus.Error => "\u25cf Error",
+                _ => "",
+            };
+            _headerLabel.Text = $"  {account.Username}    {indicator}";
+        }
     }
 
     private void OnDrawSubItem(object? sender, DrawListViewSubItemEventArgs e)
@@ -197,20 +209,16 @@ sealed class StatusForm : Form
             var g = e.Graphics!;
             var bounds = e.Bounds;
 
-            // Clear cell background
             using (var bgBrush = new SolidBrush(_listView.BackColor))
                 g.FillRectangle(bgBrush, bounds);
 
-            // Thin progress bar centered vertically
             var barHeight = Math.Max(4, bounds.Height / 3);
             var barY = bounds.Y + (bounds.Height - barHeight) / 2;
             var trackRect = new Rectangle(bounds.X + 4, barY, bounds.Width - 8, barHeight);
 
-            // Track
             using (var trackBrush = new SolidBrush(Color.FromArgb(228, 228, 228)))
                 g.FillRectangle(trackBrush, trackRect);
 
-            // Fill
             if (percent > 0)
             {
                 var fillWidth = (int)(trackRect.Width * percent / 100.0);
@@ -225,7 +233,7 @@ sealed class StatusForm : Form
         }
     }
 
-    private static string DeriveAction(PendingChange entry)
+    private static string DeriveAction(OutboxEntry entry)
     {
         if (entry.IsDeleted)
             return "Delete";
@@ -238,7 +246,7 @@ sealed class StatusForm : Form
         return "Sync";
     }
 
-    private static string DeriveStatus(PendingChange entry, DateTime now)
+    private static string DeriveStatus(OutboxEntry entry, DateTime now)
     {
         if (entry.AttemptCount > 0 && entry.LastError != null)
             return $"Error ({entry.AttemptCount})";
@@ -263,16 +271,8 @@ sealed class StatusForm : Form
         return utcTime.ToLocalTime().ToString("g");
     }
 
-    private static string FormatHeader(string account, SyncStatus status)
+    private static string FormatHeader(string account)
     {
-        var indicator = status switch
-        {
-            SyncStatus.Idle => "\u25cf Connected",
-            SyncStatus.Syncing => "\u25cf Syncing",
-            SyncStatus.Disconnected => "\u25cb Offline",
-            SyncStatus.Error => "\u25cf Error",
-            _ => "",
-        };
-        return $"  {account}    {indicator}";
+        return $"  {account}";
     }
 }

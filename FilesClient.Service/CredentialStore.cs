@@ -2,7 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Windows.Security.Credentials;
 
-namespace FilesClient.App;
+namespace FilesClient.Service;
 
 /// <summary>
 /// Persists login credentials (token + session URL) in Windows Credential Manager

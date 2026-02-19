@@ -2,7 +2,7 @@ using System.Threading.Channels;
 using FilesClient.Jmap;
 using FilesClient.Windows;
 
-namespace FilesClient.App;
+namespace FilesClient.Service;
 
 /// <summary>
 /// Manages the sync lifecycle for a single JMAP account:

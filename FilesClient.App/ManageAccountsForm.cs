@@ -1,12 +1,11 @@
 using System.Drawing;
-using FilesClient.Windows;
+using FilesClient.Ipc;
 
 namespace FilesClient.App;
 
 sealed class ManageAccountsForm : Form
 {
-    private readonly LoginManager _loginManager;
-    private readonly string? _iconPath;
+    private readonly ServiceClient _serviceClient;
     private readonly ListView _listView;
     private readonly Button _addButton;
     private readonly Button _cleanUpButton;
@@ -14,10 +13,9 @@ sealed class ManageAccountsForm : Form
     private readonly Button _configureButton;
     private readonly System.Windows.Forms.Timer _refreshTimer;
 
-    public ManageAccountsForm(LoginManager loginManager, string? iconPath)
+    public ManageAccountsForm(ServiceClient serviceClient)
     {
-        _loginManager = loginManager;
-        _iconPath = iconPath;
+        _serviceClient = serviceClient;
 
         Font = new Font("Segoe UI", 9f);
         AutoScaleMode = AutoScaleMode.Dpi;
@@ -113,7 +111,7 @@ sealed class ManageAccountsForm : Form
         Controls.Add(bottomPanel);
         Controls.Add(_listView);
 
-        _loginManager.AccountsChanged += () =>
+        _serviceClient.AccountsChanged += () =>
         {
             if (InvokeRequired)
                 BeginInvoke(RefreshList);
@@ -130,33 +128,33 @@ sealed class ManageAccountsForm : Form
 
     private void RefreshList()
     {
-        var supervisors = _loginManager.Supervisors;
+        var accounts = _serviceClient.Accounts;
 
         // Preserve selection across refresh
         var selectedAccountId = (_listView.SelectedItems.Count > 0
-            ? (_listView.SelectedItems[0].Tag as AccountSupervisor)?.AccountId
+            ? (_listView.SelectedItems[0].Tag as AccountInfo)?.AccountId
             : null);
 
         _listView.BeginUpdate();
         _listView.Items.Clear();
 
-        foreach (var s in supervisors)
+        foreach (var a in accounts)
         {
-            var statusText = s.Status switch
+            var statusText = a.Status switch
             {
-                SyncStatus.Idle when s.PendingCount > 0 => $"{s.PendingCount} pending",
-                SyncStatus.Idle => "Up to date",
-                SyncStatus.Syncing => "Syncing",
-                SyncStatus.Error => "Error",
-                SyncStatus.Disconnected => "Offline",
+                AccountStatus.Idle when a.PendingCount > 0 => $"{a.PendingCount} pending",
+                AccountStatus.Idle => "Up to date",
+                AccountStatus.Syncing => "Syncing",
+                AccountStatus.Error => "Error",
+                AccountStatus.Disconnected => "Offline",
                 _ => "Unknown",
             };
 
-            var item = new ListViewItem(s.DisplayName);
-            item.SubItems.Add(s.SyncRootPath);
+            var item = new ListViewItem(a.DisplayName);
+            item.SubItems.Add(a.SyncRootPath);
             item.SubItems.Add(statusText);
-            item.Tag = s;
-            if (s.AccountId == selectedAccountId)
+            item.Tag = a;
+            if (a.AccountId == selectedAccountId)
                 item.Selected = true;
             _listView.Items.Add(item);
         }
@@ -175,7 +173,7 @@ sealed class ManageAccountsForm : Form
 
     private void OnAddClicked(object? sender, EventArgs e)
     {
-        using var addForm = new AddAccountForm(_loginManager, _iconPath);
+        using var addForm = new AddAccountForm(_serviceClient);
         addForm.ShowDialog(this);
     }
 
@@ -184,14 +182,14 @@ sealed class ManageAccountsForm : Form
         if (_listView.SelectedItems.Count == 0)
             return;
 
-        var supervisor = _listView.SelectedItems[0].Tag as AccountSupervisor;
-        if (supervisor == null)
+        var account = _listView.SelectedItems[0].Tag as AccountInfo;
+        if (account == null)
             return;
 
         var result = MessageBox.Show(
-            $"Clean up {supervisor.DisplayName}?\n\n" +
+            $"Clean up {account.DisplayName}?\n\n" +
             "This will stop syncing, unregister the sync root, and delete all local files in:\n" +
-            $"{supervisor.SyncRootPath}",
+            $"{account.SyncRootPath}",
             "Clean Up Account",
             MessageBoxButtons.YesNo,
             MessageBoxIcon.Warning);
@@ -203,7 +201,10 @@ sealed class ManageAccountsForm : Form
         {
             _cleanUpButton.Enabled = false;
             _removeLoginButton.Enabled = false;
-            await _loginManager.CleanUpAccountAsync(supervisor.AccountId);
+            var cmdResult = await _serviceClient.CleanUpAccountAsync(account.AccountId);
+            if (!cmdResult.Success)
+                MessageBox.Show($"Failed to clean up account: {cmdResult.Error}", "Error",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         catch (Exception ex)
         {
@@ -217,20 +218,20 @@ sealed class ManageAccountsForm : Form
         if (_listView.SelectedItems.Count == 0)
             return;
 
-        var supervisor = _listView.SelectedItems[0].Tag as AccountSupervisor;
-        if (supervisor == null)
+        var account = _listView.SelectedItems[0].Tag as AccountInfo;
+        if (account == null)
             return;
 
-        var loginId = _loginManager.GetLoginIdForAccount(supervisor.AccountId);
-        if (loginId == null)
+        var loginId = account.LoginId;
+        if (string.IsNullOrEmpty(loginId))
         {
             MessageBox.Show("Could not find login for this account.", "Error",
                 MessageBoxButtons.OK, MessageBoxIcon.Error);
             return;
         }
 
-        var activeIds = _loginManager.GetActiveAccountIds(loginId);
-        var accountWord = activeIds.Count == 1 ? "account" : $"{activeIds.Count} accounts";
+        var accountsForLogin = _serviceClient.Accounts.Where(a => a.LoginId == loginId).ToList();
+        var accountWord = accountsForLogin.Count == 1 ? "account" : $"{accountsForLogin.Count} accounts";
 
         var result = MessageBox.Show(
             $"Remove login {loginId}?\n\n" +
@@ -247,7 +248,10 @@ sealed class ManageAccountsForm : Form
         {
             _cleanUpButton.Enabled = false;
             _removeLoginButton.Enabled = false;
-            await _loginManager.RemoveLoginAsync(loginId);
+            var cmdResult = await _serviceClient.RemoveLoginAsync(loginId);
+            if (!cmdResult.Success)
+                MessageBox.Show($"Failed to remove login: {cmdResult.Error}", "Error",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         catch (Exception ex)
         {
@@ -261,43 +265,54 @@ sealed class ManageAccountsForm : Form
         if (_listView.SelectedItems.Count == 0)
             return;
 
-        var supervisor = _listView.SelectedItems[0].Tag as AccountSupervisor;
-        if (supervisor == null)
+        var account = _listView.SelectedItems[0].Tag as AccountInfo;
+        if (account == null)
             return;
 
-        var loginId = _loginManager.GetLoginIdForAccount(supervisor.AccountId);
-        if (loginId == null)
+        var loginId = account.LoginId;
+        if (string.IsNullOrEmpty(loginId))
         {
             MessageBox.Show("Could not find login for this account.", "Error",
                 MessageBoxButtons.OK, MessageBoxIcon.Error);
             return;
         }
 
-        var accounts = _loginManager.GetLoginAccounts(loginId);
-        if (accounts == null || accounts.Count <= 1)
-        {
-            MessageBox.Show("This login has only one account — nothing to configure.", "Info",
-                MessageBoxButtons.OK, MessageBoxIcon.Information);
-            return;
-        }
-
-        var currentActive = _loginManager.GetActiveAccountIds(loginId);
-
-        using var selectForm = new SelectAccountsForm(accounts, currentActive);
-        if (selectForm.ShowDialog(this) != DialogResult.OK || selectForm.SelectedAccountIds == null)
-            return;
-
-        if (selectForm.SelectedAccountIds.Count == 0)
-        {
-            MessageBox.Show("At least one account must be selected.", "Warning",
-                MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            return;
-        }
-
         try
         {
+            var loginResult = await _serviceClient.GetLoginAccountsAsync(loginId);
+            if (loginResult.Error != null || loginResult.Accounts == null)
+            {
+                MessageBox.Show(loginResult.Error ?? "Login not found", "Error",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            if (loginResult.Accounts.Count <= 1)
+            {
+                MessageBox.Show("This login has only one account \u2014 nothing to configure.", "Info",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            var accounts = loginResult.Accounts
+                .Select(a => (a.AccountId, a.Name, a.IsPrimary)).ToList();
+
+            using var selectForm = new SelectAccountsForm(accounts, loginResult.ActiveAccountIds);
+            if (selectForm.ShowDialog(this) != DialogResult.OK || selectForm.SelectedAccountIds == null)
+                return;
+
+            if (selectForm.SelectedAccountIds.Count == 0)
+            {
+                MessageBox.Show("At least one account must be selected.", "Warning",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
             _configureButton.Enabled = false;
-            await _loginManager.ConfigureLoginAsync(loginId, selectForm.SelectedAccountIds, _iconPath);
+            var cmdResult = await _serviceClient.ConfigureLoginAsync(loginId, selectForm.SelectedAccountIds);
+            if (!cmdResult.Success)
+                MessageBox.Show($"Failed to configure accounts: {cmdResult.Error}", "Error",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         catch (Exception ex)
         {

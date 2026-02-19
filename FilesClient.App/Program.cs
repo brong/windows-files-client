@@ -1,13 +1,9 @@
 using System.Runtime.InteropServices;
-using FilesClient.Jmap;
 
 namespace FilesClient.App;
 
 class Program
 {
-    private const string DefaultSessionUrl = "https://api.fastmail.com/jmap/session";
-    private const string FaviconUrl = "https://www.fastmail.com/favicon.ico";
-
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool AllocConsole();
@@ -61,48 +57,23 @@ class Program
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
 
-        string? token = null;
-        string sessionUrl = DefaultSessionUrl;
         bool debug = false;
-        bool stub = false;
-        bool clean = false;
 
         for (int i = 0; i < args.Length; i++)
         {
             switch (args[i])
             {
-                case "--token" when i + 1 < args.Length:
-                    token = args[++i];
-                    break;
-                case "--session-url" when i + 1 < args.Length:
-                    sessionUrl = args[++i];
-                    break;
                 case "--debug":
                     debug = true;
                     break;
-                case "--stub":
-                    stub = true;
-                    break;
-                case "--clean":
-                    clean = true;
-                    break;
-                case "--token" or "--session-url":
-                    Console.Error.WriteLine($"Error: {args[i]} requires a value");
-                    return 1;
                 default:
                     Console.Error.WriteLine($"Error: unknown option '{args[i]}'");
                     Console.Error.WriteLine();
                     Console.Error.WriteLine("Options:");
-                    Console.Error.WriteLine("  --token <token>         Fastmail app password / bearer token");
-                    Console.Error.WriteLine("  --session-url <url>     JMAP session URL (default: Fastmail)");
-                    Console.Error.WriteLine("  --debug                 Log all JMAP HTTP traffic to stderr");
-                    Console.Error.WriteLine("  --stub                  Use stub JMAP client (single hello.txt file)");
-                    Console.Error.WriteLine("  --clean                 Unregister sync root and delete local files before syncing");
+                    Console.Error.WriteLine("  --debug    Show debug console");
                     return 1;
             }
         }
-
-        token ??= Environment.GetEnvironmentVariable("FASTMAIL_TOKEN");
 
         // Allocate a console window in debug mode (since OutputType is WinExe)
         if (debug)
@@ -110,9 +81,6 @@ class Program
             AllocConsole();
             IsDebugMode = true;
 
-            // Disable the close button on the console window — CTRL_CLOSE_EVENT
-            // cannot be truly cancelled and will kill the process after a timeout.
-            // Users hide/show the console from the tray menu instead.
             var hwnd = GetConsoleWindow();
             if (hwnd != IntPtr.Zero)
             {
@@ -125,8 +93,6 @@ class Program
             }
         }
 
-        AppLogger.Initialize(debug);
-
         using var cts = new CancellationTokenSource();
         if (debug)
         {
@@ -138,101 +104,36 @@ class Program
             };
         }
 
-        // Download Fastmail favicon for use as sync root icon
+        // Download Fastmail favicon for tray icon
         var iconPath = await DownloadIconAsync(cts.Token);
 
-        if (stub)
-        {
-            // Stub mode: single inline account, no LoginManager
-            return await RunStubModeAsync(iconPath, clean, debug, cts);
-        }
+        using var serviceClient = new ServiceClient();
+        serviceClient.Start(cts.Token);
 
-        using var loginManager = new LoginManager(debug);
-
-        // Show tray icon immediately — before any network calls
-        using var trayIcon = new TrayIcon(cts, iconPath, loginManager);
+        using var trayIcon = new TrayIcon(cts, iconPath, serviceClient);
         trayIcon.Start();
 
-        // Dev: --token adds a transient (non-persisted) login
-        if (token != null)
+        // If not connected after a brief wait, show manage accounts
+        _ = Task.Run(async () =>
         {
-            try
+            await Task.Delay(2000, cts.Token);
+            if (serviceClient.Accounts.Count == 0 && serviceClient.ConnectingLoginIds.Count == 0
+                && serviceClient.IsConnected)
             {
-                await loginManager.AddLoginAsync(sessionUrl, token,
-                    persist: false, iconPath: iconPath, clean: clean, ct: cts.Token);
+                trayIcon.ShowManageAccounts();
             }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine($"Failed to connect: {ex.Message}");
-            }
-        }
-
-        await loginManager.StartAsync(iconPath, clean, cts.Token);
-
-        // If no accounts configured, open the manage accounts dialog
-        if (loginManager.Supervisors.Count == 0 && token == null)
-            trayIcon.ShowManageAccounts();
+        }, cts.Token);
 
         try { await Task.Delay(Timeout.Infinite, cts.Token); }
         catch (OperationCanceledException) { }
 
-        await loginManager.StopAllAsync();
+        await serviceClient.StopAsync();
         return 0;
-    }
-
-    /// <summary>
-    /// Stub mode bypasses LoginManager and runs a single StubJmapClient directly.
-    /// </summary>
-    private static async Task<int> RunStubModeAsync(string? iconPath, bool clean, bool debug, CancellationTokenSource cts)
-    {
-        Console.WriteLine("Using stub JMAP client");
-        IJmapClient jmapClient = new StubJmapClient();
-        Console.WriteLine($"Account: {jmapClient.AccountId}");
-
-        var displayName = $"{jmapClient.Context.Username} Files";
-        var syncRootPath = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-            SanitizeFolderName(displayName));
-
-        using var loginManager = new LoginManager(debug);
-        var supervisor = new AccountSupervisor(jmapClient, syncRootPath, displayName, debug);
-
-        try
-        {
-            await supervisor.StartAsync(iconPath, clean, cts.Token);
-        }
-        catch (Exception ex)
-        {
-            Console.Error.WriteLine($"Fatal error: {ex}");
-            return 1;
-        }
-
-        using var trayIcon = new TrayIcon(cts, iconPath, loginManager);
-        trayIcon.Start();
-
-        try { await Task.Delay(Timeout.Infinite, cts.Token); }
-        catch (OperationCanceledException) { }
-
-        await supervisor.StopAsync();
-        supervisor.Dispose();
-        jmapClient.Dispose();
-        return 0;
-    }
-
-    private static string SanitizeFolderName(string name)
-    {
-        var invalid = Path.GetInvalidFileNameChars();
-        var chars = name.ToCharArray();
-        for (int i = 0; i < chars.Length; i++)
-        {
-            if (Array.IndexOf(invalid, chars[i]) >= 0)
-                chars[i] = '_';
-        }
-        return new string(chars).TrimEnd(' ', '.');
     }
 
     private static async Task<string?> DownloadIconAsync(CancellationToken ct)
     {
+        const string FaviconUrl = "https://www.fastmail.com/favicon.ico";
         try
         {
             var iconDir = Path.Combine(

@@ -1,6 +1,6 @@
 using System.Drawing;
 using System.Runtime.InteropServices;
-using FilesClient.Windows;
+using FilesClient.Ipc;
 
 namespace FilesClient.App;
 
@@ -12,7 +12,7 @@ sealed class TrayIcon : IDisposable
 
     private readonly CancellationTokenSource _cts;
     private readonly string? _iconPath;
-    private readonly LoginManager _loginManager;
+    private readonly ServiceClient _serviceClient;
     private readonly ManualResetEventSlim _ready = new();
     private Thread? _thread;
     private NotifyIcon? _notifyIcon;
@@ -23,14 +23,15 @@ sealed class TrayIcon : IDisposable
     private StatusForm? _statusForm;
     private ManageAccountsForm? _manageForm;
 
-    public TrayIcon(CancellationTokenSource cts, string? iconPath, LoginManager loginManager)
+    public TrayIcon(CancellationTokenSource cts, string? iconPath, ServiceClient serviceClient)
     {
         _cts = cts;
         _iconPath = iconPath;
-        _loginManager = loginManager;
+        _serviceClient = serviceClient;
 
-        _loginManager.AccountsChanged += OnAccountsChanged;
-        _loginManager.AggregateStatusChanged += OnAggregateStatusChanged;
+        _serviceClient.AccountsChanged += OnAccountsChanged;
+        _serviceClient.StatusChanged += OnStatusChanged;
+        _serviceClient.ConnectionChanged += OnConnectionChanged;
     }
 
     public void Start()
@@ -60,7 +61,7 @@ sealed class TrayIcon : IDisposable
         }, null);
     }
 
-    private void OnAggregateStatusChanged(SyncStatus status)
+    private void OnStatusChanged()
     {
         _syncContext?.Post(_ =>
         {
@@ -69,48 +70,67 @@ sealed class TrayIcon : IDisposable
         }, null);
     }
 
+    private void OnConnectionChanged(bool connected)
+    {
+        _syncContext?.Post(_ =>
+        {
+            if (_notifyIcon == null) return;
+            _notifyIcon.ContextMenuStrip = BuildContextMenu();
+            RefreshTooltip();
+        }, null);
+    }
+
     private void RefreshTooltip()
     {
-        var supervisors = _loginManager.Supervisors;
-        var status = _loginManager.GetAggregateStatus();
-        var pendingCount = _loginManager.GetAggregatePendingCount();
+        var accounts = _serviceClient.Accounts;
+        var status = _serviceClient.AggregateStatus;
+        var pendingCount = _serviceClient.AggregatePendingCount;
+        var connected = _serviceClient.IsConnected;
 
         Color color;
         string tooltip;
 
-        if (supervisors.Count == 0)
+        if (!connected)
         {
             color = Color.Gray;
-            tooltip = "Fastmail Files - No accounts";
+            tooltip = "Fastmail Files - Service not running";
         }
-        else if (supervisors.Count == 1)
+        else if (accounts.Count == 0)
         {
-            var s = supervisors[0];
-            (color, tooltip) = FormatSingleAccountTooltip(s.Username, s.Status, s.PendingCount, s.StatusDetail);
+            var connecting = _serviceClient.ConnectingLoginIds;
+            color = Color.Gray;
+            tooltip = connecting.Count > 0
+                ? "Fastmail Files - Connecting..."
+                : "Fastmail Files - No accounts";
+        }
+        else if (accounts.Count == 1)
+        {
+            var a = accounts[0];
+            (color, tooltip) = FormatSingleAccountTooltip(a.Username, a.Status, a.PendingCount, a.StatusDetail);
         }
         else
         {
             color = status switch
             {
-                SyncStatus.Error => Color.Red,
-                SyncStatus.Disconnected => Color.Gray,
-                SyncStatus.Syncing => Color.DodgerBlue,
-                SyncStatus.Idle when pendingCount > 0 => Color.DodgerBlue,
-                SyncStatus.Idle => Color.LimeGreen,
+                AccountStatus.Error => Color.Red,
+                AccountStatus.Disconnected => Color.Gray,
+                AccountStatus.Syncing => Color.DodgerBlue,
+                AccountStatus.Idle when pendingCount > 0 => Color.DodgerBlue,
+                AccountStatus.Idle => Color.LimeGreen,
                 _ => Color.Gray,
             };
 
             var statusText = status switch
             {
-                SyncStatus.Idle when pendingCount > 0 => $"{pendingCount} pending",
-                SyncStatus.Idle => "Up to date",
-                SyncStatus.Syncing => "Syncing...",
-                SyncStatus.Error => "Error",
-                SyncStatus.Disconnected => "Offline",
+                AccountStatus.Idle when pendingCount > 0 => $"{pendingCount} pending",
+                AccountStatus.Idle => "Up to date",
+                AccountStatus.Syncing => "Syncing...",
+                AccountStatus.Error => "Error",
+                AccountStatus.Disconnected => "Offline",
                 _ => "",
             };
 
-            tooltip = $"{supervisors.Count} accounts - {statusText}";
+            tooltip = $"{accounts.Count} accounts - {statusText}";
         }
 
         if (tooltip.Length > 127)
@@ -121,20 +141,20 @@ sealed class TrayIcon : IDisposable
     }
 
     private static (Color color, string tooltip) FormatSingleAccountTooltip(
-        string username, SyncStatus status, int pendingCount, string? detail)
+        string username, AccountStatus status, int pendingCount, string? detail)
     {
         var pendingSuffix = pendingCount > 0 ? $" ({pendingCount} pending)" : "";
 
         var (color, defaultTooltip) = status switch
         {
-            SyncStatus.Idle when pendingCount > 0 =>
+            AccountStatus.Idle when pendingCount > 0 =>
                 (Color.DodgerBlue, $"{username} - {pendingCount} pending changes"),
-            SyncStatus.Idle => (Color.LimeGreen, $"{username} - Up to date"),
-            SyncStatus.Syncing => (Color.DodgerBlue, $"{username} - Syncing..."),
-            SyncStatus.Error => (Color.Red, $"{username} - Error"),
-            SyncStatus.Disconnected when pendingCount > 0 =>
+            AccountStatus.Idle => (Color.LimeGreen, $"{username} - Up to date"),
+            AccountStatus.Syncing => (Color.DodgerBlue, $"{username} - Syncing..."),
+            AccountStatus.Error => (Color.Red, $"{username} - Error"),
+            AccountStatus.Disconnected when pendingCount > 0 =>
                 (Color.Gray, $"{username} - Offline ({pendingCount} pending)"),
-            SyncStatus.Disconnected => (Color.Gray, $"{username} - Connection lost"),
+            AccountStatus.Disconnected => (Color.Gray, $"{username} - Connection lost"),
             _ => (Color.Gray, username),
         };
 
@@ -217,38 +237,46 @@ sealed class TrayIcon : IDisposable
     private ContextMenuStrip BuildContextMenu()
     {
         var menu = new ContextMenuStrip();
-        var supervisors = _loginManager.Supervisors;
+        var connected = _serviceClient.IsConnected;
 
-        var connecting = _loginManager.ConnectingLoginIds;
-
-        if (supervisors.Count == 0 && connecting.Count == 0)
+        if (!connected)
         {
-            var noAccounts = new ToolStripMenuItem("No accounts configured") { Enabled = false };
-            menu.Items.Add(noAccounts);
-        }
-        else if (supervisors.Count == 0)
-        {
-            foreach (var loginId in connecting)
-                menu.Items.Add(new ToolStripMenuItem($"{loginId} \u2014 Connecting...") { Enabled = false });
-        }
-        else if (supervisors.Count == 1 && connecting.Count == 0)
-        {
-            var s = supervisors[0];
-            menu.Items.Add($"Open {s.DisplayName}", null, (_, _) => OpenSyncFolder(s.SyncRootPath));
-            menu.Items.Add("View pending changes...", null, (_, _) => ShowStatusForm(s));
+            menu.Items.Add(new ToolStripMenuItem("Service not running") { Enabled = false });
         }
         else
         {
-            foreach (var s in supervisors)
+            var accounts = _serviceClient.Accounts;
+            var connecting = _serviceClient.ConnectingLoginIds;
+
+            if (accounts.Count == 0 && connecting.Count == 0)
             {
-                var sub = new ToolStripMenuItem(s.DisplayName);
-                var captured = s;
-                sub.DropDownItems.Add("Open sync folder", null, (_, _) => OpenSyncFolder(captured.SyncRootPath));
-                sub.DropDownItems.Add("View pending changes...", null, (_, _) => ShowStatusForm(captured));
-                menu.Items.Add(sub);
+                var noAccounts = new ToolStripMenuItem("No accounts configured") { Enabled = false };
+                menu.Items.Add(noAccounts);
             }
-            foreach (var loginId in connecting)
-                menu.Items.Add(new ToolStripMenuItem($"{loginId} \u2014 Connecting...") { Enabled = false });
+            else if (accounts.Count == 0)
+            {
+                foreach (var loginId in connecting)
+                    menu.Items.Add(new ToolStripMenuItem($"{loginId} \u2014 Connecting...") { Enabled = false });
+            }
+            else if (accounts.Count == 1 && connecting.Count == 0)
+            {
+                var a = accounts[0];
+                menu.Items.Add($"Open {a.DisplayName}", null, (_, _) => OpenSyncFolder(a.SyncRootPath));
+                menu.Items.Add("View pending changes...", null, (_, _) => ShowStatusForm(a));
+            }
+            else
+            {
+                foreach (var a in accounts)
+                {
+                    var sub = new ToolStripMenuItem(a.DisplayName);
+                    var captured = a;
+                    sub.DropDownItems.Add("Open sync folder", null, (_, _) => OpenSyncFolder(captured.SyncRootPath));
+                    sub.DropDownItems.Add("View pending changes...", null, (_, _) => ShowStatusForm(captured));
+                    menu.Items.Add(sub);
+                }
+                foreach (var loginId in connecting)
+                    menu.Items.Add(new ToolStripMenuItem($"{loginId} \u2014 Connecting...") { Enabled = false });
+            }
         }
 
         menu.Items.Add(new ToolStripSeparator());
@@ -296,15 +324,12 @@ sealed class TrayIcon : IDisposable
         catch { /* best-effort */ }
     }
 
-    private void ShowStatusForm(AccountSupervisor supervisor)
+    private void ShowStatusForm(AccountInfo account)
     {
-        if (supervisor.Outbox == null)
-            return;
-
         _syncContext?.Post(_ =>
         {
             if (_statusForm == null || _statusForm.IsDisposed)
-                _statusForm = new StatusForm(supervisor.Username, supervisor.Outbox, supervisor.Status);
+                _statusForm = new StatusForm(account.Username, account.AccountId, _serviceClient);
 
             if (_statusForm.Visible)
                 _statusForm.Activate();
@@ -318,7 +343,7 @@ sealed class TrayIcon : IDisposable
         _syncContext?.Post(_ =>
         {
             if (_manageForm == null || _manageForm.IsDisposed)
-                _manageForm = new ManageAccountsForm(_loginManager, _iconPath);
+                _manageForm = new ManageAccountsForm(_serviceClient);
 
             if (_manageForm.Visible)
                 _manageForm.Activate();
