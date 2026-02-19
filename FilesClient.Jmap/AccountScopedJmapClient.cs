@@ -144,7 +144,7 @@ public class AccountScopedJmapClient : IJmapClient
     public async Task<FileNode[]> GetFileNodesAsync(string[] ids, CancellationToken ct = default)
     {
         var result = await CallAsync<GetResponse<FileNode>>(
-            FileNodeUsing, "FileNode/get", new { accountId = _accountId, ids }, ct);
+            FileNodeUsing, "FileNode/get", new { accountId = _accountId, ids, properties = JmapClient.FileNodeProperties }, ct);
         return result.List;
     }
 
@@ -164,6 +164,7 @@ public class AccountScopedJmapClient : IJmapClient
             {
                 ["accountId"] = _accountId,
                 ["#ids"] = new { resultOf = queryCallId, name = "FileNode/query", path = "/ids" },
+                ["properties"] = JmapClient.FileNodeProperties,
             }, getCallId));
 
         var json = JsonSerializer.Serialize(request, JmapSerializerOptions.Default);
@@ -207,11 +208,13 @@ public class AccountScopedJmapClient : IJmapClient
             {
                 ["accountId"] = _accountId,
                 ["#ids"] = new { resultOf = changesCallId, name = "FileNode/changes", path = "/created" },
+                ["properties"] = JmapClient.FileNodeProperties,
             }, createdCallId),
             ("FileNode/get", new Dictionary<string, object>
             {
                 ["accountId"] = _accountId,
                 ["#ids"] = new { resultOf = changesCallId, name = "FileNode/changes", path = "/updated" },
+                ["properties"] = JmapClient.FileNodeProperties,
             }, updatedCallId));
 
         var json = JsonSerializer.Serialize(request, JmapSerializerOptions.Default);
@@ -288,7 +291,7 @@ public class AccountScopedJmapClient : IJmapClient
         {
             var chunk = ids.Skip(i).Take(pageSize).ToArray();
             var result = await CallAsync<GetResponse<FileNode>>(
-                FileNodeUsing, "FileNode/get", new { accountId = _accountId, ids = chunk }, ct);
+                FileNodeUsing, "FileNode/get", new { accountId = _accountId, ids = chunk, properties = JmapClient.FileNodeProperties }, ct);
             allNodes.AddRange(result.List);
             state = result.State;
         }

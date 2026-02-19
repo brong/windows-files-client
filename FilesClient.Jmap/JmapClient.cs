@@ -17,6 +17,9 @@ public class JmapClient : IJmapClient
     public const string BlobCapability = "urn:ietf:params:jmap:blob";
     private static readonly string[] FileNodeUsing = [CoreCapability, FileNodeCapability];
     private static readonly string[] BlobUsing = [CoreCapability, BlobCapability];
+    /// <summary>Properties to request in FileNode/get calls — includes myRights for permission enforcement.</summary>
+    internal static readonly string[] FileNodeProperties =
+        ["id", "parentId", "blobId", "name", "type", "size", "created", "modified", "role", "myRights"];
     private static readonly HashSet<string> SupportedDigests = ["sha", "sha-256"];
     private string? _preferredDigestAlgorithm;
     private bool _preferredDigestResolved;
@@ -144,7 +147,7 @@ public class JmapClient : IJmapClient
     public async Task<FileNode[]> GetFileNodesAsync(string[] ids, CancellationToken ct = default)
     {
         var result = await CallAsync<GetResponse<FileNode>>(
-            FileNodeUsing, "FileNode/get", new { accountId = AccountId, ids }, ct);
+            FileNodeUsing, "FileNode/get", new { accountId = AccountId, ids, properties = FileNodeProperties }, ct);
         return result.List;
     }
 
@@ -164,6 +167,7 @@ public class JmapClient : IJmapClient
             {
                 ["accountId"] = AccountId,
                 ["#ids"] = new { resultOf = queryCallId, name = "FileNode/query", path = "/ids" },
+                ["properties"] = FileNodeProperties,
             }, getCallId));
 
         var json = JsonSerializer.Serialize(request, JmapSerializerOptions.Default);
@@ -207,11 +211,13 @@ public class JmapClient : IJmapClient
             {
                 ["accountId"] = AccountId,
                 ["#ids"] = new { resultOf = changesCallId, name = "FileNode/changes", path = "/created" },
+                ["properties"] = FileNodeProperties,
             }, createdCallId),
             ("FileNode/get", new Dictionary<string, object>
             {
                 ["accountId"] = AccountId,
                 ["#ids"] = new { resultOf = changesCallId, name = "FileNode/changes", path = "/updated" },
+                ["properties"] = FileNodeProperties,
             }, updatedCallId));
 
         var json = JsonSerializer.Serialize(request, JmapSerializerOptions.Default);
@@ -303,7 +309,7 @@ public class JmapClient : IJmapClient
         {
             var chunk = ids.Skip(i).Take(pageSize).ToArray();
             var result = await CallAsync<GetResponse<FileNode>>(
-                FileNodeUsing, "FileNode/get", new { accountId = AccountId, ids = chunk }, ct);
+                FileNodeUsing, "FileNode/get", new { accountId = AccountId, ids = chunk, properties = FileNodeProperties }, ct);
             allNodes.AddRange(result.List);
             state = result.State;
         }
