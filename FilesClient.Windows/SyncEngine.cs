@@ -173,6 +173,69 @@ public class SyncEngine : IDisposable
         await _syncRoot.RegisterAsync(displayName, "1.0", accountId, iconPath);
     }
 
+    /// <summary>
+    /// Scan the local filesystem for files/directories not tracked in
+    /// _pathToNodeId and enqueue them to the outbox.  Call after
+    /// PopulateAsync() builds mappings but before Connect() starts the
+    /// watcher, so we pick up anything created while the engine was offline.
+    /// </summary>
+    public void ReconcileLocalChanges()
+    {
+        int untrackedFiles = 0;
+        int untrackedDirs = 0;
+
+        // BFS walk: directories before their children so folder creates
+        // are enqueued before file uploads (matches outbox processing order).
+        var queue = new Queue<string>();
+        queue.Enqueue(_syncRootPath);
+
+        while (queue.Count > 0)
+        {
+            var dir = queue.Dequeue();
+
+            IEnumerable<string> entries;
+            try { entries = Directory.EnumerateFileSystemEntries(dir); }
+            catch { continue; }
+
+            foreach (var entry in entries)
+            {
+                var isDirectory = Directory.Exists(entry);
+
+                // Already tracked by server state — skip
+                if (_pathToNodeId.ContainsKey(entry))
+                {
+                    if (isDirectory)
+                        queue.Enqueue(entry);
+                    continue;
+                }
+
+                // Already queued in the outbox — skip
+                if (_outbox.HasPendingForPath(entry))
+                {
+                    if (isDirectory)
+                        queue.Enqueue(entry);
+                    continue;
+                }
+
+                // Untracked local item — enqueue to outbox
+                if (isDirectory)
+                {
+                    _outbox.EnqueueContentChange(entry, null, null, isFolder: true);
+                    queue.Enqueue(entry);
+                    untrackedDirs++;
+                }
+                else
+                {
+                    var contentType = ResolveContentType(entry);
+                    _outbox.EnqueueContentChange(entry, null, contentType, isFolder: false);
+                    untrackedFiles++;
+                }
+            }
+        }
+
+        Console.WriteLine($"Reconcile: found {untrackedFiles} untracked files, {untrackedDirs} untracked directories");
+    }
+
     public void Connect()
     {
         var (registrations, delegates) = _syncCallbacks.CreateCallbackRegistrations();

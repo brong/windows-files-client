@@ -77,6 +77,9 @@ sealed class AccountSupervisor : IDisposable
         var state = await _engine.PopulateAsync(ct);
         Console.WriteLine($"[{_displayName}] Initial sync complete. State: {state}");
 
+        // Reconcile local changes made while offline
+        _engine.ReconcileLocalChanges();
+
         // Connect callbacks
         _engine.Connect();
 
