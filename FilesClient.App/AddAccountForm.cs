@@ -28,59 +28,67 @@ sealed class AddAccountForm : Form
         StartPosition = FormStartPosition.CenterParent;
         ShowInTaskbar = false;
 
-        var tokenLabel = new Label
-        {
-            Text = "App password (token):",
-            Location = new Point(12, 15),
-            AutoSize = true,
-        };
-        _tokenBox = new TextBox
-        {
-            Location = new Point(12, 38),
-            Width = 430,
-            Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top,
-            UseSystemPasswordChar = true,
-        };
+        var pad = em;
+        var row1 = em;
+        var row1Input = row1 + (int)(em * 1.4);
+        var row2 = row1Input + (int)(em * 2.2);
+        var row2Input = row2 + (int)(em * 1.4);
+        var buttonY = row2Input + (int)(em * 2.5);
+        var inputWidth = ClientSize.Width - 2 * pad;
 
         var urlLabel = new Label
         {
             Text = "Session URL (optional):",
-            Location = new Point(12, 68),
+            Location = new Point(pad, row1),
             AutoSize = true,
         };
         _sessionUrlBox = new TextBox
         {
-            Location = new Point(12, 91),
-            Width = 430,
+            Location = new Point(pad, row1Input),
+            Width = inputWidth,
             Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top,
             Text = DefaultSessionUrl,
+        };
+
+        var tokenLabel = new Label
+        {
+            Text = "App password (token):",
+            Location = new Point(pad, row2),
+            AutoSize = true,
+        };
+        _tokenBox = new TextBox
+        {
+            Location = new Point(pad, row2Input),
+            Width = inputWidth,
+            Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top,
+            UseSystemPasswordChar = true,
         };
 
         _connectButton = new Button
         {
             Text = "Connect",
             AutoSize = true,
-            Height = 28,
+            Height = (int)(em * 1.8),
             Anchor = AnchorStyles.Bottom | AnchorStyles.Right,
         };
-        _connectButton.Location = new Point(370, 135);
+        _connectButton.Location = new Point(ClientSize.Width - pad - _connectButton.PreferredSize.Width, buttonY);
         _connectButton.Click += OnConnectClicked;
 
         var cancelButton = new Button
         {
             Text = "Cancel",
             AutoSize = true,
-            Height = 28,
+            Height = (int)(em * 1.8),
             Anchor = AnchorStyles.Bottom | AnchorStyles.Right,
             DialogResult = DialogResult.Cancel,
         };
-        cancelButton.Location = new Point(280, 135);
+        cancelButton.Location = new Point(_connectButton.Left - cancelButton.PreferredSize.Width - em / 2, buttonY);
 
         _statusLabel = new Label
         {
-            Location = new Point(12, 140),
-            Width = 250,
-            AutoSize = false,
+            Location = new Point(pad, buttonY),
+            AutoSize = true,
+            MaximumSize = new Size(cancelButton.Left - 2 * pad, 0),
             Anchor = AnchorStyles.Left | AnchorStyles.Bottom,
             ForeColor = Color.Gray,
         };
@@ -135,7 +143,7 @@ sealed class AddAccountForm : Form
 
             // Phase 2: If multiple accounts, show account picker
             HashSet<string>? enabledAccountIds = null;
-            if (discoverResult.Accounts.Count > 1)
+            if (discoverResult.Accounts.Count >= 1)
             {
                 var accounts = discoverResult.Accounts
                     .Select(a => (a.AccountId, a.Name, a.IsPrimary)).ToList();

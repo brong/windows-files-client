@@ -27,17 +27,25 @@ sealed class SelectAccountsForm : Form
         StartPosition = FormStartPosition.CenterParent;
         ShowInTaskbar = false;
 
+        var pad = em;
+        var labelY = em;
+        var listY = labelY + (int)(em * 1.6);
+        var buttonHeight = (int)(em * 1.8);
+        var buttonY = ClientSize.Height - pad - buttonHeight;
+        var listHeight = buttonY - listY - em;
+        var inputWidth = ClientSize.Width - 2 * pad;
+
         var label = new Label
         {
             Text = "Select which accounts to sync:",
-            Location = new Point(12, 12),
+            Location = new Point(pad, labelY),
             AutoSize = true,
         };
 
         _checkedListBox = new CheckedListBox
         {
-            Location = new Point(12, 35),
-            Size = new Size(380, 180),
+            Location = new Point(pad, listY),
+            Size = new Size(inputWidth, listHeight),
             Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
             CheckOnClick = true,
         };
@@ -57,11 +65,11 @@ sealed class SelectAccountsForm : Form
         {
             Text = "OK",
             AutoSize = true,
-            Height = 28,
+            Height = buttonHeight,
             Anchor = AnchorStyles.Bottom | AnchorStyles.Right,
             DialogResult = DialogResult.OK,
         };
-        okButton.Location = new Point(310, 225);
+        okButton.Location = new Point(ClientSize.Width - pad - okButton.PreferredSize.Width, buttonY);
         okButton.Click += (_, _) =>
         {
             SelectedAccountIds = new HashSet<string>();
@@ -76,11 +84,11 @@ sealed class SelectAccountsForm : Form
         {
             Text = "Cancel",
             AutoSize = true,
-            Height = 28,
+            Height = buttonHeight,
             Anchor = AnchorStyles.Bottom | AnchorStyles.Right,
             DialogResult = DialogResult.Cancel,
         };
-        cancelButton.Location = new Point(220, 225);
+        cancelButton.Location = new Point(okButton.Left - cancelButton.PreferredSize.Width - em / 2, buttonY);
 
         Controls.AddRange([label, _checkedListBox, okButton, cancelButton]);
         AcceptButton = okButton;
