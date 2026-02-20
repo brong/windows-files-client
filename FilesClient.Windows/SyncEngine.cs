@@ -1747,10 +1747,29 @@ public class SyncEngine : IDisposable
         }
     }
 
-    internal static unsafe void UpdatePlaceholderIdentity(string filePath, string newNodeId)
+    /// <summary>
+    /// Ensures a file/directory is a placeholder with the given identity.
+    /// Tries ConvertToPlaceholder first; if it fails because the file is
+    /// already a placeholder (0x8007017C), falls back to UpdatePlaceholderIdentity.
+    /// </summary>
+    internal static void EnsurePlaceholder(string filePath, string nodeId, bool isDirectory = false)
+    {
+        try
+        {
+            ConvertToPlaceholder(filePath, nodeId, isDirectory);
+        }
+        catch (COMException ex) when (ex.HResult == unchecked((int)0x8007017C))
+        {
+            // ERROR_CLOUD_OPERATION_INVALID — file is already a placeholder
+            Console.WriteLine($"SyncEngine: file already a placeholder, updating identity: {Path.GetFileName(filePath)}");
+            UpdatePlaceholderIdentity(filePath, nodeId, isDirectory);
+        }
+    }
+
+    internal static unsafe void UpdatePlaceholderIdentity(string filePath, string newNodeId, bool isDirectory = false)
     {
         var identityBytes = Encoding.UTF8.GetBytes(newNodeId);
-        using var safeHandle = OpenWithRetry(filePath);
+        using var safeHandle = OpenWithRetry(filePath, isDirectory);
         var handle = new global::Windows.Win32.Foundation.HANDLE(safeHandle.DangerousGetHandle());
         fixed (byte* pIdentity = identityBytes)
         {

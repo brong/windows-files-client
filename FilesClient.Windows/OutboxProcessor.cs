@@ -261,7 +261,7 @@ public class OutboxProcessor : IDisposable
         var node = await _queue.EnqueueAsync(QueuePriority.Background,
             () => _jmapClient.CreateFileNodeAsync(parentId, null, folderName, null, null, ct), ct);
 
-        SyncEngine.ConvertToPlaceholder(change.LocalPath, node.Id, isDirectory: true);
+        SyncEngine.EnsurePlaceholder(change.LocalPath, node.Id, isDirectory: true);
         _engine.UpdateMappings(change.LocalPath, null, node.Id);
         Console.WriteLine($"Outbox: created folder {folderName} → node {node.Id}");
         return true;
@@ -345,7 +345,7 @@ public class OutboxProcessor : IDisposable
                 if (_outbox.TryCancelDelete(trashedInfo.NodeId))
                 {
                     Console.WriteLine($"Outbox: cancelled pending delete for {trashedInfo.NodeId}, restoring mappings");
-                    SyncEngine.ConvertToPlaceholder(change.LocalPath, trashedInfo.NodeId);
+                    SyncEngine.EnsurePlaceholder(change.LocalPath, trashedInfo.NodeId);
                     _engine.UpdateMappings(change.LocalPath, null, trashedInfo.NodeId);
                     SyncEngine.SetInSync(change.LocalPath);
                     return true;
@@ -357,7 +357,7 @@ public class OutboxProcessor : IDisposable
                     await _queue.EnqueueAsync(QueuePriority.Background,
                         () => _jmapClient.MoveFileNodeAsync(trashedInfo.NodeId, restoreParentId, fileName, ct: ct), ct);
                     Console.WriteLine($"Outbox: restored {fileName} from server trash (node {trashedInfo.NodeId})");
-                    SyncEngine.ConvertToPlaceholder(change.LocalPath, trashedInfo.NodeId);
+                    SyncEngine.EnsurePlaceholder(change.LocalPath, trashedInfo.NodeId);
                     _engine.UpdateMappings(change.LocalPath, null, trashedInfo.NodeId);
                     SyncEngine.SetInSync(change.LocalPath);
                     return true;
@@ -375,7 +375,7 @@ public class OutboxProcessor : IDisposable
                         var restoredNode = await _queue.EnqueueAsync(QueuePriority.Background,
                             () => _jmapClient.CreateFileNodeAsync(restoreParentId, trashedInfo.BlobId, fileName, contentType, "replace", ct), ct);
                         Console.WriteLine($"Outbox: recreated {fileName} with existing blobId → node {restoredNode.Id}");
-                        SyncEngine.ConvertToPlaceholder(change.LocalPath, restoredNode.Id);
+                        SyncEngine.EnsurePlaceholder(change.LocalPath, restoredNode.Id);
                         _engine.UpdateMappings(change.LocalPath, null, restoredNode.Id);
                         _engine.RecordRecentUpload(change.LocalPath);
                         SyncEngine.SetInSync(change.LocalPath);
@@ -412,7 +412,7 @@ public class OutboxProcessor : IDisposable
             var node = await _queue.EnqueueAsync(QueuePriority.Background,
                 () => _jmapClient.CreateFileNodeAsync(parentId, blobId, fileName, contentType, "replace", ct), ct);
 
-            SyncEngine.ConvertToPlaceholder(change.LocalPath, node.Id);
+            SyncEngine.EnsurePlaceholder(change.LocalPath, node.Id);
             _engine.UpdateMappings(change.LocalPath, null, node.Id);
             _engine.RecordRecentUpload(change.LocalPath);
             SyncEngine.StripZoneIdentifier(change.LocalPath);
