@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Security.Cryptography;
 using FilesClient.Jmap;
 
 namespace FilesClient.Windows;
@@ -287,6 +288,28 @@ public class OutboxProcessor : IDisposable
             {
                 Console.WriteLine($"Outbox: parent not yet available for {fileName}, will retry");
                 return false;
+            }
+
+            // Check if content actually changed by comparing local SHA1 with server blobId
+            var existingNodes = await _queue.EnqueueAsync(QueuePriority.Background,
+                () => _jmapClient.GetFileNodesAsync([change.NodeId], ct), ct);
+            if (existingNodes.Length > 0 && existingNodes[0].BlobId != null)
+            {
+                using var sha1Stream = new FileStream(change.LocalPath, FileMode.Open, FileAccess.Read,
+                    FileShare.ReadWrite | FileShare.Delete);
+                var hashBytes = await SHA1.HashDataAsync(sha1Stream, ct);
+                var localSha1Hex = Convert.ToHexString(hashBytes).ToLowerInvariant();
+                if (string.Equals(localSha1Hex, existingNodes[0].BlobId, StringComparison.OrdinalIgnoreCase))
+                {
+                    Console.WriteLine($"Outbox: content unchanged for {fileName} (digest:sha matches), skipping upload");
+                    if (change.IsDirtyLocation)
+                    {
+                        await _queue.EnqueueAsync(QueuePriority.Background,
+                            () => _jmapClient.MoveFileNodeAsync(change.NodeId, parentId, fileName, ct: ct), ct);
+                    }
+                    SyncEngine.SetInSync(change.LocalPath);
+                    return true;
+                }
             }
 
             Console.WriteLine($"Outbox: uploading modified file {fileName}");

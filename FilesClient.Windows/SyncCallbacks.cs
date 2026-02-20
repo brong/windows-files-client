@@ -275,7 +275,7 @@ internal class SyncCallbacks
             if (targetPath.StartsWith(@"\\?\"))
                 targetPath = targetPath.Substring(4);
 
-            bool targetInScope = ((uint)renameParams.Flags & 0x1) != 0; // CF_CALLBACK_RENAME_FLAG_TARGET_IN_SCOPE
+            bool targetInScope = ((uint)renameParams.Flags & 0x4) != 0; // CF_CALLBACK_RENAME_FLAG_TARGET_IN_SCOPE
 
             Console.WriteLine($"NOTIFY_RENAME: node={nodeId}, {sourcePath} → {targetPath} (inScope={targetInScope})");
 
