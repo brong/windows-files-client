@@ -71,6 +71,13 @@ public class SyncEngine : IDisposable
     public static void Detach(string syncRootPath, string accountId)
         => SyncRoot.Detach(syncRootPath, accountId);
 
+    /// <summary>
+    /// Enumerate all sync roots registered on this machine that belong to our
+    /// provider. Returns the account ID and path for each one.
+    /// </summary>
+    public static List<(string AccountId, string Path)> GetRegisteredSyncRoots()
+        => SyncRoot.GetRegisteredSyncRoots();
+
     private void ReportStatus(CF_SYNC_PROVIDER_STATUS status)
     {
         _syncRoot.UpdateProviderStatus(status);

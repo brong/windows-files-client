@@ -149,6 +149,33 @@ internal class SyncRoot : IDisposable
     }
 
     /// <summary>
+    /// Enumerate all sync roots registered on this machine that belong to our
+    /// provider. Returns the account ID and path for each one.
+    /// </summary>
+    internal static List<(string AccountId, string Path)> GetRegisteredSyncRoots()
+    {
+        var results = new List<(string, string)>();
+        try
+        {
+            var allRoots = StorageProviderSyncRootManager.GetCurrentSyncRoots();
+            foreach (var root in allRoots)
+            {
+                if (root.Id == null || !root.Id.StartsWith(ProviderName + "!"))
+                    continue;
+                // Format: FastmailFiles!SID!AccountId
+                var parts = root.Id.Split('!', 3);
+                if (parts.Length < 3) continue;
+                results.Add((parts[2], root.Path?.Path ?? ""));
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Failed to enumerate sync roots: {ex.Message}");
+        }
+        return results;
+    }
+
+    /// <summary>
     /// Unregister the sync root for the given account and delete all local files.
     /// This removes cfapi tracking first so that placeholder files can be deleted
     /// without error 0x8007016A ("cloud provider is not running").

@@ -78,6 +78,9 @@ sealed class LoginManager : IDisposable
                 AccountsChanged?.Invoke();
             }
         }
+
+        // Audit for orphaned sync roots (accounts removed server-side between runs)
+        AuditOrphanedSyncRoots();
     }
 
     /// <summary>
@@ -209,6 +212,46 @@ sealed class LoginManager : IDisposable
 
         AccountsChanged?.Invoke();
         RaiseAggregateStatus();
+    }
+
+    /// <summary>
+    /// Check for sync roots registered on this machine that don't correspond
+    /// to any active supervisor (e.g. account removed server-side between runs).
+    /// Detach orphans so the Explorer nav pane entry is removed.
+    /// </summary>
+    private void AuditOrphanedSyncRoots()
+    {
+        try
+        {
+            var registeredRoots = SyncEngine.GetRegisteredSyncRoots();
+            if (registeredRoots.Count == 0)
+                return;
+
+            HashSet<string> activeAccountIds;
+            lock (_lock)
+                activeAccountIds = _supervisors.Select(s => s.AccountId).ToHashSet();
+
+            foreach (var (accountId, path) in registeredRoots)
+            {
+                if (activeAccountIds.Contains(accountId))
+                    continue;
+
+                Console.WriteLine($"Orphaned sync root detected: accountId={accountId}, path={path}");
+                try
+                {
+                    SyncEngine.Detach(path, accountId);
+                    Console.WriteLine($"Detached orphaned sync root: {accountId}");
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"Failed to detach orphaned sync root {accountId}: {ex.Message}");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Orphaned sync root audit failed: {ex.Message}");
+        }
     }
 
     private static void CleanSupervisorSyncRoot(AccountSupervisor supervisor)
