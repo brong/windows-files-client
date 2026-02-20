@@ -479,6 +479,8 @@ internal class SyncCallbacks
         var actual = ComputeDigest(algorithm, data);
         if (actual != expected)
             Console.Error.WriteLine($"Digest mismatch ({context}): expected {expected}, got {actual}");
+        else
+            Console.WriteLine($"Digest OK ({context}): {algorithm}={actual}");
     }
 
     /// <summary>
