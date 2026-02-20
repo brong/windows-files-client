@@ -48,6 +48,19 @@ internal class SyncRoot : IDisposable
 
         var folder = await StorageFolder.GetFolderFromPathAsync(_syncRootPath);
 
+        // If a different sync root is already registered at this path (e.g. server
+        // was wiped and account IDs changed), unregister it first.
+        try
+        {
+            var existing = StorageProviderSyncRootManager.GetSyncRootInformationForFolder(folder);
+            if (existing?.Id != null && existing.Id != _syncRootId)
+            {
+                Console.WriteLine($"Unregistering stale sync root at same path: {existing.Id}");
+                StorageProviderSyncRootManager.Unregister(existing.Id);
+            }
+        }
+        catch { /* No existing sync root at this path */ }
+
         var iconResource = iconPath != null
             ? iconPath
             : "%SystemRoot%\\system32\\shell32.dll,-1";

@@ -134,8 +134,11 @@ sealed class LoginManager : IDisposable
                 Console.Error.WriteLine($"Error stopping supervisor {supervisor.DisplayName}: {ex.Message}");
             }
 
-            CleanSupervisorSyncRoot(supervisor);
+            // Dispose first to disconnect cfapi, then clean up the sync root.
+            // If clean runs while cfapi is still connected, re-registration fails
+            // with "unauthorized operation".
             supervisor.Dispose();
+            CleanSupervisorSyncRoot(supervisor);
         }
 
         lock (_lock)
@@ -780,14 +783,15 @@ sealed class LoginManager : IDisposable
 
         loginId ??= CredentialStore.DeriveLoginId(jmapClient.Session.Username, sessionUrl);
 
-        // Check for duplicate login
+        // Remove existing login with same ID (e.g. re-adding with a new token)
+        bool existing;
         lock (_lock)
+            existing = _sessions.Any(s => s.LoginId == loginId);
+        if (existing)
         {
-            if (_sessions.Any(s => s.LoginId == loginId))
-            {
-                jmapClient.Dispose();
-                throw new InvalidOperationException($"Login {loginId} is already active");
-            }
+            Console.WriteLine($"Replacing existing login {loginId}");
+            await RemoveLoginAsync(loginId);
+            clean = true; // Force clean start after removing old login
         }
 
         // Discover all accounts with FileNode capability
