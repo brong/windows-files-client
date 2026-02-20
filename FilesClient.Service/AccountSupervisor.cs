@@ -33,6 +33,12 @@ sealed class AccountSupervisor : IDisposable
     public int PendingCount { get; private set; }
     public SyncOutbox? Outbox => _engine?.Outbox;
 
+    /// <summary>
+    /// When false, background sync polling is suppressed (metered connection).
+    /// On-demand hydration and outbox uploads still work.
+    /// </summary>
+    public bool BackgroundSyncEnabled { get; set; } = true;
+
     public event Action<AccountSupervisor>? StatusChanged;
     public event Action<AccountSupervisor>? StatusDetailChanged;
     public event Action<AccountSupervisor>? PendingCountChanged;
@@ -115,6 +121,13 @@ sealed class AccountSupervisor : IDisposable
             try
             {
                 var newState = await _stateChannel.Reader.ReadAsync(ct);
+
+                if (!BackgroundSyncEnabled)
+                {
+                    if (_debug)
+                        Console.WriteLine($"[{_displayName}] Metered connection, skipping background sync");
+                    continue;
+                }
 
                 // Empty string = forced poll (e.g. after push reconnect)
                 if (newState.Length > 0 && string.Equals(newState, currentState, StringComparison.Ordinal))

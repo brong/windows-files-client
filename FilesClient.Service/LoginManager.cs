@@ -15,6 +15,7 @@ sealed class LoginManager : IDisposable
     private readonly List<AccountSupervisor> _supervisors = new();
     private readonly List<string> _connectingLoginIds = new();
     private readonly object _lock = new();
+    private NetworkMonitor? _networkMonitor;
     private bool _disposed;
 
     public IReadOnlyList<AccountSupervisor> Supervisors
@@ -43,6 +44,10 @@ sealed class LoginManager : IDisposable
     /// </summary>
     public async Task StartAsync(string? iconPath, bool clean, CancellationToken ct)
     {
+        _networkMonitor = new NetworkMonitor();
+        _networkMonitor.NetworkStateChanged += OnNetworkStateChanged;
+        Console.WriteLine($"[NetworkMonitor] Initial state: connected={_networkMonitor.IsConnected}, metered={_networkMonitor.IsMetered}");
+
         var storedLogins = _credentialStore.LoadAll();
 
         // Show all stored logins as "Connecting..." in the UI immediately
@@ -857,6 +862,7 @@ sealed class LoginManager : IDisposable
 
     private void StartPushWatcher(LoginSession session, CancellationToken parentCt)
     {
+        session.ParentCt = parentCt;
         session.PushCts = CancellationTokenSource.CreateLinkedTokenSource(parentCt);
         session.PushTask = Task.Run(() => RunPushWatcherAsync(session, session.PushCts.Token));
     }
@@ -960,6 +966,53 @@ sealed class LoginManager : IDisposable
             s.PushState(""); // Empty state triggers a /changes poll
     }
 
+    private void OnNetworkStateChanged(bool isConnected, bool isMetered)
+    {
+        List<LoginSession> sessions;
+        List<AccountSupervisor> supervisors;
+        lock (_lock)
+        {
+            sessions = _sessions.ToList();
+            supervisors = _supervisors.ToList();
+        }
+
+        if (!isConnected)
+        {
+            // Network went offline: notify all supervisors, stop push watchers
+            Console.WriteLine("[NetworkMonitor] Network offline — marking accounts disconnected");
+            foreach (var session in sessions)
+                StopPushWatcher(session);
+            foreach (var session in sessions)
+                NotifySupervisorsConnectivity(session, restored: false);
+        }
+        else
+        {
+            // Network came online: restart push watchers, notify supervisors
+            Console.WriteLine("[NetworkMonitor] Network online — reconnecting");
+            foreach (var session in sessions)
+            {
+                NotifySupervisorsConnectivity(session, restored: true);
+                StartPushWatcher(session, session.ParentCt);
+            }
+        }
+
+        // Handle metered state changes
+        foreach (var supervisor in supervisors)
+            supervisor.BackgroundSyncEnabled = !isMetered;
+
+        if (isMetered)
+            Console.WriteLine("[NetworkMonitor] Metered connection — background sync suppressed");
+        else if (isConnected)
+        {
+            Console.WriteLine("[NetworkMonitor] Unmetered connection — background sync enabled");
+            // Trigger catch-up poll on transition from metered to unmetered
+            foreach (var supervisor in supervisors)
+                supervisor.PushState("");
+        }
+
+        RaiseAggregateStatus();
+    }
+
     private void RaiseAggregateStatus()
     {
         var status = GetAggregateStatus();
@@ -1007,6 +1060,9 @@ sealed class LoginManager : IDisposable
         if (_disposed) return;
         _disposed = true;
 
+        _networkMonitor?.Dispose();
+        _networkMonitor = null;
+
         lock (_lock)
         {
             foreach (var session in _sessions)
@@ -1035,6 +1091,8 @@ sealed class LoginSession
     public List<string> AccountIds { get; }
     public CancellationTokenSource? PushCts { get; set; }
     public Task? PushTask { get; set; }
+    /// <summary>Parent CT used to create linked push CTS, stored so push can be restarted.</summary>
+    public CancellationToken ParentCt { get; set; }
 
     public LoginSession(string loginId, JmapClient client, string sessionUrl, string token, List<string> accountIds)
     {
