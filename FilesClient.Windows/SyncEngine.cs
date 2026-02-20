@@ -22,6 +22,7 @@ public class SyncEngine : IDisposable
     private readonly SyncOutbox _outbox;
     private readonly OutboxProcessor _outboxProcessor;
     private readonly string _scopeKey;
+    private readonly string _logPrefix;
 
     // Maps local file path → FileNode ID (populated during sync)
     private readonly ConcurrentDictionary<string, string> _pathToNodeId = new(StringComparer.OrdinalIgnoreCase);
@@ -141,31 +142,35 @@ public class SyncEngine : IDisposable
         StatusDetailChanged?.Invoke(_downloadDetail);
     }
 
-    public SyncEngine(string syncRootPath, IJmapClient jmapClient, JmapQueue queue, string scopeKey)
+    private void Log(string msg) => Console.WriteLine($"{_logPrefix} {msg}");
+    private void LogError(string msg) => Console.Error.WriteLine($"{_logPrefix} {msg}");
+
+    public SyncEngine(string syncRootPath, IJmapClient jmapClient, JmapQueue queue, string scopeKey, string displayName)
     {
         _syncRootPath = syncRootPath;
         _jmapClient = jmapClient;
         _queue = queue;
-        _syncRoot = new SyncRoot(syncRootPath);
-        _placeholderManager = new PlaceholderManager(syncRootPath);
-        _syncCallbacks = new SyncCallbacks(jmapClient, queue);
+        _logPrefix = $"[{displayName}]";
+        _syncRoot = new SyncRoot(syncRootPath, _logPrefix);
+        _placeholderManager = new PlaceholderManager(syncRootPath, _logPrefix);
+        _syncCallbacks = new SyncCallbacks(jmapClient, queue, _logPrefix);
         _syncCallbacks.OnDeleteRequested = HandleDeleteRequestAsync;
         _syncCallbacks.OnRenameRequested = HandleRenameRequestAsync;
         _syncCallbacks.OnDehydrateRequested = HandleDehydrateRequestAsync;
         _syncCallbacks.OnDownloadStarted += OnDownloadStarted;
         _syncCallbacks.OnDownloadCompleted += OnDownloadCompleted;
         _syncCallbacks.OnDirectoryPopulated += OnDirectoryPopulated;
-        _fileChangeWatcher = new FileChangeWatcher(syncRootPath);
+        _fileChangeWatcher = new FileChangeWatcher(syncRootPath, _logPrefix);
         _fileChangeWatcher.OnChanges += OnLocalFileChanges;
         _fileChangeWatcher.OnRenamed += OnLocalRenamed;
         _fileChangeWatcher.OnDirectoryPinned += OnDirectoryPinned;
         _fileChangeWatcher.OnFilePinned += OnFilePinned;
         _fileChangeWatcher.OnFileUnpinned += OnFileUnpinned;
         _scopeKey = scopeKey;
-        _outbox = new SyncOutbox(scopeKey);
+        _outbox = new SyncOutbox(scopeKey, _logPrefix);
         _outbox.Load();
         _outbox.PendingCountChanged += count => PendingCountChanged?.Invoke(count);
-        _outboxProcessor = new OutboxProcessor(_outbox, this, jmapClient, queue);
+        _outboxProcessor = new OutboxProcessor(_outbox, this, jmapClient, queue, _logPrefix);
     }
 
     public async Task RegisterAsync(string displayName, string accountId, string? iconPath = null)
@@ -233,7 +238,7 @@ public class SyncEngine : IDisposable
             }
         }
 
-        Console.WriteLine($"Reconcile: found {untrackedFiles} untracked files, {untrackedDirs} untracked directories");
+        Log($"Reconcile: found {untrackedFiles} untracked files, {untrackedDirs} untracked directories");
     }
 
     public void Connect()
@@ -248,20 +253,20 @@ public class SyncEngine : IDisposable
 
     public async Task<string> PopulateAsync(CancellationToken ct)
     {
-        Console.WriteLine($"PopulateAsync: scopeKey={_scopeKey}, syncRoot={_syncRootPath}");
+        Log($"PopulateAsync: scopeKey={_scopeKey}, syncRoot={_syncRootPath}");
 
         // Try warm start from cache
         var cache = NodeCache.Load(_scopeKey);
         if (cache != null)
         {
-            Console.WriteLine($"Cache found: {cache.Entries.Count} entries, state={cache.State}");
+            Log($"Cache found: {cache.Entries.Count} entries, state={cache.State}");
             try
             {
                 return await PopulateFromCacheAsync(cache, ct);
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"Warm start failed, falling back to full fetch: {ex.Message}");
+                LogError($"Warm start failed, falling back to full fetch: {ex.Message}");
                 _pathToNodeId.Clear();
                 _nodeIdToPath.Clear();
                 _pinnedDirectories.Clear();
@@ -270,7 +275,7 @@ public class SyncEngine : IDisposable
         }
         else
         {
-            Console.WriteLine("No cache found, starting full fetch");
+            Log("No cache found, starting full fetch");
         }
 
         // Full fetch (cold start)
@@ -284,24 +289,24 @@ public class SyncEngine : IDisposable
         // Discover home node
         _homeNodeId = await _queue.EnqueueAsync(QueuePriority.Background,
             () => _jmapClient.FindHomeNodeIdAsync(ct), ct);
-        Console.WriteLine($"Home node: {_homeNodeId}");
+        Log($"Home node: {_homeNodeId}");
 
         // Discover trash node
         _trashNodeId = await _queue.EnqueueAsync(QueuePriority.Background,
             () => _jmapClient.FindTrashNodeIdAsync(ct), ct);
-        Console.WriteLine($"Trash node: {_trashNodeId ?? "(none)"}");
+        Log($"Trash node: {_trashNodeId ?? "(none)"}");
         _outboxProcessor.SetTrashNodeId(_trashNodeId);
 
         // Phase 1: Bulk fetch all FileNode IDs, then all nodes in pages
-        Console.WriteLine("Fetching all FileNode IDs...");
+        Log("Fetching all FileNode IDs...");
         var (allIds, _, total) = await _queue.EnqueueAsync(QueuePriority.Background,
             () => _jmapClient.QueryAllFileNodeIdsAsync(ct), ct);
-        Console.WriteLine($"Found {allIds.Length} FileNodes (total: {total})");
+        Log($"Found {allIds.Length} FileNodes (total: {total})");
 
-        Console.WriteLine("Fetching FileNode details...");
+        Log("Fetching FileNode details...");
         var (allNodes, state) = await _queue.EnqueueAsync(QueuePriority.Background,
             () => _jmapClient.GetFileNodesByIdsPagedAsync(allIds, 1024, ct), ct);
-        Console.WriteLine($"Fetched {allNodes.Length} FileNodes, state: {state}");
+        Log($"Fetched {allNodes.Length} FileNodes, state: {state}");
 
         BuildTreeAndCreatePlaceholders(allNodes);
 
@@ -347,7 +352,7 @@ public class SyncEngine : IDisposable
 
         // Phase 2: Create all placeholders in one fast pass (parent before children,
         // but each directory's children are created immediately after the directory)
-        Console.WriteLine($"Creating placeholders ({tree.Sum(t => t.children.Length)} items)...");
+        Log($"Creating placeholders ({tree.Sum(t => t.children.Length)} items)...");
         foreach (var (parentId, localParentPath, children) in tree)
         {
             var newChildren = children
@@ -382,7 +387,7 @@ public class SyncEngine : IDisposable
                             try { ConvertToPlaceholder(childPath, child.Id, child.IsFolder); }
                             catch (Exception ex)
                             {
-                                Console.Error.WriteLine($"  Convert failed for {child.Name}: {ex.Message}");
+                                LogError($"  Convert failed for {child.Name}: {ex.Message}");
                             }
                         }
                     }
@@ -418,7 +423,7 @@ public class SyncEngine : IDisposable
                         }
                         catch (Exception ex)
                         {
-                            Console.Error.WriteLine($"  Convert+mark failed for {localParentPath}: {ex.Message}");
+                            LogError($"  Convert+mark failed for {localParentPath}: {ex.Message}");
                         }
                     }
                 }
@@ -446,7 +451,7 @@ public class SyncEngine : IDisposable
 
         if (!_pinnedDirectories.IsEmpty)
         {
-            Console.WriteLine($"Found {_pinnedDirectories.Count} pinned directories, hydrating...");
+            Log($"Found {_pinnedDirectories.Count} pinned directories, hydrating...");
             _ = Task.Run(() =>
             {
                 foreach (var kvp in _pinnedDirectories)
@@ -455,17 +460,17 @@ public class SyncEngine : IDisposable
                     {
                         int count = HydrateDehydratedFiles(kvp.Key, kvp.Value.Token);
                         if (count > 0)
-                            Console.WriteLine($"Hydrated {count} files in pinned directory: {kvp.Key}");
+                            Log($"Hydrated {count} files in pinned directory: {kvp.Key}");
                         try { SetInSync(kvp.Key); }
                         catch { /* directory might not be a placeholder */ }
                     }
                     catch (OperationCanceledException)
                     {
-                        Console.WriteLine($"Hydration cancelled for pinned directory: {kvp.Key}");
+                        Log($"Hydration cancelled for pinned directory: {kvp.Key}");
                     }
                     catch (Exception ex)
                     {
-                        Console.Error.WriteLine($"Pin hydration error for {kvp.Key}: {ex.Message}");
+                        LogError($"Pin hydration error for {kvp.Key}: {ex.Message}");
                     }
                 }
             });
@@ -480,7 +485,7 @@ public class SyncEngine : IDisposable
         _outboxProcessor.SetTrashNodeId(_trashNodeId);
 
         // Rebuild mappings from cache, verifying items exist on disk with matching metadata
-        Console.WriteLine($"Restoring {cache.Entries.Count} mappings from cache...");
+        Log($"Restoring {cache.Entries.Count} mappings from cache...");
         int matchCount = 0;
         int mismatchCount = 0;
         int missingCount = 0;
@@ -523,7 +528,7 @@ public class SyncEngine : IDisposable
             _pathToNodeId[fullPath] = nodeId;
         }
         int fileCount = cache.Entries.Values.Count(e => !e.IsFolder) - missingCount;
-        Console.WriteLine($"  {matchCount} matched, {mismatchCount} changed, {missingCount} missing");
+        Log($"  {matchCount} matched, {mismatchCount} changed, {missingCount} missing");
 
         // If no files on disk, cache is stale — fall back to full fetch
         if (fileCount <= 0 && cache.Entries.Values.Any(e => !e.IsFolder))
@@ -546,11 +551,11 @@ public class SyncEngine : IDisposable
                     try
                     {
                         ConvertToPlaceholder(dir, nodeId, isDirectory: true);
-                        Console.WriteLine($"  Converted directory to placeholder: {dir}");
+                        Log($"  Converted directory to placeholder: {dir}");
                     }
                     catch (Exception ex)
                     {
-                        Console.Error.WriteLine($"  Convert failed for {dir}: {ex.Message}");
+                        LogError($"  Convert failed for {dir}: {ex.Message}");
                     }
                 }
             }
@@ -558,14 +563,14 @@ public class SyncEngine : IDisposable
 
         // Catch up with server
         string newState;
-        Console.WriteLine($"Catching up from state {cache.State}...");
+        Log($"Catching up from state {cache.State}...");
         try
         {
             newState = await PollChangesAsync(cache.State, ct);
         }
         catch (InvalidOperationException ex) when (ex.Message.Contains("cannotCalculateChanges"))
         {
-            Console.WriteLine("State too old, reconciling from server...");
+            Log("State too old, reconciling from server...");
             newState = await ReconcileFromServerAsync(ct);
         }
 
@@ -582,7 +587,7 @@ public class SyncEngine : IDisposable
     private async Task<string> ReconcileFromServerAsync(CancellationToken ct)
     {
         ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_SYNC_FULL);
-        Console.WriteLine("Reconciling: fetching all server node IDs...");
+        Log("Reconciling: fetching all server node IDs...");
 
         // Step 1: Fetch all alive node IDs from server
         var (serverIds, _, _) = await _queue.EnqueueAsync(QueuePriority.Background,
@@ -594,7 +599,7 @@ public class SyncEngine : IDisposable
         var goneIds = new HashSet<string>(cachedIdSet);
         goneIds.ExceptWith(serverIdSet);
 
-        Console.WriteLine($"Reconcile: {serverIds.Length} server nodes, {cachedIdSet.Count} cached, {goneIds.Count} gone");
+        Log($"Reconcile: {serverIds.Length} server nodes, {cachedIdSet.Count} cached, {goneIds.Count} gone");
 
         // Step 3: Remove gone nodes locally
         foreach (var id in goneIds)
@@ -602,7 +607,7 @@ public class SyncEngine : IDisposable
             // Skip nodes with pending local changes — outbox will handle them
             if (_outbox.HasPendingForNodeId(id))
             {
-                Console.WriteLine($"  Skipping gone node {id} (pending in outbox)");
+                Log($"  Skipping gone node {id} (pending in outbox)");
                 continue;
             }
 
@@ -614,10 +619,10 @@ public class SyncEngine : IDisposable
         }
 
         // Step 4: Fetch all server nodes in batches to get current data
-        Console.WriteLine($"Fetching {serverIds.Length} FileNode details...");
+        Log($"Fetching {serverIds.Length} FileNode details...");
         var (allNodes, state) = await _queue.EnqueueAsync(QueuePriority.Background,
             () => _jmapClient.GetFileNodesByIdsPagedAsync(serverIds, 1024, ct), ct);
-        Console.WriteLine($"Fetched {allNodes.Length} FileNodes, state: {state}");
+        Log($"Fetched {allNodes.Length} FileNodes, state: {state}");
 
         // Step 5: Build tree and reconcile — reuses the same BFS + placeholder logic
         // The existing mappings are already populated, so:
@@ -657,7 +662,7 @@ public class SyncEngine : IDisposable
                 // Skip nodes with pending local changes
                 if (_outbox.HasPendingForNodeId(child.Id))
                 {
-                    Console.WriteLine($"  Skipping reconcile for {child.Id} (pending in outbox)");
+                    Log($"  Skipping reconcile for {child.Id} (pending in outbox)");
                     continue;
                 }
 
@@ -675,17 +680,17 @@ public class SyncEngine : IDisposable
                         {
                             UpdateDescendantMappings(oldPath, expectedPath);
                             Directory.Move(oldPath, expectedPath);
-                            Console.WriteLine($"  Reconcile renamed folder: {oldPath} → {expectedPath}");
+                            Log($"  Reconcile renamed folder: {oldPath} → {expectedPath}");
                         }
                         else if (File.Exists(oldPath))
                         {
                             File.Move(oldPath, expectedPath);
-                            Console.WriteLine($"  Reconcile renamed file: {oldPath} → {expectedPath}");
+                            Log($"  Reconcile renamed file: {oldPath} → {expectedPath}");
                         }
                     }
                     catch (Exception ex)
                     {
-                        Console.Error.WriteLine($"  Reconcile rename failed {oldPath} → {expectedPath}: {ex.Message}");
+                        LogError($"  Reconcile rename failed {oldPath} → {expectedPath}: {ex.Message}");
                     }
                 }
 
@@ -738,7 +743,7 @@ public class SyncEngine : IDisposable
                         }
                         catch (Exception ex)
                         {
-                            Console.Error.WriteLine($"  Convert+mark failed for {localParentPath}: {ex.Message}");
+                            LogError($"  Convert+mark failed for {localParentPath}: {ex.Message}");
                         }
                     }
                 }
@@ -764,7 +769,7 @@ public class SyncEngine : IDisposable
 
         ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_SYNC_INCREMENTAL);
 
-        Console.WriteLine($"Changes: +{changes.Created.Length} ~{changes.Updated.Length} -{changes.Destroyed.Length}");
+        Log($"Changes: +{changes.Created.Length} ~{changes.Updated.Length} -{changes.Destroyed.Length}");
 
         // Process updated nodes first — sort shallowest-first by existing path
         // to handle parent renames before children
@@ -782,7 +787,7 @@ public class SyncEngine : IDisposable
             // Skip server changes for items with pending local changes
             if (_outbox.HasPendingForNodeId(node.Id))
             {
-                Console.WriteLine($"  Skipping update for {node.Id} (pending in outbox)");
+                Log($"  Skipping update for {node.Id} (pending in outbox)");
                 continue;
             }
 
@@ -794,7 +799,7 @@ public class SyncEngine : IDisposable
             {
                 if (oldPath != null)
                 {
-                    Console.WriteLine($"  Removed from sync tree: {oldPath}");
+                    Log($"  Removed from sync tree: {oldPath}");
                     // Clean up descendant mappings for folders
                     if (Directory.Exists(oldPath))
                     {
@@ -844,12 +849,12 @@ public class SyncEngine : IDisposable
                         if (isDirectory)
                         {
                             Directory.Move(oldPath, newPath);
-                            Console.WriteLine($"  Renamed folder: {oldPath} → {newPath}");
+                            Log($"  Renamed folder: {oldPath} → {newPath}");
                         }
                         else if (File.Exists(oldPath))
                         {
                             File.Move(oldPath, newPath);
-                            Console.WriteLine($"  Renamed file: {oldPath} → {newPath}");
+                            Log($"  Renamed file: {oldPath} → {newPath}");
                         }
                     }
                     // Re-mark as in-sync after move (cfapi may clear in-sync on rename)
@@ -857,7 +862,7 @@ public class SyncEngine : IDisposable
                 }
                 catch (Exception ex)
                 {
-                    Console.Error.WriteLine($"  Failed to rename {oldPath} → {newPath}: {ex.Message}");
+                    LogError($"  Failed to rename {oldPath} → {newPath}: {ex.Message}");
                 }
 
                 TrackFolderPermissions(node, newPath);
@@ -891,7 +896,7 @@ public class SyncEngine : IDisposable
 
             if (_outbox.HasPendingForNodeId(node.Id))
             {
-                Console.WriteLine($"  Skipping create for {node.Id} (pending in outbox)");
+                Log($"  Skipping create for {node.Id} (pending in outbox)");
                 continue;
             }
 
@@ -914,7 +919,7 @@ public class SyncEngine : IDisposable
                     try { HydratePlaceholder(childPath); }
                     catch (Exception ex)
                     {
-                        Console.Error.WriteLine($"  Auto-hydration failed for {node.Name}: {ex.Message}");
+                        LogError($"  Auto-hydration failed for {node.Name}: {ex.Message}");
                     }
                 }
             }
@@ -930,7 +935,7 @@ public class SyncEngine : IDisposable
         {
             if (_outbox.HasPendingForNodeId(destroyedId))
             {
-                Console.WriteLine($"  Skipping destroy for {destroyedId} (pending in outbox)");
+                Log($"  Skipping destroy for {destroyedId} (pending in outbox)");
                 continue;
             }
 
@@ -942,7 +947,7 @@ public class SyncEngine : IDisposable
                 // still intends to upload the user's local content.
                 if (_outbox.HasPendingForPath(localPath))
                 {
-                    Console.WriteLine($"  Skipping delete for {destroyedId} (outbox pending for path): {localPath}");
+                    Log($"  Skipping delete for {destroyedId} (outbox pending for path): {localPath}");
                     continue;
                 }
                 _pathToNodeId.TryRemove(localPath, out _);
@@ -953,7 +958,7 @@ public class SyncEngine : IDisposable
             }
             else
             {
-                Console.WriteLine($"  Destroyed: {destroyedId} (no local path mapped)");
+                Log($"  Destroyed: {destroyedId} (no local path mapped)");
             }
         }
 
@@ -975,7 +980,7 @@ public class SyncEngine : IDisposable
             var parentDir = Path.GetDirectoryName(change.FullPath);
             if (parentDir != null && _readOnlyPaths.ContainsKey(parentDir))
             {
-                Console.WriteLine($"Ignoring local change in read-only folder: {change.FullPath}");
+                Log($"Ignoring local change in read-only folder: {change.FullPath}");
                 try
                 {
                     using (SuspendFolderProtection(parentDir))
@@ -988,7 +993,7 @@ public class SyncEngine : IDisposable
                 }
                 catch (Exception ex)
                 {
-                    Console.Error.WriteLine($"Failed to remove rejected local file: {ex.Message}");
+                    LogError($"Failed to remove rejected local file: {ex.Message}");
                 }
                 continue;
             }
@@ -1032,7 +1037,7 @@ public class SyncEngine : IDisposable
 
         if (_pathToNodeId.TryGetValue(oldPath, out var nodeId))
         {
-            Console.WriteLine($"FSWatcher rename: node {nodeId}, {oldPath} → {newPath}");
+            Log($"FSWatcher rename: node {nodeId}, {oldPath} → {newPath}");
             _outbox.EnqueueMove(nodeId, oldPath, newPath);
 
             if (Directory.Exists(newPath))
@@ -1047,7 +1052,7 @@ public class SyncEngine : IDisposable
             // Untracked rename — treat new path as a fresh create
             var isDirectory = Directory.Exists(newPath);
             var contentType = isDirectory ? null : ResolveContentType(newPath);
-            Console.WriteLine($"FSWatcher rename (untracked): {oldPath} → {newPath}");
+            Log($"FSWatcher rename (untracked): {oldPath} → {newPath}");
             _outbox.EnqueueContentChange(newPath, null, contentType, isDirectory);
         }
     }
@@ -1058,7 +1063,7 @@ public class SyncEngine : IDisposable
         // or an echo from PollChangesAsync which already removed the mapping.
         if (nodeId == null || !_pathToNodeId.ContainsKey(path))
         {
-            Console.WriteLine($"NOTIFY_DELETE: allowing untracked/echo delete: {path}");
+            Log($"NOTIFY_DELETE: allowing untracked/echo delete: {path}");
             return Task.FromResult(true);
         }
 
@@ -1066,11 +1071,11 @@ public class SyncEngine : IDisposable
         var deleteParentDir = Path.GetDirectoryName(path);
         if (deleteParentDir != null && _readOnlyPaths.ContainsKey(deleteParentDir))
         {
-            Console.WriteLine($"NOTIFY_DELETE: rejected (folder is read-only): {path}");
+            Log($"NOTIFY_DELETE: rejected (folder is read-only): {path}");
             return Task.FromResult(false);
         }
 
-        Console.WriteLine($"NOTIFY_DELETE: queuing delete for node {nodeId}: {path}");
+        Log($"NOTIFY_DELETE: queuing delete for node {nodeId}: {path}");
 
         // Enqueue child deletes for directories
         var prefix = path + Path.DirectorySeparatorChar;
@@ -1097,7 +1102,7 @@ public class SyncEngine : IDisposable
         // No node ID → not a tracked placeholder, allow
         if (nodeId == null)
         {
-            Console.WriteLine($"NOTIFY_RENAME: allowing untracked rename: {source} → {target}");
+            Log($"NOTIFY_RENAME: allowing untracked rename: {source} → {target}");
             return Task.FromResult(true);
         }
 
@@ -1105,7 +1110,7 @@ public class SyncEngine : IDisposable
         var sourceParent = Path.GetDirectoryName(source);
         if (sourceParent != null && _readOnlyPaths.ContainsKey(sourceParent))
         {
-            Console.WriteLine($"NOTIFY_RENAME: rejected (source folder is read-only): {source}");
+            Log($"NOTIFY_RENAME: rejected (source folder is read-only): {source}");
             return Task.FromResult(false);
         }
 
@@ -1115,7 +1120,7 @@ public class SyncEngine : IDisposable
             var targetParent = Path.GetDirectoryName(target);
             if (targetParent != null && _readOnlyPaths.ContainsKey(targetParent))
             {
-                Console.WriteLine($"NOTIFY_RENAME: rejected (target folder is read-only): {target}");
+                Log($"NOTIFY_RENAME: rejected (target folder is read-only): {target}");
                 return Task.FromResult(false);
             }
         }
@@ -1123,7 +1128,7 @@ public class SyncEngine : IDisposable
         // Move out of sync root → queue as delete
         if (!targetInScope)
         {
-            Console.WriteLine($"NOTIFY_RENAME: move out of sync root, queuing delete: {source} → {target}");
+            Log($"NOTIFY_RENAME: move out of sync root, queuing delete: {source} → {target}");
             _outbox.EnqueueDelete(source, nodeId);
             _pathToNodeId.TryRemove(source, out _);
             _nodeIdToPath.TryRemove(nodeId, out _);
@@ -1135,11 +1140,11 @@ public class SyncEngine : IDisposable
         if (_nodeIdToPath.TryGetValue(nodeId, out var mappedPath) &&
             string.Equals(mappedPath, target, StringComparison.OrdinalIgnoreCase))
         {
-            Console.WriteLine($"NOTIFY_RENAME: allowing echo for {nodeId}");
+            Log($"NOTIFY_RENAME: allowing echo for {nodeId}");
             return Task.FromResult(true);
         }
 
-        Console.WriteLine($"NOTIFY_RENAME: queuing move for node {nodeId}: {source} → {target}");
+        Log($"NOTIFY_RENAME: queuing move for node {nodeId}: {source} → {target}");
         _outbox.EnqueueMove(nodeId, source, target);
 
         // Update descendant mappings if this is a directory
@@ -1171,17 +1176,17 @@ public class SyncEngine : IDisposable
                 {
                     int count = HydrateDehydratedFiles(info.DirectoryPath, cts.Token);
                     if (count > 0)
-                        Console.WriteLine($"Hydrated {count} files after directory populated: {info.DirectoryPath}");
+                        Log($"Hydrated {count} files after directory populated: {info.DirectoryPath}");
                     try { SetInSync(info.DirectoryPath); }
                     catch { /* directory might not be a placeholder */ }
                 }
                 catch (OperationCanceledException)
                 {
-                    Console.WriteLine($"Hydration cancelled for populated directory: {info.DirectoryPath}");
+                    Log($"Hydration cancelled for populated directory: {info.DirectoryPath}");
                 }
                 catch (Exception ex)
                 {
-                    Console.Error.WriteLine($"Hydration error for {info.DirectoryPath}: {ex.Message}");
+                    LogError($"Hydration error for {info.DirectoryPath}: {ex.Message}");
                 }
             });
         }
@@ -1192,24 +1197,24 @@ public class SyncEngine : IDisposable
         var cts = new CancellationTokenSource();
         if (_pinnedDirectories.TryAdd(directoryPath, cts))
         {
-            Console.WriteLine($"Directory pinned: {directoryPath}");
+            Log($"Directory pinned: {directoryPath}");
             _ = Task.Run(() =>
             {
                 try
                 {
                     int count = HydrateDehydratedFiles(directoryPath, cts.Token);
                     if (count > 0)
-                        Console.WriteLine($"Hydrated {count} files in {directoryPath}");
+                        Log($"Hydrated {count} files in {directoryPath}");
                     try { SetInSync(directoryPath); }
                     catch { /* directory might not be a placeholder */ }
                 }
                 catch (OperationCanceledException)
                 {
-                    Console.WriteLine($"Hydration cancelled for {directoryPath}");
+                    Log($"Hydration cancelled for {directoryPath}");
                 }
                 catch (Exception ex)
                 {
-                    Console.Error.WriteLine($"Pin hydration error for {directoryPath}: {ex.Message}");
+                    LogError($"Pin hydration error for {directoryPath}: {ex.Message}");
                 }
             });
         }
@@ -1237,19 +1242,19 @@ public class SyncEngine : IDisposable
                 if ((attrs & dehydratedFlag) == 0)
                     return; // Already hydrated
 
-                Console.WriteLine($"Hydrating pinned file: {Path.GetFileName(filePath)}");
+                Log($"Hydrating pinned file: {Path.GetFileName(filePath)}");
                 HydratePlaceholder(filePath);
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"File pin hydration error for {Path.GetFileName(filePath)}: {ex.Message}");
+                LogError($"File pin hydration error for {Path.GetFileName(filePath)}: {ex.Message}");
             }
         });
     }
 
     private Task<bool> HandleDehydrateRequestAsync(string? nodeId, string path)
     {
-        Console.WriteLine($"Allowing OS-initiated dehydration: node={nodeId}, path={path}");
+        Log($"Allowing OS-initiated dehydration: node={nodeId}, path={path}");
         return Task.FromResult(true);
     }
 
@@ -1281,7 +1286,7 @@ public class SyncEngine : IDisposable
             var nodeIdSet = new HashSet<string>(filesToDehydrate.Select(f => f.NodeId));
             _syncCallbacks.CancelFetchesWhere(nodeId => nodeIdSet.Contains(nodeId));
 
-            Console.WriteLine($"Unpinned directory: {path} ({filesToDehydrate.Count} files to dehydrate)");
+            Log($"Unpinned directory: {path} ({filesToDehydrate.Count} files to dehydrate)");
 
             // 4. Dehydrate each file on a background thread.
             _ = Task.Run(() =>
@@ -1316,11 +1321,11 @@ public class SyncEngine : IDisposable
                         return; // Already dehydrated (e.g. by OS via NOTIFY_DEHYDRATE)
 
                     DehydratePlaceholderWithRetry(path);
-                    Console.WriteLine($"Dehydrated: {Path.GetFileName(path)}");
+                    Log($"Dehydrated: {Path.GetFileName(path)}");
                 }
                 catch (Exception ex)
                 {
-                    Console.Error.WriteLine($"Dehydration error for {path}: {ex.Message}");
+                    LogError($"Dehydration error for {path}: {ex.Message}");
                 }
                 finally
                 {
@@ -1539,13 +1544,13 @@ public class SyncEngine : IDisposable
                     if ((attrs & dehydratedFlag) == 0)
                         continue; // Already hydrated
 
-                    Console.WriteLine($"Hydrating pinned file: {Path.GetFileName(filePath)}");
+                    Log($"Hydrating pinned file: {Path.GetFileName(filePath)}");
                     HydratePlaceholder(filePath);
                     count++;
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
-                    Console.Error.WriteLine($"  Hydration failed for {Path.GetFileName(filePath)}: {ex.Message}");
+                    LogError($"  Hydration failed for {Path.GetFileName(filePath)}: {ex.Message}");
                     failed.Add(filePath);
                 }
             }
@@ -1554,7 +1559,7 @@ public class SyncEngine : IDisposable
             for (int retry = 1; retry <= 3 && failed.Count > 0; retry++)
             {
                 ct.ThrowIfCancellationRequested();
-                Console.WriteLine($"Retrying {failed.Count} failed hydrations (attempt {retry})...");
+                Log($"Retrying {failed.Count} failed hydrations (attempt {retry})...");
                 Thread.Sleep(2000 * retry);
 
                 var stillFailed = new List<string>();
@@ -1567,14 +1572,14 @@ public class SyncEngine : IDisposable
                         if ((attrs & dehydratedFlag) == 0)
                             continue; // Hydrated by another path
 
-                        Console.WriteLine($"Hydrating pinned file (retry {retry}): {Path.GetFileName(filePath)}");
+                        Log($"Hydrating pinned file (retry {retry}): {Path.GetFileName(filePath)}");
                         HydratePlaceholder(filePath);
                         count++;
                     }
                     catch (Exception ex) when (ex is not OperationCanceledException)
                     {
                         if (retry == 3)
-                            Console.Error.WriteLine($"  Hydration failed after retries for {Path.GetFileName(filePath)}: {ex.Message}");
+                            LogError($"  Hydration failed after retries for {Path.GetFileName(filePath)}: {ex.Message}");
                         stillFailed.Add(filePath);
                     }
                 }
@@ -1783,7 +1788,7 @@ public class SyncEngine : IDisposable
 
         // Create the directory on the server
         var folderName = Path.GetFileName(localDir);
-        Console.WriteLine($"Auto-creating missing parent folder on server: {folderName}");
+        Log($"Auto-creating missing parent folder on server: {folderName}");
         var node = await _queue.EnqueueAsync(QueuePriority.Background,
             () => _jmapClient.CreateFileNodeAsync(parentNodeId, null, folderName));
 
@@ -1791,7 +1796,7 @@ public class SyncEngine : IDisposable
         ConvertToPlaceholder(localDir, node.Id, isDirectory: true);
         _pathToNodeId[localDir] = node.Id;
         _nodeIdToPath[node.Id] = localDir;
-        Console.WriteLine($"Auto-created folder: {folderName} → node {node.Id}");
+        Log($"Auto-created folder: {folderName} → node {node.Id}");
 
         return node.Id;
     }

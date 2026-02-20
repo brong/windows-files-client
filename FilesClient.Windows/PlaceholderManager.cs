@@ -12,10 +12,15 @@ internal class PlaceholderManager
     private static readonly char[] InvalidChars = ['\\', '/', ':', '*', '?', '"', '<', '>', '|'];
 
     private readonly string _syncRootPath;
+    private readonly string _logPrefix;
 
-    public PlaceholderManager(string syncRootPath)
+    private void Log(string msg) => Console.WriteLine($"{_logPrefix} {msg}");
+    private void LogError(string msg) => Console.Error.WriteLine($"{_logPrefix} {msg}");
+
+    public PlaceholderManager(string syncRootPath, string logPrefix)
     {
         _syncRootPath = syncRootPath;
+        _logPrefix = logPrefix;
     }
 
     /// <summary>
@@ -103,12 +108,12 @@ internal class PlaceholderManager
             {
                 // Report per-entry results before throwing
                 for (int i = 0; i < children.Length; i++)
-                    Console.Error.WriteLine($"  [{i}] {children[i].Name} (folder={children[i].IsFolder}): 0x{infos[i].Result:X8}");
-                Console.Error.WriteLine($"CfCreatePlaceholders failed in {parentPath}: 0x{hr.Value:X8} ({entriesProcessed} processed)");
+                    LogError($"  [{i}] {children[i].Name} (folder={children[i].IsFolder}): 0x{infos[i].Result:X8}");
+                LogError($"CfCreatePlaceholders failed in {parentPath}: 0x{hr.Value:X8} ({entriesProcessed} processed)");
                 hr.ThrowOnFailure();
             }
 
-            Console.WriteLine($"Created {entriesProcessed} placeholders in {parentPath}");
+            Log($"Created {entriesProcessed} placeholders in {parentPath}");
         }
         finally
         {

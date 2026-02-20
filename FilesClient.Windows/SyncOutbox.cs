@@ -64,8 +64,14 @@ public class SyncOutbox : IDisposable
 
     public event Action<int>? PendingCountChanged;
 
-    public SyncOutbox(string scopeKey)
+    private readonly string _logPrefix;
+
+    private void Log(string msg) => Console.WriteLine($"{_logPrefix} {msg}");
+    private void LogError(string msg) => Console.Error.WriteLine($"{_logPrefix} {msg}");
+
+    public SyncOutbox(string scopeKey, string logPrefix)
     {
+        _logPrefix = logPrefix;
         // ScopeKey is "username/accountId" — split into path segments
         var parts = scopeKey.Split('/', '\\');
         var dir = Path.Combine(
@@ -112,14 +118,14 @@ public class SyncOutbox : IDisposable
 
             if (entries.Length > 0)
             {
-                Console.WriteLine($"Loaded {entries.Length} pending changes from outbox");
+                Log($"Loaded {entries.Length} pending changes from outbox");
                 _workSignal.Set();
                 RaisePendingCountChanged();
             }
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"Failed to load outbox: {ex.Message}");
+            LogError($"Failed to load outbox: {ex.Message}");
         }
     }
 
@@ -430,7 +436,7 @@ public class SyncOutbox : IDisposable
             _processingIds.Remove(id);
             if (_entries.TryGetValue(id, out var entry))
             {
-                Console.WriteLine($"Outbox: rejected {entry.LocalPath ?? entry.NodeId}: {reason}");
+                Log($"Outbox: rejected {entry.LocalPath ?? entry.NodeId}: {reason}");
                 RemoveEntryLocked(entry);
                 MarkDirtyAndSignal();
             }
@@ -526,7 +532,7 @@ public class SyncOutbox : IDisposable
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"Failed to save outbox: {ex.Message}");
+            LogError($"Failed to save outbox: {ex.Message}");
         }
     }
 

@@ -14,6 +14,10 @@ internal class SyncCallbacks
 {
     private readonly IJmapClient _jmapClient;
     private readonly JmapQueue _queue;
+    private readonly string _logPrefix;
+
+    private void Log(string msg) => Console.WriteLine($"{_logPrefix} {msg}");
+    private void LogError(string msg) => Console.Error.WriteLine($"{_logPrefix} {msg}");
 
     /// <summary>
     /// Node IDs that were recently hydrated by cfapi. SyncEngine checks this
@@ -61,10 +65,11 @@ internal class SyncCallbacks
     public record DirectoryPopulatedInfo(string DirectoryPath);
     public event Action<DirectoryPopulatedInfo>? OnDirectoryPopulated;
 
-    public SyncCallbacks(IJmapClient jmapClient, JmapQueue queue)
+    public SyncCallbacks(IJmapClient jmapClient, JmapQueue queue, string logPrefix)
     {
         _jmapClient = jmapClient;
         _queue = queue;
+        _logPrefix = logPrefix;
     }
 
     public unsafe (CF_CALLBACK_REGISTRATION[] registrations, CF_CALLBACK[] delegates) CreateCallbackRegistrations()
@@ -135,7 +140,7 @@ internal class SyncCallbacks
             // in sync by PollChangesAsync.  Just acknowledge so cfapi marks the
             // directory as populated — enabling pin hydration of its children.
             var nodeId = ExtractNodeId(callbackInfo);
-            Console.WriteLine($"FETCH_PLACEHOLDERS: node={nodeId}, path={callbackInfo->NormalizedPath}");
+            Log($"FETCH_PLACEHOLDERS: node={nodeId}, path={callbackInfo->NormalizedPath}");
 
             var opInfo = new CF_OPERATION_INFO
             {
@@ -162,7 +167,7 @@ internal class SyncCallbacks
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"FETCH_PLACEHOLDERS error: {ex.Message}");
+            LogError($"FETCH_PLACEHOLDERS error: {ex.Message}");
         }
     }
 
@@ -186,7 +191,7 @@ internal class SyncCallbacks
 
             if (string.IsNullOrEmpty(nodeId))
             {
-                Console.Error.WriteLine($"FETCH_DATA: No identity for {fileName}");
+                LogError($"FETCH_DATA: No identity for {fileName}");
                 TransferError(*callbackInfo, new NTSTATUS(unchecked((int)0xC000000D))); // STATUS_INVALID_PARAMETER
                 return;
             }
@@ -208,7 +213,7 @@ internal class SyncCallbacks
                 }
                 catch { }
             }
-            Console.WriteLine($"FETCH_DATA: node={nodeId}, offset={requiredOffset}, len={requiredLength}, caller={processName}");
+            Log($"FETCH_DATA: node={nodeId}, offset={requiredOffset}, len={requiredLength}, caller={processName}");
 
             // Download blob data asynchronously, then transfer to cfapi
             // synchronously on the callback thread (CfExecute requires
@@ -226,11 +231,11 @@ internal class SyncCallbacks
         }
         catch (OperationCanceledException)
         {
-            Console.WriteLine($"FETCH_DATA cancelled: transferKey={transferKey}");
+            Log($"FETCH_DATA cancelled: transferKey={transferKey}");
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"FETCH_DATA error: {ex.Message}");
+            LogError($"FETCH_DATA error: {ex.Message}");
             TransferError(*callbackInfo, new NTSTATUS(unchecked((int)0xC0000001))); // STATUS_UNSUCCESSFUL
         }
         finally
@@ -249,14 +254,14 @@ internal class SyncCallbacks
             var nodeId = ExtractNodeId(callbackInfo);
             var fullPath = ExtractFullPath(callbackInfo);
 
-            Console.WriteLine($"NOTIFY_DELETE: node={nodeId}, path={fullPath}");
+            Log($"NOTIFY_DELETE: node={nodeId}, path={fullPath}");
 
             if (OnDeleteRequested != null)
                 allowed = OnDeleteRequested(nodeId, fullPath).GetAwaiter().GetResult();
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"NOTIFY_DELETE error: {ex.Message}");
+            LogError($"NOTIFY_DELETE error: {ex.Message}");
             allowed = false;
         }
         AckDelete(callbackInfo, allowed);
@@ -277,14 +282,14 @@ internal class SyncCallbacks
 
             bool targetInScope = ((uint)renameParams.Flags & 0x4) != 0; // CF_CALLBACK_RENAME_FLAG_TARGET_IN_SCOPE
 
-            Console.WriteLine($"NOTIFY_RENAME: node={nodeId}, {sourcePath} → {targetPath} (inScope={targetInScope})");
+            Log($"NOTIFY_RENAME: node={nodeId}, {sourcePath} → {targetPath} (inScope={targetInScope})");
 
             if (OnRenameRequested != null)
                 allowed = OnRenameRequested(nodeId, sourcePath, targetPath, targetInScope).GetAwaiter().GetResult();
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"NOTIFY_RENAME error: {ex.Message}");
+            LogError($"NOTIFY_RENAME error: {ex.Message}");
             allowed = false;
         }
         AckRename(callbackInfo, allowed);
@@ -294,7 +299,7 @@ internal class SyncCallbacks
     {
         var transferKey = callbackInfo->TransferKey;
         var nodeId = ExtractNodeId(callbackInfo);
-        Console.WriteLine($"CANCEL_FETCH_DATA: node={nodeId}, transferKey={transferKey}");
+        Log($"CANCEL_FETCH_DATA: node={nodeId}, transferKey={transferKey}");
 
         if (_inFlightFetches.TryGetValue(transferKey, out var entry))
             entry.Cts.Cancel();
@@ -312,7 +317,7 @@ internal class SyncCallbacks
             var (cts, nodeId) = kvp.Value;
             if (nodeId != null && shouldCancel(nodeId))
             {
-                Console.WriteLine($"Cancelling in-flight download for node {nodeId}");
+                Log($"Cancelling in-flight download for node {nodeId}");
                 cts.Cancel();
             }
         }
@@ -326,14 +331,14 @@ internal class SyncCallbacks
             var nodeId = ExtractNodeId(callbackInfo);
             var fullPath = ExtractFullPath(callbackInfo);
 
-            Console.WriteLine($"NOTIFY_DEHYDRATE: node={nodeId}, path={fullPath}");
+            Log($"NOTIFY_DEHYDRATE: node={nodeId}, path={fullPath}");
 
             if (OnDehydrateRequested != null)
                 allowed = OnDehydrateRequested(nodeId, fullPath).GetAwaiter().GetResult();
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"NOTIFY_DEHYDRATE error: {ex.Message}");
+            LogError($"NOTIFY_DEHYDRATE error: {ex.Message}");
             allowed = false;
         }
         AckDehydrate(callbackInfo, allowed);
@@ -345,11 +350,11 @@ internal class SyncCallbacks
         {
             var nodeId = ExtractNodeId(callbackInfo);
             var fullPath = ExtractFullPath(callbackInfo);
-            Console.WriteLine($"NOTIFY_DEHYDRATE_COMPLETION: node={nodeId}, path={fullPath}");
+            Log($"NOTIFY_DEHYDRATE_COMPLETION: node={nodeId}, path={fullPath}");
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"NOTIFY_DEHYDRATE_COMPLETION error: {ex.Message}");
+            LogError($"NOTIFY_DEHYDRATE_COMPLETION error: {ex.Message}");
         }
     }
 
@@ -514,14 +519,14 @@ internal class SyncCallbacks
                 {
                     var data = Convert.FromBase64String(item.DataAsBase64);
                     VerifyDigest(algo, data, item, $"Blob/get {node.BlobId}");
-                    Console.WriteLine($"FETCH_DATA: small file via Blob/get, {data.Length} bytes");
+                    Log($"FETCH_DATA: small file via Blob/get, {data.Length} bytes");
                     return (data, 0, nodeSize);
                 }
             }
             catch (OperationCanceledException) { throw; }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"Blob/get failed for small file, falling back to HTTP: {ex.Message}");
+                LogError($"Blob/get failed for small file, falling back to HTTP: {ex.Message}");
             }
         }
 
@@ -557,7 +562,7 @@ internal class SyncCallbacks
                             }
                             catch (Exception ex) when (ex is not OperationCanceledException)
                             {
-                                Console.Error.WriteLine($"Digest fetch failed for range request: {ex.Message}");
+                                LogError($"Digest fetch failed for range request: {ex.Message}");
                             }
                         }
                         return (rangeBytes, requiredOffset, nodeSize);
@@ -565,7 +570,7 @@ internal class SyncCallbacks
 
                     // Server returned 200 (full content) — disable range requests
                     _rangeRequestsSupported = false;
-                    Console.WriteLine("Range requests not supported by server, falling back to full downloads");
+                    Log("Range requests not supported by server, falling back to full downloads");
 
                     if (algo != null)
                     {
@@ -578,7 +583,7 @@ internal class SyncCallbacks
                         }
                         catch (Exception ex) when (ex is not OperationCanceledException)
                         {
-                            Console.Error.WriteLine($"Digest fetch failed for full fallback: {ex.Message}");
+                            LogError($"Digest fetch failed for full fallback: {ex.Message}");
                         }
                     }
                     return (rangeBytes, 0, nodeSize);
@@ -588,7 +593,7 @@ internal class SyncCallbacks
             catch (Exception ex)
             {
                 _rangeRequestsSupported = false;
-                Console.Error.WriteLine($"Range request failed, falling back to full download: {ex.Message}");
+                LogError($"Range request failed, falling back to full download: {ex.Message}");
             }
         }
 
@@ -615,7 +620,7 @@ internal class SyncCallbacks
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
-                    Console.Error.WriteLine($"Digest fetch failed for full download: {ex.Message}");
+                    LogError($"Digest fetch failed for full download: {ex.Message}");
                 }
             }
 

@@ -9,6 +9,7 @@ internal sealed class FileChangeWatcher : IDisposable
     public record FileChange(string FullPath, ChangeKind Kind);
 
     private readonly string _syncRootPath;
+    private readonly string _logPrefix;
     private FileSystemWatcher? _watcher;
     private readonly ConcurrentDictionary<string, ChangeKind> _pending = new(StringComparer.OrdinalIgnoreCase);
     private readonly Timer _debounceTimer;
@@ -40,9 +41,10 @@ internal sealed class FileChangeWatcher : IDisposable
     /// </summary>
     public event Action<string, string>? OnRenamed;
 
-    public FileChangeWatcher(string syncRootPath)
+    public FileChangeWatcher(string syncRootPath, string logPrefix)
     {
         _syncRootPath = syncRootPath;
+        _logPrefix = logPrefix;
         _debounceTimer = new Timer(FlushChanges);
     }
 
@@ -61,7 +63,7 @@ internal sealed class FileChangeWatcher : IDisposable
         _watcher.Renamed += (_, e) => OnRenamed?.Invoke(e.OldFullPath, e.FullPath);
 
         _watcher.EnableRaisingEvents = true;
-        Console.WriteLine("File change watcher started.");
+        Console.WriteLine($"{_logPrefix} File change watcher started.");
     }
 
     public void Stop()

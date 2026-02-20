@@ -17,6 +17,7 @@ internal class SyncRoot : IDisposable
     private const string ProviderName = "FastmailFiles";
 
     private readonly string _syncRootPath;
+    private readonly string _logPrefix;
     private string _syncRootId = ProviderName;
     private CF_CONNECTION_KEY _connectionKey;
     private bool _connected;
@@ -29,9 +30,13 @@ internal class SyncRoot : IDisposable
 
     public string SyncRootPath => _syncRootPath;
 
-    public SyncRoot(string syncRootPath)
+    private void Log(string msg) => Console.WriteLine($"{_logPrefix} {msg}");
+    private void LogError(string msg) => Console.Error.WriteLine($"{_logPrefix} {msg}");
+
+    public SyncRoot(string syncRootPath, string logPrefix)
     {
         _syncRootPath = syncRootPath;
+        _logPrefix = logPrefix;
     }
 
     public async Task RegisterAsync(string displayName, string providerVersion, string accountId, string? iconPath = null)
@@ -55,7 +60,7 @@ internal class SyncRoot : IDisposable
             var existing = StorageProviderSyncRootManager.GetSyncRootInformationForFolder(folder);
             if (existing?.Id != null && existing.Id != _syncRootId)
             {
-                Console.WriteLine($"Unregistering stale sync root at same path: {existing.Id}");
+                Log($"Unregistering stale sync root at same path: {existing.Id}");
                 StorageProviderSyncRootManager.Unregister(existing.Id);
             }
         }
@@ -85,7 +90,7 @@ internal class SyncRoot : IDisposable
 
         StorageProviderSyncRootManager.Register(info);
         _registered = true;
-        Console.WriteLine($"Sync root registered: {_syncRootPath} (id={_syncRootId})");
+        Log($"Sync root registered: {_syncRootPath} (id={_syncRootId})");
     }
 
     internal unsafe void Connect(CF_CALLBACK_REGISTRATION[] callbacks, CF_CALLBACK[] delegates)
@@ -105,7 +110,7 @@ internal class SyncRoot : IDisposable
 
         _connectionKey = key;
         _connected = true;
-        Console.WriteLine("Sync root connected, ready for callbacks.");
+        Log("Sync root connected, ready for callbacks.");
     }
 
     internal CF_CONNECTION_KEY GetConnectionKey() => _connectionKey;
@@ -124,7 +129,7 @@ internal class SyncRoot : IDisposable
             _connected = false;
             _callbackRegistrations = null;
             _callbackDelegates = null;
-            Console.WriteLine("Sync root disconnected.");
+            Log("Sync root disconnected.");
         }
     }
 
@@ -134,7 +139,7 @@ internal class SyncRoot : IDisposable
         {
             StorageProviderSyncRootManager.Unregister(_syncRootId);
             _registered = false;
-            Console.WriteLine("Sync root unregistered.");
+            Log("Sync root unregistered.");
         }
     }
 
