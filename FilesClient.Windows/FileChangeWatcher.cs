@@ -33,6 +33,13 @@ internal sealed class FileChangeWatcher : IDisposable
     /// </summary>
     public event Action<string>? OnFileUnpinned;
 
+    /// <summary>
+    /// Fired when a file or directory is renamed. cfapi's NOTIFY_RENAME may not
+    /// always fire (e.g. race with placeholder registration), so this is a fallback.
+    /// Parameters: (oldPath, newPath)
+    /// </summary>
+    public event Action<string, string>? OnRenamed;
+
     public FileChangeWatcher(string syncRootPath)
     {
         _syncRootPath = syncRootPath;
@@ -51,6 +58,7 @@ internal sealed class FileChangeWatcher : IDisposable
 
         _watcher.Created += (_, e) => OnCreated(e.FullPath);
         _watcher.Changed += (_, e) => OnChanged(e.FullPath);
+        _watcher.Renamed += (_, e) => OnRenamed?.Invoke(e.OldFullPath, e.FullPath);
 
         _watcher.EnableRaisingEvents = true;
         Console.WriteLine("File change watcher started.");

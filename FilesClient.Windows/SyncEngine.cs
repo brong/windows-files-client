@@ -157,6 +157,7 @@ public class SyncEngine : IDisposable
         _syncCallbacks.OnDirectoryPopulated += OnDirectoryPopulated;
         _fileChangeWatcher = new FileChangeWatcher(syncRootPath);
         _fileChangeWatcher.OnChanges += OnLocalFileChanges;
+        _fileChangeWatcher.OnRenamed += OnLocalRenamed;
         _fileChangeWatcher.OnDirectoryPinned += OnDirectoryPinned;
         _fileChangeWatcher.OnFilePinned += OnFilePinned;
         _fileChangeWatcher.OnFileUnpinned += OnFileUnpinned;
@@ -953,6 +954,38 @@ public class SyncEngine : IDisposable
             var contentType = ResolveContentType(change.FullPath);
 
             _outbox.EnqueueContentChange(change.FullPath, nodeId, contentType, isDirectory);
+        }
+    }
+
+    /// <summary>
+    /// Fallback for renames that cfapi's NOTIFY_RENAME didn't catch
+    /// (e.g. race with placeholder registration on newly created items).
+    /// </summary>
+    private void OnLocalRenamed(string oldPath, string newPath)
+    {
+        // If cfapi already handled this rename, mappings will point to newPath
+        if (_pathToNodeId.ContainsKey(newPath))
+            return;
+
+        if (_pathToNodeId.TryGetValue(oldPath, out var nodeId))
+        {
+            Console.WriteLine($"FSWatcher rename: node {nodeId}, {oldPath} → {newPath}");
+            _outbox.EnqueueMove(nodeId, oldPath, newPath);
+
+            if (Directory.Exists(newPath))
+                UpdateDescendantMappings(oldPath, newPath);
+
+            _pathToNodeId.TryRemove(oldPath, out _);
+            _pathToNodeId[newPath] = nodeId;
+            _nodeIdToPath[nodeId] = newPath;
+        }
+        else
+        {
+            // Untracked rename — treat new path as a fresh create
+            var isDirectory = Directory.Exists(newPath);
+            var contentType = isDirectory ? null : ResolveContentType(newPath);
+            Console.WriteLine($"FSWatcher rename (untracked): {oldPath} → {newPath}");
+            _outbox.EnqueueContentChange(newPath, null, contentType, isDirectory);
         }
     }
 
