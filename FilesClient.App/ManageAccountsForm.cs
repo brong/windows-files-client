@@ -44,6 +44,7 @@ sealed class ManageAccountsForm : Form
     // Track what's currently displayed in the detail panel to avoid resetting it
     private string? _displayedLoginId;
     private string? _displayedAccountId;
+    private bool _suppressSelectionChanged;
 
     // Discovered accounts per login (populated async on form open)
     private readonly Dictionary<string, List<DiscoveredAccount>> _discoveredAccounts = new();
@@ -73,7 +74,11 @@ sealed class ManageAccountsForm : Form
             ShowRootLines = true,
             FullRowSelect = true,
         };
-        _treeView.AfterSelect += (_, _) => OnSelectionChanged();
+        _treeView.AfterSelect += (_, _) =>
+        {
+            if (!_suppressSelectionChanged)
+                OnSelectionChanged();
+        };
 
         var splitter = new Splitter { Dock = DockStyle.Left, Width = 4 };
 
@@ -394,6 +399,10 @@ sealed class ManageAccountsForm : Form
         else if (_treeView.SelectedNode?.Tag is AccountNode an)
             selectedAccountId = an.AccountId;
 
+        // Suppress AfterSelect during tree rebuild so Nodes.Clear() and
+        // SelectedNode assignment don't trigger OnSelectionChanged()
+        _suppressSelectionChanged = true;
+
         _treeView.BeginUpdate();
         _treeView.Nodes.Clear();
 
@@ -503,6 +512,7 @@ sealed class ManageAccountsForm : Form
         }
 
         _treeView.EndUpdate();
+        _suppressSelectionChanged = false;
 
         // Only reset the detail panel if the logical selection actually changed
         string? newLoginId = null;
