@@ -129,11 +129,19 @@ public class OutboxProcessor : IDisposable
             // App shutdown — remove from processing so state is clean
             _outbox.MarkFailed(change.Id, "Cancelled");
         }
-        catch (HttpRequestException ex) when (ex.Message.Contains("copying content to a stream"))
+        catch (HttpRequestException ex) when (ex.InnerException is IOException && change.IsDirtyContent)
         {
             // File was still being written when we opened the stream — retry silently
-            Log($"Outbox: file still being written for {Path.GetFileName(change.LocalPath)}, will retry");
+            Log($"Outbox: file not ready for {Path.GetFileName(change.LocalPath)}, will retry ({ex.InnerException.Message})");
             _outbox.MarkRetry(change.Id);
+        }
+        catch (HttpRequestException ex) when (change.IsDirtyContent)
+        {
+            // Upload failed (server rejected, connection reset, etc.) — log details and back off
+            LogError($"Outbox: upload failed for {Path.GetFileName(change.LocalPath)}: {ex.Message}");
+            if (ex.InnerException != null)
+                LogError($"  Inner: {ex.InnerException.GetType().Name}: {ex.InnerException.Message}");
+            _outbox.MarkFailed(change.Id, ex.InnerException?.Message ?? ex.Message);
         }
         catch (IOException ex) when (change.IsDirtyContent)
         {
