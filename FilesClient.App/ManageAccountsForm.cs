@@ -41,6 +41,10 @@ sealed class ManageAccountsForm : Form
     private record AccountNode(string LoginId, string AccountId, string Name,
         bool IsSynced, bool IsMissing, AccountInfo? SyncInfo);
 
+    // Track what's currently displayed in the detail panel to avoid resetting it
+    private string? _displayedLoginId;
+    private string? _displayedAccountId;
+
     // Discovered accounts per login (populated async on form open)
     private readonly Dictionary<string, List<DiscoveredAccount>> _discoveredAccounts = new();
     private readonly Dictionary<string, LoginAccountsResultEvent> _loginAccountResults = new();
@@ -320,8 +324,17 @@ sealed class ManageAccountsForm : Form
                 RefreshTree();
         };
 
-        _refreshTimer = new System.Windows.Forms.Timer { Interval = 2000 };
-        _refreshTimer.Tick += (_, _) => RefreshTree();
+        _serviceClient.StatusChanged += () =>
+        {
+            if (InvokeRequired)
+                BeginInvoke(UpdateStatusText);
+            else
+                UpdateStatusText();
+        };
+
+        // Safety-net timer — real-time updates come via StatusChanged/AccountsChanged
+        _refreshTimer = new System.Windows.Forms.Timer { Interval = 30000 };
+        _refreshTimer.Tick += (_, _) => UpdateStatusText();
         _refreshTimer.Start();
 
         RefreshTree();
@@ -490,7 +503,73 @@ sealed class ManageAccountsForm : Form
         }
 
         _treeView.EndUpdate();
-        OnSelectionChanged();
+
+        // Only reset the detail panel if the logical selection actually changed
+        string? newLoginId = null;
+        string? newAccountId = null;
+        if (_treeView.SelectedNode?.Tag is LoginNode selLn)
+            newLoginId = selLn.LoginId;
+        else if (_treeView.SelectedNode?.Tag is AccountNode selAn)
+            newAccountId = selAn.AccountId;
+
+        if (newLoginId != _displayedLoginId || newAccountId != _displayedAccountId)
+            OnSelectionChanged();
+    }
+
+    /// <summary>
+    /// Lightweight update: refreshes only the status text on existing tree nodes
+    /// and the detail panel status label, without rebuilding the tree or resetting
+    /// text boxes. This preserves focus and user input.
+    /// </summary>
+    private void UpdateStatusText()
+    {
+        var accounts = _serviceClient.Accounts;
+        var accountLookup = accounts.ToDictionary(a => a.AccountId);
+
+        foreach (TreeNode loginTn in _treeView.Nodes)
+        {
+            foreach (TreeNode childTn in loginTn.Nodes)
+            {
+                if (childTn.Tag is not AccountNode an || !an.IsSynced)
+                    continue;
+
+                if (!accountLookup.TryGetValue(an.AccountId, out var info))
+                    continue;
+
+                var statusText = an.IsMissing ? "Missing on server" : info.Status switch
+                {
+                    AccountStatus.Idle when info.PendingCount > 0 => $"{info.PendingCount} pending",
+                    AccountStatus.Idle => "Up to date",
+                    AccountStatus.Syncing => "Syncing",
+                    AccountStatus.Error => "Error",
+                    AccountStatus.Disconnected => "Offline",
+                    _ => "Unknown",
+                };
+
+                var newText = $"{an.Name} \u2014 {statusText}";
+                if (childTn.Text != newText)
+                    childTn.Text = newText;
+
+                // Update the tag with fresh SyncInfo
+                childTn.Tag = an with { SyncInfo = info };
+            }
+        }
+
+        // If the selected node is a synced account, update the detail panel status
+        if (_treeView.SelectedNode?.Tag is AccountNode selAn
+            && selAn.IsSynced && selAn.SyncInfo != null && !selAn.IsMissing)
+        {
+            var selInfo = selAn.SyncInfo;
+            _accountStatusLabel.Text = selInfo.Status switch
+            {
+                AccountStatus.Idle when selInfo.PendingCount > 0 => $"Status: {selInfo.PendingCount} pending",
+                AccountStatus.Idle => "Status: Up to date",
+                AccountStatus.Syncing => "Status: Syncing",
+                AccountStatus.Error => $"Status: Error \u2014 {selInfo.StatusDetail}",
+                AccountStatus.Disconnected => "Status: Offline",
+                _ => "Status: Unknown",
+            };
+        }
     }
 
     private void OnSelectionChanged()
@@ -499,6 +578,10 @@ sealed class ManageAccountsForm : Form
         _syncedAccountPanel.Visible = false;
         _availableAccountPanel.Visible = false;
         _noSelectionLabel.Visible = false;
+
+        // Update tracking fields
+        _displayedLoginId = null;
+        _displayedAccountId = null;
 
         var node = _treeView.SelectedNode;
         if (node == null)
@@ -509,6 +592,7 @@ sealed class ManageAccountsForm : Form
 
         if (node.Tag is LoginNode loginNode)
         {
+            _displayedLoginId = loginNode.LoginId;
             _loginPanel.Visible = true;
             _loginIdLabel.Text = loginNode.LoginId;
             // Derive a default session URL from the login ID host
@@ -521,6 +605,7 @@ sealed class ManageAccountsForm : Form
         }
         else if (node.Tag is AccountNode accountNode)
         {
+            _displayedAccountId = accountNode.AccountId;
             if (accountNode.IsSynced && accountNode.SyncInfo != null)
             {
                 _syncedAccountPanel.Visible = true;
