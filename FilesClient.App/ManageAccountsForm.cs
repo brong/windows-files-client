@@ -9,6 +9,8 @@ sealed class ManageAccountsForm : Form
     private readonly TreeView _treeView;
     private readonly Panel _detailPanel;
     private readonly System.Windows.Forms.Timer _refreshTimer;
+    private readonly System.Windows.Forms.Timer _statusDebounceTimer;
+    private readonly System.Windows.Forms.Timer _accountsDebounceTimer;
 
     // Detail panel controls — login selected
     private readonly Panel _loginPanel;
@@ -321,23 +323,39 @@ sealed class ManageAccountsForm : Form
         Controls.Add(_treeView);
         Controls.Add(bottomPanel);
 
+        // Debounce timers — coalesce rapid status/account changes so brief
+        // SSE hiccups (Disconnected→Idle in <1s) don't cause visible flicker.
+        _statusDebounceTimer = new System.Windows.Forms.Timer { Interval = 1000 };
+        _statusDebounceTimer.Tick += (_, _) =>
+        {
+            _statusDebounceTimer.Stop();
+            UpdateStatusText();
+        };
+
+        _accountsDebounceTimer = new System.Windows.Forms.Timer { Interval = 1000 };
+        _accountsDebounceTimer.Tick += (_, _) =>
+        {
+            _accountsDebounceTimer.Stop();
+            RefreshTree();
+        };
+
         _serviceClient.AccountsChanged += () =>
         {
             if (InvokeRequired)
-                BeginInvoke(RefreshTree);
+                BeginInvoke(() => _accountsDebounceTimer.Start());
             else
-                RefreshTree();
+                _accountsDebounceTimer.Start();
         };
 
         _serviceClient.StatusChanged += () =>
         {
             if (InvokeRequired)
-                BeginInvoke(UpdateStatusText);
+                BeginInvoke(() => _statusDebounceTimer.Start());
             else
-                UpdateStatusText();
+                _statusDebounceTimer.Start();
         };
 
-        // Safety-net timer — real-time updates come via StatusChanged/AccountsChanged
+        // Safety-net timer
         _refreshTimer = new System.Windows.Forms.Timer { Interval = 30000 };
         _refreshTimer.Tick += (_, _) => UpdateStatusText();
         _refreshTimer.Start();
@@ -1010,6 +1028,10 @@ sealed class ManageAccountsForm : Form
     {
         _refreshTimer.Stop();
         _refreshTimer.Dispose();
+        _statusDebounceTimer.Stop();
+        _statusDebounceTimer.Dispose();
+        _accountsDebounceTimer.Stop();
+        _accountsDebounceTimer.Dispose();
         base.OnFormClosing(e);
     }
 }
