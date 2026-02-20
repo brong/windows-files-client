@@ -170,6 +170,15 @@ Every requested property is used — none are fetched unnecessarily:
 | Range download | `GET {downloadUrl}` with `Range: bytes=N-M` header | Falls back to full if server returns 200 |
 | Blob/get (RFC 9404) | `Blob/get { ids, properties, offset?, length? }` | Uses `urn:ietf:params:jmap:blob` capability. For small files (<=16KB) and digest verification |
 
+**Note on Blob/get and digest verification**: All digest checks and the
+small-file `Blob/get` path (Path A in SyncCallbacks) are gated on
+`PreferredDigestAlgorithm != null`, which requires the server to advertise
+`urn:ietf:params:jmap:blob` with `supportedDigestAlgorithms` in the account
+capabilities. If the server does not advertise this capability (as was the
+case with the Fastmail dev server at time of writing), all three download
+paths fall back to plain HTTP without digest verification, and small files
+use full HTTP downloads instead of inline `Blob/get`.
+
 ### SSE push
 
 ```
