@@ -875,7 +875,7 @@ sealed class LoginManager : IDisposable
         var username = session.Client.Session.Username;
         Console.WriteLine($"[Push:{username}] Starting shared push watcher");
 
-        int backoffMs = 1000;
+        int backoffMs = 30000;
         const int maxBackoffMs = 60000;
         bool wasDisconnected = false;
 
@@ -883,17 +883,17 @@ sealed class LoginManager : IDisposable
         {
             try
             {
-                if (wasDisconnected)
-                {
-                    Console.WriteLine($"[Push:{username}] Reconnected");
-                    NotifySupervisorsConnectivity(session, restored: true);
-                    wasDisconnected = false;
-                }
-
-                backoffMs = 1000; // Reset on successful connection
-
                 await foreach (var (accountId, state) in session.Client.WatchAllAccountChangesAsync(ct))
                 {
+                    if (wasDisconnected)
+                    {
+                        Console.WriteLine($"[Push:{username}] Reconnected");
+                        NotifySupervisorsConnectivity(session, restored: true);
+                        wasDisconnected = false;
+                    }
+
+                    backoffMs = 30000; // Reset after receiving a successful event
+
                     AccountSupervisor? supervisor;
                     lock (_lock)
                         supervisor = _supervisors.FirstOrDefault(s => s.AccountId == accountId);
@@ -910,12 +910,11 @@ sealed class LoginManager : IDisposable
             catch (Exception ex)
             {
                 Console.Error.WriteLine($"[Push:{username}] SSE error: {ex.Message}");
+                wasDisconnected = true;
 
-                if (!wasDisconnected)
-                {
-                    wasDisconnected = true;
-                    NotifySupervisorsConnectivity(session, restored: false);
-                }
+                // SSE is just a notification channel — don't mark accounts
+                // offline. Instead, trigger a poll so accounts stay current.
+                TriggerPollForAllSupervisors(session);
 
                 try { await Task.Delay(backoffMs, ct); }
                 catch (OperationCanceledException) { break; }
@@ -945,6 +944,16 @@ sealed class LoginManager : IDisposable
                 s.NotifyConnectivityLost();
             }
         }
+    }
+
+    private void TriggerPollForAllSupervisors(LoginSession session)
+    {
+        List<AccountSupervisor> supervisors;
+        lock (_lock)
+            supervisors = _supervisors.Where(s => session.AccountIds.Contains(s.AccountId)).ToList();
+
+        foreach (var s in supervisors)
+            s.PushState(""); // Empty state triggers a /changes poll
     }
 
     private void RaiseAggregateStatus()
