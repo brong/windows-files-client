@@ -129,6 +129,21 @@ All requests use capabilities `["urn:ietf:params:jmap:core", "https://www.fastma
 unless noted. Properties requested for FileNode/get:
 `["id", "parentId", "blobId", "name", "type", "size", "created", "modified", "role", "myRights"]`.
 
+Every requested property is used — none are fetched unnecessarily:
+
+| Property | Where used |
+|----------|-----------|
+| `id` | Primary key for all path↔nodeId mappings |
+| `parentId` | Tree building (BFS), move target resolution, `ResolveLocalPathAsync` |
+| `blobId` | `IsFolder` derivation (`BlobId == null`), download in SyncCallbacks, upload replace, Recycle Bin restore |
+| `name` | Local file path construction, placeholder creation, rename operations |
+| `type` | Content-Type hint for `DownloadBlobAsync` / `DownloadBlobRangeAsync` |
+| `size` | Placeholder `FsMetadata.FileSize`, partial-request detection in SyncCallbacks, node cache staleness check |
+| `created` | Placeholder `BasicInfo.CreationTime` timestamp |
+| `modified` | Placeholder `BasicInfo.LastWriteTime` / `ChangeTime` / `LastAccessTime`, node cache offline-edit detection |
+| `role` | `PlaceholderManager.GetLocalPath` walks parent chain up to `role="home"` |
+| `myRights` | Read-only folder enforcement (reject local writes), NTFS DENY ACLs, persisted in node cache |
+
 ### Query and fetch
 
 | Method | When called | Request | Response |
