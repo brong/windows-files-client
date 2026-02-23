@@ -304,6 +304,29 @@ public class SyncOutbox : IDisposable
     }
 
     /// <summary>
+    /// If there's a pending create at oldPath that hasn't been synced yet (no nodeId),
+    /// move it to newPath. Returns true if found and moved.
+    /// Handles the case where a file is created then renamed before the outbox processes.
+    /// </summary>
+    public bool TryRenamePendingCreate(string oldPath, string newPath)
+    {
+        lock (_lock)
+        {
+            if (!_byPath.TryGetValue(oldPath, out var id) || !_entries.TryGetValue(id, out var entry))
+                return false;
+            if (entry.NodeId != null || entry.IsDeleted)
+                return false;
+
+            _byPath.Remove(oldPath);
+            entry.LocalPath = newPath;
+            entry.UpdatedAt = DateTime.UtcNow;
+            _byPath[newPath] = id;
+            MarkDirtyAndSignal();
+        }
+        return true;
+    }
+
+    /// <summary>
     /// Dequeue the next processable item respecting ordering and backoff.
     /// Returns null if nothing is ready.
     ///

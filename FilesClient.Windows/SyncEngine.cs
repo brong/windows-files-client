@@ -1019,6 +1019,11 @@ public class SyncEngine : IDisposable
                 continue;
 
             var nodeId = _pathToNodeId.TryGetValue(change.FullPath, out var nid) ? nid : null;
+
+            // Skip if file no longer exists (e.g. renamed away before debounce fired)
+            if (!isDirectory && nodeId == null && !File.Exists(change.FullPath))
+                continue;
+
             var contentType = ResolveContentType(change.FullPath);
 
             _outbox.EnqueueContentChange(change.FullPath, nodeId, contentType, isDirectory);
@@ -1049,11 +1054,13 @@ public class SyncEngine : IDisposable
         }
         else
         {
-            // Untracked rename — treat new path as a fresh create
-            var isDirectory = Directory.Exists(newPath);
-            var contentType = isDirectory ? null : ResolveContentType(newPath);
             Log($"FSWatcher rename (untracked): {oldPath} → {newPath}");
-            _outbox.EnqueueContentChange(newPath, null, contentType, isDirectory);
+            if (!_outbox.TryRenamePendingCreate(oldPath, newPath))
+            {
+                var isDirectory = Directory.Exists(newPath);
+                var contentType = isDirectory ? null : ResolveContentType(newPath);
+                _outbox.EnqueueContentChange(newPath, null, contentType, isDirectory);
+            }
         }
     }
 
