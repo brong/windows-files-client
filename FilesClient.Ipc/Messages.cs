@@ -32,6 +32,8 @@ public record OutboxEntry(
 
 public record DiscoveredAccount(string AccountId, string Name, bool IsPrimary);
 
+public record FailedLogin(string LoginId, string Error);
+
 // ---- UI -> Service commands ----
 
 public abstract record IpcCommand;
@@ -78,6 +80,7 @@ public abstract record IpcEvent;
 public sealed record StatusSnapshotEvent(
     List<AccountInfo> Accounts,
     List<string> ConnectingLoginIds,
+    List<FailedLogin> FailedLogins,
     AccountStatus AggregateStatus,
     int AggregatePendingCount) : IpcEvent;
 
@@ -89,7 +92,8 @@ public sealed record AccountStatusChangedEvent(
 
 public sealed record AccountsChangedEvent(
     List<AccountInfo> Accounts,
-    List<string> ConnectingLoginIds) : IpcEvent;
+    List<string> ConnectingLoginIds,
+    List<FailedLogin> FailedLogins) : IpcEvent;
 
 public sealed record AddLoginResultEvent(
     bool Success,

@@ -97,10 +97,16 @@ sealed class TrayIcon : IDisposable
         else if (accounts.Count == 0)
         {
             var connecting = _serviceClient.ConnectingLoginIds;
+            var failed = _serviceClient.FailedLogins;
             color = Color.Gray;
-            tooltip = connecting.Count > 0
-                ? "Fastmail Files - Connecting..."
-                : "Fastmail Files - No accounts";
+            if (connecting.Count > 0)
+                tooltip = "Fastmail Files - Connecting...";
+            else if (failed.Count > 0)
+                tooltip = failed.Count == 1
+                    ? "Fastmail Files - 1 login offline"
+                    : $"Fastmail Files - {failed.Count} logins offline";
+            else
+                tooltip = "Fastmail Files - No accounts";
         }
         else if (accounts.Count == 1)
         {
@@ -283,18 +289,19 @@ sealed class TrayIcon : IDisposable
         {
             var accounts = _serviceClient.Accounts;
             var connecting = _serviceClient.ConnectingLoginIds;
+            var failed = _serviceClient.FailedLogins;
 
-            if (accounts.Count == 0 && connecting.Count == 0)
+            if (accounts.Count == 0 && connecting.Count == 0 && failed.Count == 0)
             {
                 var noAccounts = new ToolStripMenuItem("No accounts configured") { Enabled = false };
                 _contextMenu.Items.Add(noAccounts);
             }
-            else if (accounts.Count == 0)
+            else if (accounts.Count == 0 && failed.Count == 0)
             {
                 foreach (var loginId in connecting)
                     _contextMenu.Items.Add(new ToolStripMenuItem($"{loginId} \u2014 Connecting...") { Enabled = false });
             }
-            else if (accounts.Count == 1 && connecting.Count == 0)
+            else if (accounts.Count == 1 && connecting.Count == 0 && failed.Count == 0)
             {
                 var a = accounts[0];
                 _contextMenu.Items.Add($"Open {a.DisplayName}", null, (_, _) => OpenSyncFolder(a.SyncRootPath));
@@ -312,6 +319,8 @@ sealed class TrayIcon : IDisposable
                 }
                 foreach (var loginId in connecting)
                     _contextMenu.Items.Add(new ToolStripMenuItem($"{loginId} \u2014 Connecting...") { Enabled = false });
+                foreach (var f in failed)
+                    _contextMenu.Items.Add(new ToolStripMenuItem($"{f.LoginId} \u2014 Offline") { Enabled = false, ForeColor = Color.Red });
             }
         }
 

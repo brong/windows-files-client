@@ -408,6 +408,7 @@ sealed class ManageAccountsForm : Form
     {
         var accounts = _serviceClient.Accounts;
         var connectingIds = _serviceClient.ConnectingLoginIds;
+        var failedLogins = _serviceClient.FailedLogins;
 
         // Preserve selection
         string? selectedLoginId = null;
@@ -433,6 +434,7 @@ sealed class ManageAccountsForm : Form
         var allLoginIds = byLogin.Keys
             .Union(_discoveredAccounts.Keys)
             .Union(connectingIds)
+            .Union(failedLogins.Select(f => f.LoginId))
             .Distinct()
             .OrderBy(id => id)
             .ToList();
@@ -454,9 +456,16 @@ sealed class ManageAccountsForm : Form
                 NodeFont = new Font(_treeView.Font, FontStyle.Bold),
             };
 
+            var failedInfo = failedLogins.FirstOrDefault(f => f.LoginId == loginId);
+
             if (connectingIds.Contains(loginId) && syncedAccounts.Count == 0)
             {
                 loginTreeNode.Nodes.Add(new TreeNode("Connecting...") { ForeColor = Color.Gray });
+            }
+            else if (failedInfo != null && syncedAccounts.Count == 0)
+            {
+                loginTreeNode.Nodes.Add(new TreeNode($"Connection failed: {failedInfo.Error}")
+                    { ForeColor = Color.Red });
             }
             else
             {

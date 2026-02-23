@@ -9,13 +9,19 @@ namespace FilesClient.Service;
 /// </summary>
 sealed class LoginManager : IDisposable
 {
+    private readonly record struct FailedLoginInfo(string LoginId, string SessionUrl, string Token,
+        HashSet<string>? EnabledAccountIds, string Error);
+
     private readonly bool _debug;
     private readonly CredentialStore _credentialStore = new();
     private readonly List<LoginSession> _sessions = new();
     private readonly List<AccountSupervisor> _supervisors = new();
     private readonly List<string> _connectingLoginIds = new();
+    private readonly List<FailedLoginInfo> _failedLogins = new();
     private readonly object _lock = new();
     private NetworkMonitor? _networkMonitor;
+    private string? _iconPath;
+    private CancellationToken _parentCt;
     private bool _disposed;
 
     public IReadOnlyList<AccountSupervisor> Supervisors
@@ -31,6 +37,14 @@ sealed class LoginManager : IDisposable
         get { lock (_lock) return _connectingLoginIds.ToList(); }
     }
 
+    /// <summary>
+    /// Logins that failed to connect at startup (credential exists but session fetch failed).
+    /// </summary>
+    public IReadOnlyList<(string LoginId, string Error)> FailedLogins
+    {
+        get { lock (_lock) return _failedLogins.Select(f => (f.LoginId, f.Error)).ToList(); }
+    }
+
     public event Action? AccountsChanged;
     public event Action<SyncStatus>? AggregateStatusChanged;
 
@@ -44,6 +58,9 @@ sealed class LoginManager : IDisposable
     /// </summary>
     public async Task StartAsync(string? iconPath, bool clean, CancellationToken ct)
     {
+        _iconPath = iconPath;
+        _parentCt = ct;
+
         _networkMonitor = new NetworkMonitor();
         _networkMonitor.NetworkStateChanged += OnNetworkStateChanged;
         Console.WriteLine($"[NetworkMonitor] Initial state: connected={_networkMonitor.IsConnected}, metered={_networkMonitor.IsMetered}");
@@ -70,6 +87,9 @@ sealed class LoginManager : IDisposable
             catch (Exception ex)
             {
                 Console.Error.WriteLine($"Failed to load login {login.LoginId}: {ex.Message}");
+                lock (_lock)
+                    _failedLogins.Add(new FailedLoginInfo(login.LoginId, login.SessionUrl, login.Token,
+                        login.EnabledAccountIds, ex.Message));
             }
             finally
             {
@@ -155,6 +175,7 @@ sealed class LoginManager : IDisposable
                 _supervisors.Remove(supervisor);
             if (session != null)
                 _sessions.Remove(session);
+            _failedLogins.RemoveAll(f => f.LoginId == loginId);
         }
 
         _credentialStore.Remove(loginId);
@@ -276,17 +297,52 @@ sealed class LoginManager : IDisposable
     {
         LoginSession? oldSession;
         List<AccountSupervisor> oldSupervisors;
+        bool wasFailedLogin = false;
 
         lock (_lock)
         {
             oldSession = _sessions.FirstOrDefault(s => s.LoginId == loginId);
             if (oldSession == null)
-                throw new InvalidOperationException($"Login {loginId} not found");
-            oldSupervisors = _supervisors.Where(s => oldSession.AccountIds.Contains(s.AccountId)).ToList();
+            {
+                if (_failedLogins.Any(f => f.LoginId == loginId))
+                {
+                    _failedLogins.RemoveAll(f => f.LoginId == loginId);
+                    wasFailedLogin = true;
+                }
+                else
+                {
+                    throw new InvalidOperationException($"Login {loginId} not found");
+                }
+            }
+            oldSupervisors = oldSession != null
+                ? _supervisors.Where(s => oldSession.AccountIds.Contains(s.AccountId)).ToList()
+                : new();
         }
 
-        // Stop push watcher
-        StopPushWatcher(oldSession);
+        // Failed login: no existing session/supervisors — just connect fresh
+        if (wasFailedLogin)
+        {
+            lock (_lock)
+                _connectingLoginIds.Add(loginId);
+            AccountsChanged?.Invoke();
+
+            try
+            {
+                await ConnectAndStartAsync(sessionUrl, token, loginId,
+                    enabledAccountIds: null, persist: true,
+                    iconPath: iconPath ?? _iconPath, clean: false, ct: ct);
+            }
+            finally
+            {
+                lock (_lock)
+                    _connectingLoginIds.Remove(loginId);
+                AccountsChanged?.Invoke();
+            }
+            return;
+        }
+
+        // Stop push watcher (oldSession is non-null here: wasFailedLogin returned early, else threw)
+        StopPushWatcher(oldSession!);
 
         // Stop all supervisors (but don't clean sync roots)
         foreach (var supervisor in oldSupervisors)
@@ -316,10 +372,10 @@ sealed class LoginManager : IDisposable
         {
             foreach (var supervisor in oldSupervisors)
                 _supervisors.Remove(supervisor);
-            _sessions.Remove(oldSession);
+            _sessions.Remove(oldSession!);
         }
 
-        oldSession.Client.Dispose();
+        oldSession!.Client.Dispose();
 
         // Detach accounts no longer on server
         foreach (var accountId in previouslyActive.Where(id => !newAccountIds.Contains(id)))
@@ -1036,6 +1092,46 @@ sealed class LoginManager : IDisposable
             {
                 NotifySupervisorsConnectivity(session, restored: true);
                 StartPushWatcher(session, session.ParentCt);
+            }
+
+            // Retry failed logins
+            List<FailedLoginInfo> toRetry;
+            lock (_lock)
+            {
+                toRetry = _failedLogins.ToList();
+                _failedLogins.Clear();
+                foreach (var f in toRetry)
+                    _connectingLoginIds.Add(f.LoginId);
+            }
+
+            if (toRetry.Count > 0)
+            {
+                AccountsChanged?.Invoke();
+                _ = Task.Run(async () =>
+                {
+                    foreach (var f in toRetry)
+                    {
+                        try
+                        {
+                            Console.WriteLine($"[NetworkMonitor] Retrying failed login {f.LoginId}...");
+                            await ConnectAndStartAsync(f.SessionUrl, f.Token, f.LoginId,
+                                enabledAccountIds: f.EnabledAccountIds,
+                                persist: false, iconPath: _iconPath, clean: false, ct: _parentCt);
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.Error.WriteLine($"[NetworkMonitor] Retry failed for {f.LoginId}: {ex.Message}");
+                            lock (_lock)
+                                _failedLogins.Add(f with { Error = ex.Message });
+                        }
+                        finally
+                        {
+                            lock (_lock)
+                                _connectingLoginIds.Remove(f.LoginId);
+                            AccountsChanged?.Invoke();
+                        }
+                    }
+                });
             }
         }
 
