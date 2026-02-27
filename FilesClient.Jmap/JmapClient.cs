@@ -428,7 +428,7 @@ public class JmapClient : IJmapClient
         var buffer = ArrayPool<byte>.Shared.Rent((int)chunkSize);
         try
         {
-            var chunkBlobIds = new List<(string BlobId, string Sha1Hex)>();
+            var chunkBlobIds = new List<(string BlobId, string Sha1Base64)>();
             using var overallHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA1);
             long totalUploaded = 0;
 
@@ -448,7 +448,7 @@ public class JmapClient : IJmapClient
                 var chunkSpan = buffer.AsSpan(0, offset);
                 var chunkSha1 = SHA1.HashData(chunkSpan);
                 overallHash.AppendData(chunkSpan);
-                var chunkSha1Hex = Convert.ToHexString(chunkSha1).ToLowerInvariant();
+                var chunkSha1Base64 = Convert.ToBase64String(chunkSha1);
 
                 // Upload chunk via HTTP POST
                 using var chunkStream = new MemoryStream(buffer, 0, offset, writable: false);
@@ -460,26 +460,26 @@ public class JmapClient : IJmapClient
                 var upload = JsonSerializer.Deserialize<UploadResponse>(json, JmapSerializerOptions.Default)
                     ?? throw new InvalidOperationException("Failed to parse chunk upload response");
 
-                chunkBlobIds.Add((upload.BlobId, chunkSha1Hex));
+                chunkBlobIds.Add((upload.BlobId, chunkSha1Base64));
                 totalUploaded += offset;
                 onProgress?.Invoke((int)(totalUploaded * 100 / totalSize));
             }
 
             // Compute overall SHA1
             var overallSha1 = overallHash.GetHashAndReset();
-            var overallSha1Hex = Convert.ToHexString(overallSha1).ToLowerInvariant();
+            var overallSha1Base64 = Convert.ToBase64String(overallSha1);
 
             // Combine chunks via Blob/upload
             var dataArray = chunkBlobIds.Select(c => new Dictionary<string, object?>
             {
                 ["blobId"] = c.BlobId,
-                ["digest:sha"] = c.Sha1Hex,
+                ["digest:sha"] = c.Sha1Base64,
             }).ToArray();
 
             var createItem = new Dictionary<string, object>
             {
                 ["data"] = dataArray,
-                ["digest:sha"] = overallSha1Hex,
+                ["digest:sha"] = overallSha1Base64,
             };
 
             var result = await callAsync(BlobExtUsing, "Blob/upload", new
