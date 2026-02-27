@@ -450,10 +450,10 @@ public class JmapClient : IJmapClient
                 overallHash.AppendData(chunkSpan);
                 var chunkSha1Base64 = Convert.ToBase64String(chunkSha1);
 
-                // Upload chunk via HTTP POST
+                // Upload chunk via HTTP POST (chunks are raw bytes, not the final content type)
                 using var chunkStream = new MemoryStream(buffer, 0, offset, writable: false);
                 var chunkContent = new StreamContent(chunkStream);
-                chunkContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(contentType);
+                chunkContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
                 var response = await http.PostAsync(uploadUrl, chunkContent, ct);
                 response.EnsureSuccessStatusCode();
                 var json = await response.Content.ReadAsStringAsync(ct);
@@ -476,25 +476,27 @@ public class JmapClient : IJmapClient
                 ["digest:sha"] = c.Sha1Base64,
             }).ToArray();
 
+            var createId = Guid.NewGuid().ToString("N")[..12];
             var createItem = new Dictionary<string, object>
             {
                 ["data"] = dataArray,
+                ["type"] = contentType,
                 ["digest:sha"] = overallSha1Base64,
             };
 
             var result = await callAsync(BlobExtUsing, "Blob/upload", new
             {
                 accountId,
-                create = new Dictionary<string, object> { ["final"] = createItem },
+                create = new Dictionary<string, object> { [createId] = createItem },
             });
 
             var blobUpload = result.Deserialize<BlobUploadResponse>(JmapSerializerOptions.Default)
                 ?? throw new InvalidOperationException("Failed to parse Blob/upload response");
 
-            if (blobUpload.NotCreated != null && blobUpload.NotCreated.TryGetValue("final", out var err))
+            if (blobUpload.NotCreated != null && blobUpload.NotCreated.TryGetValue(createId, out var err))
                 throw new InvalidOperationException($"Blob/upload failed: {err.Type} — {err.Description}");
 
-            if (blobUpload.Created == null || !blobUpload.Created.TryGetValue("final", out var created))
+            if (blobUpload.Created == null || !blobUpload.Created.TryGetValue(createId, out var created))
                 throw new InvalidOperationException("Blob/upload returned no result");
 
             return created.Id;
