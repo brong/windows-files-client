@@ -98,15 +98,23 @@ sealed class TrayIcon : IDisposable
         {
             var connecting = _serviceClient.ConnectingLoginIds;
             var failed = _serviceClient.FailedLogins;
-            color = Color.Gray;
             if (connecting.Count > 0)
+            {
+                color = Color.Gray;
                 tooltip = "Fastmail Files - Connecting...";
+            }
             else if (failed.Count > 0)
+            {
+                color = Color.FromArgb(200, 120, 0);
                 tooltip = failed.Count == 1
                     ? "Fastmail Files - 1 login offline"
                     : $"Fastmail Files - {failed.Count} logins offline";
+            }
             else
+            {
+                color = Color.Gray;
                 tooltip = "Fastmail Files - No accounts";
+            }
         }
         else if (accounts.Count == 1)
         {
@@ -136,6 +144,18 @@ sealed class TrayIcon : IDisposable
             };
 
             tooltip = $"{accounts.Count} accounts - {statusText}";
+        }
+
+        // Override to orange when active accounts exist but some logins failed
+        if (connected && accounts.Count > 0)
+        {
+            var failed = _serviceClient.FailedLogins;
+            if (failed.Count > 0)
+            {
+                if (color == Color.LimeGreen || color == Color.DodgerBlue)
+                    color = Color.FromArgb(200, 120, 0);
+                tooltip += $" ({failed.Count} offline)";
+            }
         }
 
         if (tooltip.Length > 127)
@@ -320,7 +340,7 @@ sealed class TrayIcon : IDisposable
                 foreach (var loginId in connecting)
                     _contextMenu.Items.Add(new ToolStripMenuItem($"{loginId} \u2014 Connecting...") { Enabled = false });
                 foreach (var f in failed)
-                    _contextMenu.Items.Add(new ToolStripMenuItem($"{f.LoginId} \u2014 Offline") { Enabled = false, ForeColor = Color.Red });
+                    _contextMenu.Items.Add(new ToolStripMenuItem($"{f.LoginId} \u2014 Offline") { Enabled = false, ForeColor = Color.FromArgb(200, 120, 0) });
             }
         }
 

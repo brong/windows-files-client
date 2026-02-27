@@ -20,6 +20,8 @@ sealed class LoginManager : IDisposable
     private readonly List<FailedLoginInfo> _failedLogins = new();
     private readonly object _lock = new();
     private NetworkMonitor? _networkMonitor;
+    private Timer? _retryTimer;
+    private int _retryInProgress;
     private string? _iconPath;
     private CancellationToken _parentCt;
     private bool _disposed;
@@ -101,6 +103,10 @@ sealed class LoginManager : IDisposable
 
         // Audit for orphaned sync roots (accounts removed server-side between runs)
         AuditOrphanedSyncRoots();
+
+        // Periodically retry failed logins (e.g. server briefly unreachable at startup)
+        _retryTimer = new Timer(_ => _ = RetryFailedLoginsAsync(), null,
+            TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
     }
 
     /// <summary>
@@ -1095,44 +1101,7 @@ sealed class LoginManager : IDisposable
             }
 
             // Retry failed logins
-            List<FailedLoginInfo> toRetry;
-            lock (_lock)
-            {
-                toRetry = _failedLogins.ToList();
-                _failedLogins.Clear();
-                foreach (var f in toRetry)
-                    _connectingLoginIds.Add(f.LoginId);
-            }
-
-            if (toRetry.Count > 0)
-            {
-                AccountsChanged?.Invoke();
-                _ = Task.Run(async () =>
-                {
-                    foreach (var f in toRetry)
-                    {
-                        try
-                        {
-                            Console.WriteLine($"[NetworkMonitor] Retrying failed login {f.LoginId}...");
-                            await ConnectAndStartAsync(f.SessionUrl, f.Token, f.LoginId,
-                                enabledAccountIds: f.EnabledAccountIds,
-                                persist: false, iconPath: _iconPath, clean: false, ct: _parentCt);
-                        }
-                        catch (Exception ex)
-                        {
-                            Console.Error.WriteLine($"[NetworkMonitor] Retry failed for {f.LoginId}: {ex.Message}");
-                            lock (_lock)
-                                _failedLogins.Add(f with { Error = ex.Message });
-                        }
-                        finally
-                        {
-                            lock (_lock)
-                                _connectingLoginIds.Remove(f.LoginId);
-                            AccountsChanged?.Invoke();
-                        }
-                    }
-                });
-            }
+            _ = RetryFailedLoginsAsync();
         }
 
         // Handle metered state changes
@@ -1150,6 +1119,59 @@ sealed class LoginManager : IDisposable
         }
 
         RaiseAggregateStatus();
+    }
+
+    private async Task RetryFailedLoginsAsync()
+    {
+        if (_networkMonitor is not { IsConnected: true })
+            return;
+
+        // Guard against concurrent retries
+        if (Interlocked.CompareExchange(ref _retryInProgress, 1, 0) != 0)
+            return;
+
+        try
+        {
+            List<FailedLoginInfo> toRetry;
+            lock (_lock)
+            {
+                if (_failedLogins.Count == 0)
+                    return;
+                toRetry = _failedLogins.ToList();
+                _failedLogins.Clear();
+                foreach (var f in toRetry)
+                    _connectingLoginIds.Add(f.LoginId);
+            }
+
+            AccountsChanged?.Invoke();
+
+            foreach (var f in toRetry)
+            {
+                try
+                {
+                    Console.WriteLine($"[RetryLogin] Retrying failed login {f.LoginId}...");
+                    await ConnectAndStartAsync(f.SessionUrl, f.Token, f.LoginId,
+                        enabledAccountIds: f.EnabledAccountIds,
+                        persist: false, iconPath: _iconPath, clean: false, ct: _parentCt);
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"[RetryLogin] Retry failed for {f.LoginId}: {ex.Message}");
+                    lock (_lock)
+                        _failedLogins.Add(f with { Error = ex.Message });
+                }
+                finally
+                {
+                    lock (_lock)
+                        _connectingLoginIds.Remove(f.LoginId);
+                    AccountsChanged?.Invoke();
+                }
+            }
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _retryInProgress, 0);
+        }
     }
 
     private void RaiseAggregateStatus()
@@ -1198,6 +1220,9 @@ sealed class LoginManager : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+
+        _retryTimer?.Dispose();
+        _retryTimer = null;
 
         _networkMonitor?.Dispose();
         _networkMonitor = null;
