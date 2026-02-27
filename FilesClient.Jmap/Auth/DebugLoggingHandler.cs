@@ -40,9 +40,10 @@ internal class DebugLoggingHandler : DelegatingHandler
 
         Console.Error.WriteLine($"<< {(int)response.StatusCode} {response.ReasonPhrase}");
 
-        // Only dump response body for JSON content types (skip binary blob downloads)
+        // Dump response body for JSON content types and upload responses (skip binary blob downloads)
         var contentType = response.Content.Headers.ContentType?.MediaType;
-        if (contentType is "application/json" or "application/problem+json")
+        var isUpload = request.RequestUri?.AbsolutePath.Contains("/upload/") == true;
+        if (contentType is "application/json" or "application/problem+json" or "text/json" || isUpload)
         {
             var responseBody = await response.Content.ReadAsStringAsync(cancellationToken);
             DumpJson("Response body", responseBody);
