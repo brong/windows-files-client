@@ -75,6 +75,19 @@ public class JmapSession
         }
         return [];
     }
+
+    public long? GetChunkSize(string accountId)
+    {
+        if (!Accounts.TryGetValue(accountId, out var account))
+            return null;
+        if (!account.AccountCapabilities.TryGetValue(
+            "https://www.fastmail.com/dev/blobext", out var blobExtCap))
+            return null;
+        if (blobExtCap.TryGetProperty("chunkSize", out var chunkSize)
+            && chunkSize.ValueKind == JsonValueKind.Number)
+            return chunkSize.GetInt64();
+        return null;
+    }
 }
 
 public class JmapAccount

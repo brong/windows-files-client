@@ -155,3 +155,36 @@ public class BlobDataItem
     [JsonPropertyName("isTruncated")]
     public bool IsTruncated { get; set; }
 }
+
+public class BlobUploadResponse
+{
+    [JsonPropertyName("accountId")]
+    public string AccountId { get; set; } = "";
+
+    [JsonPropertyName("created")]
+    public Dictionary<string, BlobUploadCreatedItem>? Created { get; set; }
+
+    [JsonPropertyName("notCreated")]
+    public Dictionary<string, SetError>? NotCreated { get; set; }
+}
+
+public class BlobUploadCreatedItem
+{
+    [JsonPropertyName("id")]
+    public string Id { get; set; } = "";
+
+    [JsonPropertyName("type")]
+    public string Type { get; set; } = "";
+
+    [JsonPropertyName("size")]
+    public long Size { get; set; }
+}
+
+public class DataSourceObject
+{
+    [JsonPropertyName("blobId")]
+    public string BlobId { get; set; } = "";
+
+    [JsonPropertyName("digest:sha")]
+    public string? DigestSha { get; set; }
+}

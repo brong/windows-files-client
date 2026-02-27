@@ -15,6 +15,8 @@ public class AccountScopedJmapClient : IJmapClient
     private readonly JmapContext _context;
     private bool _preferredDigestResolved;
     private string? _preferredDigestAlgorithm;
+    private bool _chunkSizeResolved;
+    private long? _chunkSize;
     private static readonly HashSet<string> SupportedDigests = ["sha", "sha-256"];
 
     public AccountScopedJmapClient(JmapClient parent, string accountId)
@@ -41,6 +43,19 @@ public class AccountScopedJmapClient : IJmapClient
                 _preferredDigestResolved = true;
             }
             return _preferredDigestAlgorithm;
+        }
+    }
+
+    public long? ChunkSize
+    {
+        get
+        {
+            if (!_chunkSizeResolved)
+            {
+                _chunkSize = _parent.Session.GetChunkSize(_accountId);
+                _chunkSizeResolved = true;
+            }
+            return _chunkSize;
         }
     }
 
@@ -371,6 +386,15 @@ public class AccountScopedJmapClient : IJmapClient
         var upload = JsonSerializer.Deserialize<UploadResponse>(json, JmapSerializerOptions.Default)
             ?? throw new InvalidOperationException("Failed to parse upload response");
         return upload.BlobId;
+    }
+
+    public Task<string> UploadBlobChunkedAsync(Stream data, string contentType, long totalSize,
+        Action<int>? onProgress = null, CancellationToken ct = default)
+    {
+        return JmapClient.UploadBlobChunkedInternalAsync(Http, Session.GetUploadUrl(_accountId), _accountId,
+            ChunkSize ?? throw new InvalidOperationException("ChunkSize not available"),
+            (caps, method, args) => CallAsync(caps, method, args, ct),
+            data, contentType, totalSize, onProgress, ct);
     }
 
     public async Task<FileNode> CreateFileNodeAsync(string parentId, string? blobId, string name, string? type = null, string? onExists = null, CancellationToken ct = default)

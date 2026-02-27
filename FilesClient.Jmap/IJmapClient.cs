@@ -12,6 +12,11 @@ public interface IJmapClient : IDisposable
     /// that we support locally (sha or sha-256), or null if blob capability not present.
     /// </summary>
     string? PreferredDigestAlgorithm { get; }
+    /// <summary>
+    /// The chunk size from the blobext capability, or null if not supported.
+    /// Files larger than this should be uploaded in chunks.
+    /// </summary>
+    long? ChunkSize { get; }
     Task<string> FindHomeNodeIdAsync(CancellationToken ct = default);
     Task<string?> FindTrashNodeIdAsync(CancellationToken ct = default);
     Task<FileNode[]> GetFileNodesAsync(string[] ids, CancellationToken ct = default);
@@ -26,6 +31,8 @@ public interface IJmapClient : IDisposable
     Task<Stream> DownloadBlobAsync(string blobId, string? type = null, string? name = null, CancellationToken ct = default);
     Task<(Stream data, bool isPartial)> DownloadBlobRangeAsync(string blobId, long offset, long length, string? type = null, string? name = null, CancellationToken ct = default);
     Task<string> UploadBlobAsync(Stream data, string contentType, CancellationToken ct = default);
+    Task<string> UploadBlobChunkedAsync(Stream data, string contentType, long totalSize,
+        Action<int>? onProgress = null, CancellationToken ct = default);
     Task<FileNode> CreateFileNodeAsync(string parentId, string? blobId, string name, string? type = null, string? onExists = null, CancellationToken ct = default);
     Task<FileNode> ReplaceFileNodeBlobAsync(string nodeId, string parentId, string name, string blobId, string? type = null, CancellationToken ct = default);
     Task MoveFileNodeAsync(string nodeId, string parentId, string newName, string? onExists = null, CancellationToken ct = default);

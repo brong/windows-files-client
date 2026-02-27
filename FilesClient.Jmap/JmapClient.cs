@@ -1,4 +1,6 @@
+using System.Buffers;
 using System.Runtime.CompilerServices;
+using System.Security.Cryptography;
 using System.Text.Json;
 using FilesClient.Jmap.Auth;
 using FilesClient.Jmap.Models;
@@ -15,14 +17,18 @@ public class JmapClient : IJmapClient
     public const string CoreCapability = "urn:ietf:params:jmap:core";
     public const string FileNodeCapability = "https://www.fastmail.com/dev/filenode";
     public const string BlobCapability = "urn:ietf:params:jmap:blob";
+    public const string BlobExtCapability = "https://www.fastmail.com/dev/blobext";
     private static readonly string[] FileNodeUsing = [CoreCapability, FileNodeCapability];
     private static readonly string[] BlobUsing = [CoreCapability, BlobCapability];
+    private static readonly string[] BlobExtUsing = [CoreCapability, BlobCapability, BlobExtCapability];
     /// <summary>Properties to request in FileNode/get calls — includes myRights for permission enforcement.</summary>
     internal static readonly string[] FileNodeProperties =
         ["id", "parentId", "blobId", "name", "type", "size", "created", "modified", "role", "myRights"];
     private static readonly HashSet<string> SupportedDigests = ["sha", "sha-256"];
     private string? _preferredDigestAlgorithm;
     private bool _preferredDigestResolved;
+    private long? _chunkSize;
+    private bool _chunkSizeResolved;
 
     public JmapSession Session => _session
         ?? throw new InvalidOperationException("Session not initialised — call ConnectAsync first");
@@ -44,6 +50,19 @@ public class JmapClient : IJmapClient
                 _preferredDigestResolved = true;
             }
             return _preferredDigestAlgorithm;
+        }
+    }
+
+    public long? ChunkSize
+    {
+        get
+        {
+            if (!_chunkSizeResolved)
+            {
+                _chunkSize = Session.GetChunkSize(AccountId);
+                _chunkSizeResolved = true;
+            }
+            return _chunkSize;
         }
     }
 
@@ -389,6 +408,101 @@ public class JmapClient : IJmapClient
         var upload = JsonSerializer.Deserialize<UploadResponse>(json, JmapSerializerOptions.Default)
             ?? throw new InvalidOperationException("Failed to parse upload response");
         return upload.BlobId;
+    }
+
+    public Task<string> UploadBlobChunkedAsync(Stream data, string contentType, long totalSize,
+        Action<int>? onProgress = null, CancellationToken ct = default)
+    {
+        return UploadBlobChunkedInternalAsync(_http, Session.GetUploadUrl(AccountId), AccountId,
+            ChunkSize ?? throw new InvalidOperationException("ChunkSize not available"),
+            (caps, method, args) => CallAsync(caps, method, args, ct),
+            data, contentType, totalSize, onProgress, ct);
+    }
+
+    internal static async Task<string> UploadBlobChunkedInternalAsync(
+        HttpClient http, string uploadUrl, string accountId, long chunkSize,
+        Func<string[], string, object, Task<JsonElement>> callAsync,
+        Stream data, string contentType, long totalSize,
+        Action<int>? onProgress, CancellationToken ct)
+    {
+        var buffer = ArrayPool<byte>.Shared.Rent((int)chunkSize);
+        try
+        {
+            var chunkBlobIds = new List<(string BlobId, string Sha1Hex)>();
+            using var overallHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA1);
+            long totalUploaded = 0;
+
+            while (totalUploaded < totalSize)
+            {
+                // Read one full chunk (or remainder)
+                var toRead = (int)Math.Min(chunkSize, totalSize - totalUploaded);
+                var offset = 0;
+                while (offset < toRead)
+                {
+                    var read = await data.ReadAsync(buffer.AsMemory(offset, toRead - offset), ct);
+                    if (read == 0)
+                        break;
+                    offset += read;
+                }
+
+                var chunkSpan = buffer.AsSpan(0, offset);
+                var chunkSha1 = SHA1.HashData(chunkSpan);
+                overallHash.AppendData(chunkSpan);
+                var chunkSha1Hex = Convert.ToHexString(chunkSha1).ToLowerInvariant();
+
+                // Upload chunk via HTTP POST
+                using var chunkStream = new MemoryStream(buffer, 0, offset, writable: false);
+                var chunkContent = new StreamContent(chunkStream);
+                chunkContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(contentType);
+                var response = await http.PostAsync(uploadUrl, chunkContent, ct);
+                response.EnsureSuccessStatusCode();
+                var json = await response.Content.ReadAsStringAsync(ct);
+                var upload = JsonSerializer.Deserialize<UploadResponse>(json, JmapSerializerOptions.Default)
+                    ?? throw new InvalidOperationException("Failed to parse chunk upload response");
+
+                chunkBlobIds.Add((upload.BlobId, chunkSha1Hex));
+                totalUploaded += offset;
+                onProgress?.Invoke((int)(totalUploaded * 100 / totalSize));
+            }
+
+            // Compute overall SHA1
+            var overallSha1 = overallHash.GetHashAndReset();
+            var overallSha1Hex = Convert.ToHexString(overallSha1).ToLowerInvariant();
+
+            // Combine chunks via Blob/upload
+            var dataArray = chunkBlobIds.Select(c => new Dictionary<string, object?>
+            {
+                ["blobId"] = c.BlobId,
+                ["digest:sha"] = c.Sha1Hex,
+            }).ToArray();
+
+            var createItem = new Dictionary<string, object>
+            {
+                ["data"] = dataArray,
+                ["digest:sha"] = overallSha1Hex,
+            };
+
+            var result = await callAsync(BlobExtUsing, "Blob/upload", new
+            {
+                accountId,
+                create = new Dictionary<string, object> { ["final"] = createItem },
+            });
+
+            var blobUpload = result.Deserialize<BlobUploadResponse>(JmapSerializerOptions.Default)
+                ?? throw new InvalidOperationException("Failed to parse Blob/upload response");
+
+            if (blobUpload.NotCreated != null && blobUpload.NotCreated.TryGetValue("final", out var err))
+                throw new InvalidOperationException($"Blob/upload failed: {err.Type} — {err.Description}");
+
+            if (blobUpload.Created == null || !blobUpload.Created.TryGetValue("final", out var created))
+                throw new InvalidOperationException("Blob/upload returned no result");
+
+            return created.Id;
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
     }
 
     public async Task<FileNode> CreateFileNodeAsync(string parentId, string? blobId, string name, string? type = null, string? onExists = null, CancellationToken ct = default)

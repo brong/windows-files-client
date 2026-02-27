@@ -329,15 +329,7 @@ public class OutboxProcessor : IDisposable
             Log($"Outbox: uploading modified file {fileName}");
             using var fileStream = new FileStream(change.LocalPath, FileMode.Open, FileAccess.Read,
                 FileShare.ReadWrite | FileShare.Delete);
-            using var stream = new ProgressStream(fileStream, fileStream.Length,
-                percent => _outbox.UpdateProgress(change.Id, percent));
-            // Size-based timeout: 120s base + 1s per 25KB (~25KB/s minimum throughput)
-            // Activity-based timeouts don't work because HTTP/2 buffers all reads upfront
-            var timeout1 = (int)(fileStream.Length / 25_000) + 120;
-            using var uploadCts1 = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            uploadCts1.CancelAfter(TimeSpan.FromSeconds(timeout1));
-            var blobId = await _queue.EnqueueAsync(QueuePriority.Background,
-                () => _jmapClient.UploadBlobAsync(stream, contentType, uploadCts1.Token), ct);
+            var blobId = await UploadFileContentAsync(change, fileStream, contentType, ct);
             var newNode = await _queue.EnqueueAsync(QueuePriority.Background,
                 () => _jmapClient.ReplaceFileNodeBlobAsync(change.NodeId, parentId, fileName, blobId, contentType, ct), ct);
 
@@ -439,13 +431,7 @@ public class OutboxProcessor : IDisposable
             Log($"Outbox: uploading new file {fileName}");
             using var fileStream = new FileStream(change.LocalPath, FileMode.Open, FileAccess.Read,
                 FileShare.ReadWrite | FileShare.Delete);
-            using var stream = new ProgressStream(fileStream, fileStream.Length,
-                percent => _outbox.UpdateProgress(change.Id, percent));
-            var timeout2 = (int)(fileStream.Length / 25_000) + 120;
-            using var uploadCts2 = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            uploadCts2.CancelAfter(TimeSpan.FromSeconds(timeout2));
-            var blobId = await _queue.EnqueueAsync(QueuePriority.Background,
-                () => _jmapClient.UploadBlobAsync(stream, contentType, uploadCts2.Token), ct);
+            var blobId = await UploadFileContentAsync(change, fileStream, contentType, ct);
             var node = await _queue.EnqueueAsync(QueuePriority.Background,
                 () => _jmapClient.CreateFileNodeAsync(parentId, blobId, fileName, contentType, "replace", ct), ct);
 
@@ -458,6 +444,30 @@ public class OutboxProcessor : IDisposable
         }
 
         return true;
+    }
+
+    private async Task<string> UploadFileContentAsync(
+        PendingChange change, FileStream fileStream, string contentType, CancellationToken ct)
+    {
+        var fileLength = fileStream.Length;
+        var chunkSize = _jmapClient.ChunkSize;
+        var timeoutSeconds = (int)(fileLength / 25_000) + 120;
+        using var uploadCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        uploadCts.CancelAfter(TimeSpan.FromSeconds(timeoutSeconds));
+
+        if (chunkSize.HasValue && fileLength > chunkSize.Value)
+        {
+            return await _queue.EnqueueAsync(QueuePriority.Background,
+                () => _jmapClient.UploadBlobChunkedAsync(
+                    fileStream, contentType, fileLength,
+                    percent => _outbox.UpdateProgress(change.Id, percent),
+                    uploadCts.Token), ct);
+        }
+
+        using var stream = new ProgressStream(fileStream, fileLength,
+            percent => _outbox.UpdateProgress(change.Id, percent));
+        return await _queue.EnqueueAsync(QueuePriority.Background,
+            () => _jmapClient.UploadBlobAsync(stream, contentType, uploadCts.Token), ct);
     }
 
     private async Task<bool> ProcessMoveAsync(PendingChange change, CancellationToken ct)
