@@ -180,6 +180,9 @@ internal class SyncCallbacks
         var fileName = Path.GetFileName(callbackInfo->NormalizedPath.ToString());
         OnDownloadStarted?.Invoke(transferKey, fileName);
 
+        // Set to false when the async streaming path takes ownership of cleanup.
+        bool cleanupHere = true;
+
         try
         {
             var fetchParams = callbackParameters->Anonymous.FetchData;
@@ -222,18 +225,22 @@ internal class SyncCallbacks
 
             if (isFullHydration && nodeSize > BlobGetMaxSize)
             {
-                // Large full hydration — stream directly to cfapi in chunks
-                StreamBlobToPlaceholder(*callbackInfo, node, cts.Token);
+                // Large full hydration — transfer data asynchronously on a
+                // background thread so this callback returns immediately.
+                // cfapi releases data to the reading app as each chunk is
+                // transferred via CfExecute (which works from any thread).
+                var cbInfo = *callbackInfo;
+                cleanupHere = false;
+                StreamBlobAsync(cbInfo, node, transferKey, nodeId, cts);
+                return;
             }
-            else
-            {
-                // Small file, partial request, or Blob/get eligible — use buffered path
-                var (data, dataStartOffset, totalSize) = FetchBlobDataAsync(node, requiredOffset, requiredLength, cts.Token)
-                    .GetAwaiter().GetResult();
 
-                int sourceOffset = (int)(requiredOffset - dataStartOffset);
-                TransferData(*callbackInfo, data, sourceOffset, requiredOffset, requiredLength, totalSize, cts.Token);
-            }
+            // Small file, partial request, or Blob/get eligible — use buffered path
+            var (data, dataStartOffset, totalSize) = FetchBlobDataAsync(node, requiredOffset, requiredLength, cts.Token)
+                .GetAwaiter().GetResult();
+
+            int sourceOffset = (int)(requiredOffset - dataStartOffset);
+            TransferData(*callbackInfo, data, sourceOffset, requiredOffset, requiredLength, totalSize, cts.Token);
 
             // Record that we just hydrated this file so SyncEngine doesn't
             // re-upload it when FileSystemWatcher fires a Changed event.
@@ -251,9 +258,12 @@ internal class SyncCallbacks
         }
         finally
         {
-            _inFlightFetches.TryRemove(transferKey, out _);
-            cts.Dispose();
-            OnDownloadCompleted?.Invoke(transferKey);
+            if (cleanupHere)
+            {
+                _inFlightFetches.TryRemove(transferKey, out _);
+                cts.Dispose();
+                OnDownloadCompleted?.Invoke(transferKey);
+            }
         }
     }
 
@@ -646,103 +656,126 @@ internal class SyncCallbacks
     }
 
     /// <summary>
-    /// Stream a blob directly to a cfapi placeholder in chunks. Must run on the
-    /// callback thread. Opens a single HTTP GET, reads chunks synchronously, and
-    /// transfers each chunk to cfapi immediately — so the application (e.g. video
-    /// player) receives data progressively.
+    /// Launch async streaming of a blob to a cfapi placeholder. Runs the download
+    /// and chunk transfer on a thread pool thread so the FETCH_DATA callback can
+    /// return immediately — cfapi then releases data to the reading application
+    /// (e.g. video player) as each chunk arrives via CfExecute.
+    /// Owns the CancellationTokenSource and handles all cleanup.
     /// </summary>
-    private unsafe void StreamBlobToPlaceholder(
-        CF_CALLBACK_INFO callbackInfo, FileNode node, CancellationToken ct)
+    private void StreamBlobAsync(
+        CF_CALLBACK_INFO callbackInfo, FileNode node,
+        long transferKey, string nodeId, CancellationTokenSource cts)
     {
-        var blobId = node.BlobId!;
-        var totalSize = node.Size ?? 0;
-        var chunkSize = (int)Math.Min(_jmapClient.ChunkSize ?? 4 * 1024 * 1024, int.MaxValue);
-        var algo = GetDigestAlgorithm();
-
-        Log($"FETCH_DATA: streaming {totalSize} bytes in {chunkSize} byte chunks for blob {blobId}");
-
-        // Open HTTP stream (async → .GetAwaiter().GetResult() to get stream on callback thread)
-        var stream = _queue.EnqueueAsync(QueuePriority.Interactive,
-            () => _jmapClient.DownloadBlobAsync(blobId, node.Type, node.Name, ct), ct)
-            .GetAwaiter().GetResult();
-
-        using (stream)
+        Task.Run(async () =>
         {
-            var buffer = new byte[chunkSize];
-            long totalTransferred = 0;
-            using var hash = algo != null
-                ? IncrementalHash.CreateHash(algo == "sha" ? HashAlgorithmName.SHA1 : HashAlgorithmName.SHA256)
-                : null;
-
-            while (totalTransferred < totalSize)
+            try
             {
-                ct.ThrowIfCancellationRequested();
+                var blobId = node.BlobId!;
+                var totalSize = node.Size ?? 0;
+                const int chunkSize = 128 * 1024; // 128KB — small enough for responsive progressive playback
+                var algo = GetDigestAlgorithm();
+                var ct = cts.Token;
 
-                var toRead = (int)Math.Min(chunkSize, totalSize - totalTransferred);
-                var bytesRead = ReadFull(stream, buffer, toRead, ct);
-                if (bytesRead == 0)
-                    break;
+                Log($"FETCH_DATA: streaming {totalSize} bytes in {chunkSize} byte chunks for blob {blobId}");
 
-                hash?.AppendData(buffer, 0, bytesRead);
-                TransferChunk(callbackInfo, buffer, 0, totalTransferred, bytesRead);
-                totalTransferred += bytesRead;
+                var stream = await _queue.EnqueueAsync(QueuePriority.Interactive,
+                    () => _jmapClient.DownloadBlobAsync(blobId, node.Type, node.Name, ct), ct);
 
-                if (totalSize > 0)
+                using (stream)
                 {
-                    try
-                    {
-                        PInvoke.CfReportProviderProgress(
-                            callbackInfo.ConnectionKey,
-                            callbackInfo.TransferKey,
-                            totalSize,
-                            totalTransferred);
-                    }
-                    catch { /* progress is best-effort */ }
-                }
-            }
+                    var buffer = new byte[chunkSize];
+                    long totalTransferred = 0;
+                    using var hash = algo != null
+                        ? IncrementalHash.CreateHash(algo == "sha" ? HashAlgorithmName.SHA1 : HashAlgorithmName.SHA256)
+                        : null;
 
-            Log($"FETCH_DATA: streamed {totalTransferred} bytes total for blob {blobId}");
-
-            // Verify digest against server
-            if (hash != null && algo != null)
-            {
-                var actual = Convert.ToBase64String(hash.GetHashAndReset());
-                try
-                {
-                    var digestItem = GetBlobDigestAsync(blobId, algo, null, null, ct)
-                        .GetAwaiter().GetResult();
-                    if (digestItem != null)
+                    while (totalTransferred < totalSize)
                     {
-                        var expected = GetDigestFromItem(digestItem, algo);
-                        if (expected != null)
+                        ct.ThrowIfCancellationRequested();
+
+                        var toRead = (int)Math.Min(chunkSize, totalSize - totalTransferred);
+                        var bytesRead = await ReadFullAsync(stream, buffer, toRead, ct);
+                        if (bytesRead == 0)
+                            break;
+
+                        hash?.AppendData(buffer, 0, bytesRead);
+                        TransferChunk(callbackInfo, buffer, 0, totalTransferred, bytesRead);
+                        totalTransferred += bytesRead;
+
+                        if (totalSize > 0)
                         {
-                            if (actual != expected)
-                                LogError($"Digest mismatch (stream {blobId}): expected {expected}, got {actual}");
-                            else
-                                Log($"Digest OK (stream {blobId}): {algo}={actual}");
+                            try
+                            {
+                                PInvoke.CfReportProviderProgress(
+                                    callbackInfo.ConnectionKey,
+                                    callbackInfo.TransferKey,
+                                    totalSize,
+                                    totalTransferred);
+                            }
+                            catch { /* progress is best-effort */ }
+                        }
+                    }
+
+                    Log($"FETCH_DATA: streamed {totalTransferred} bytes total for blob {blobId}");
+
+                    // Verify digest against server
+                    if (hash != null && algo != null)
+                    {
+                        var actual = Convert.ToBase64String(hash.GetHashAndReset());
+                        try
+                        {
+                            var digestItem = await GetBlobDigestAsync(blobId, algo, null, null, ct);
+                            if (digestItem != null)
+                            {
+                                var expected = GetDigestFromItem(digestItem, algo);
+                                if (expected != null)
+                                {
+                                    if (actual != expected)
+                                        LogError($"Digest mismatch (stream {blobId}): expected {expected}, got {actual}");
+                                    else
+                                        Log($"Digest OK (stream {blobId}): {algo}={actual}");
+                                }
+                            }
+                        }
+                        catch (Exception ex) when (ex is not OperationCanceledException)
+                        {
+                            LogError($"Digest fetch failed for streaming download: {ex.Message}");
                         }
                     }
                 }
-                catch (Exception ex) when (ex is not OperationCanceledException)
-                {
-                    LogError($"Digest fetch failed for streaming download: {ex.Message}");
-                }
+
+                if (nodeId != null)
+                    RecentlyHydrated[nodeId] = 0;
             }
-        }
+            catch (OperationCanceledException)
+            {
+                Log($"FETCH_DATA cancelled: transferKey={transferKey}");
+            }
+            catch (Exception ex)
+            {
+                LogError($"FETCH_DATA streaming error: {ex.Message}");
+                TransferError(callbackInfo, new NTSTATUS(unchecked((int)0xC0000001))); // STATUS_UNSUCCESSFUL
+            }
+            finally
+            {
+                _inFlightFetches.TryRemove(transferKey, out _);
+                cts.Dispose();
+                OnDownloadCompleted?.Invoke(transferKey);
+            }
+        });
     }
 
     /// <summary>
     /// Read exactly <paramref name="count"/> bytes from <paramref name="stream"/>,
-    /// or fewer if the stream ends. Uses synchronous reads so this can block the
-    /// callback thread while waiting for network data.
+    /// or fewer if the stream ends.
     /// </summary>
-    private static int ReadFull(Stream stream, byte[] buffer, int count, CancellationToken ct)
+    private static async Task<int> ReadFullAsync(Stream stream, byte[] buffer, int count, CancellationToken ct)
     {
         int offset = 0;
         while (offset < count)
         {
             ct.ThrowIfCancellationRequested();
-            int read = stream.Read(buffer, offset, count - offset);
+            int read = await stream.ReadAsync(buffer.AsMemory(offset, count - offset), ct);
             if (read == 0)
                 break;
             offset += read;
