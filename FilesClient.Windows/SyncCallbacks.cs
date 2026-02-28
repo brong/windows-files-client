@@ -215,14 +215,25 @@ internal class SyncCallbacks
             }
             Log($"FETCH_DATA: node={nodeId}, offset={requiredOffset}, len={requiredLength}, caller={processName}");
 
-            // Download blob data asynchronously, then transfer to cfapi
-            // synchronously on the callback thread (CfExecute requires
-            // the callback thread context for the transfer key to be valid).
-            var (data, dataStartOffset, totalSize) = FetchBlobDataAsync(nodeId, requiredOffset, requiredLength, cts.Token)
-                .GetAwaiter().GetResult();
+            // Fetch node metadata first (shared by both paths)
+            var node = FetchNodeAsync(nodeId, cts.Token).GetAwaiter().GetResult();
+            var nodeSize = node.Size ?? 0;
+            bool isFullHydration = requiredOffset == 0 && requiredLength >= nodeSize;
 
-            int sourceOffset = (int)(requiredOffset - dataStartOffset);
-            TransferData(*callbackInfo, data, sourceOffset, requiredOffset, requiredLength, totalSize, cts.Token);
+            if (isFullHydration && nodeSize > BlobGetMaxSize)
+            {
+                // Large full hydration — stream directly to cfapi in chunks
+                StreamBlobToPlaceholder(*callbackInfo, node, cts.Token);
+            }
+            else
+            {
+                // Small file, partial request, or Blob/get eligible — use buffered path
+                var (data, dataStartOffset, totalSize) = FetchBlobDataAsync(node, requiredOffset, requiredLength, cts.Token)
+                    .GetAwaiter().GetResult();
+
+                int sourceOffset = (int)(requiredOffset - dataStartOffset);
+                TransferData(*callbackInfo, data, sourceOffset, requiredOffset, requiredLength, totalSize, cts.Token);
+            }
 
             // Record that we just hydrated this file so SyncEngine doesn't
             // re-upload it when FileSystemWatcher fires a Changed event.
@@ -489,20 +500,26 @@ internal class SyncCallbacks
     }
 
     /// <summary>
+    /// Fetch a FileNode by ID. Throws if not found or has no blob.
+    /// </summary>
+    private async Task<FileNode> FetchNodeAsync(string nodeId, CancellationToken ct)
+    {
+        var nodes = await _queue.EnqueueAsync(QueuePriority.Interactive,
+            () => _jmapClient.GetFileNodesAsync([nodeId], ct), ct);
+        if (nodes.Length == 0 || nodes[0].BlobId == null)
+            throw new FileNotFoundException($"Node {nodeId} not found or has no blob");
+        return nodes[0];
+    }
+
+    /// <summary>
     /// Download blob data asynchronously (can run on any thread).
     /// Returns the data bytes, the file offset where data starts, and total file size.
     /// Uses Blob/get for small files, HTTP Range for partial requests, and full HTTP as fallback.
     /// All paths verify content digests when the server supports Blob/get.
     /// </summary>
     private async Task<(byte[] data, long dataStartOffset, long totalSize)> FetchBlobDataAsync(
-        string nodeId, long requiredOffset, long requiredLength, CancellationToken ct)
+        FileNode node, long requiredOffset, long requiredLength, CancellationToken ct)
     {
-        var nodes = await _queue.EnqueueAsync(QueuePriority.Interactive,
-            () => _jmapClient.GetFileNodesAsync([nodeId], ct), ct);
-        if (nodes.Length == 0 || nodes[0].BlobId == null)
-            throw new FileNotFoundException($"Node {nodeId} not found or has no blob");
-
-        var node = nodes[0];
         var algo = GetDigestAlgorithm();
         var nodeSize = node.Size ?? 0;
         bool isPartialRequest = requiredOffset > 0 || requiredLength < nodeSize;
@@ -626,6 +643,111 @@ internal class SyncCallbacks
 
             return (fullBytes, 0, nodeSize);
         }
+    }
+
+    /// <summary>
+    /// Stream a blob directly to a cfapi placeholder in chunks. Must run on the
+    /// callback thread. Opens a single HTTP GET, reads chunks synchronously, and
+    /// transfers each chunk to cfapi immediately — so the application (e.g. video
+    /// player) receives data progressively.
+    /// </summary>
+    private unsafe void StreamBlobToPlaceholder(
+        CF_CALLBACK_INFO callbackInfo, FileNode node, CancellationToken ct)
+    {
+        var blobId = node.BlobId!;
+        var totalSize = node.Size ?? 0;
+        var chunkSize = (int)Math.Min(_jmapClient.ChunkSize ?? 4 * 1024 * 1024, int.MaxValue);
+        var algo = GetDigestAlgorithm();
+
+        Log($"FETCH_DATA: streaming {totalSize} bytes in {chunkSize} byte chunks for blob {blobId}");
+
+        // Open HTTP stream (async → .GetAwaiter().GetResult() to get stream on callback thread)
+        var stream = _queue.EnqueueAsync(QueuePriority.Interactive,
+            () => _jmapClient.DownloadBlobAsync(blobId, node.Type, node.Name, ct), ct)
+            .GetAwaiter().GetResult();
+
+        using (stream)
+        {
+            var buffer = new byte[chunkSize];
+            long totalTransferred = 0;
+            using var hash = algo != null
+                ? IncrementalHash.CreateHash(algo == "sha" ? HashAlgorithmName.SHA1 : HashAlgorithmName.SHA256)
+                : null;
+
+            while (totalTransferred < totalSize)
+            {
+                ct.ThrowIfCancellationRequested();
+
+                var toRead = (int)Math.Min(chunkSize, totalSize - totalTransferred);
+                var bytesRead = ReadFull(stream, buffer, toRead, ct);
+                if (bytesRead == 0)
+                    break;
+
+                hash?.AppendData(buffer, 0, bytesRead);
+                TransferChunk(callbackInfo, buffer, 0, totalTransferred, bytesRead);
+                totalTransferred += bytesRead;
+
+                if (totalSize > 0)
+                {
+                    try
+                    {
+                        PInvoke.CfReportProviderProgress(
+                            callbackInfo.ConnectionKey,
+                            callbackInfo.TransferKey,
+                            totalSize,
+                            totalTransferred);
+                    }
+                    catch { /* progress is best-effort */ }
+                }
+            }
+
+            Log($"FETCH_DATA: streamed {totalTransferred} bytes total for blob {blobId}");
+
+            // Verify digest against server
+            if (hash != null && algo != null)
+            {
+                var actual = Convert.ToBase64String(hash.GetHashAndReset());
+                try
+                {
+                    var digestItem = GetBlobDigestAsync(blobId, algo, null, null, ct)
+                        .GetAwaiter().GetResult();
+                    if (digestItem != null)
+                    {
+                        var expected = GetDigestFromItem(digestItem, algo);
+                        if (expected != null)
+                        {
+                            if (actual != expected)
+                                LogError($"Digest mismatch (stream {blobId}): expected {expected}, got {actual}");
+                            else
+                                Log($"Digest OK (stream {blobId}): {algo}={actual}");
+                        }
+                    }
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    LogError($"Digest fetch failed for streaming download: {ex.Message}");
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Read exactly <paramref name="count"/> bytes from <paramref name="stream"/>,
+    /// or fewer if the stream ends. Uses synchronous reads so this can block the
+    /// callback thread while waiting for network data.
+    /// </summary>
+    private static int ReadFull(Stream stream, byte[] buffer, int count, CancellationToken ct)
+    {
+        int offset = 0;
+        while (offset < count)
+        {
+            ct.ThrowIfCancellationRequested();
+            int read = stream.Read(buffer, offset, count - offset);
+            if (read == 0)
+                break;
+            offset += read;
+        }
+        return offset;
     }
 
     /// <summary>
