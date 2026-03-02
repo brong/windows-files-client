@@ -910,6 +910,7 @@ public class SyncEngine : IDisposable
             TrackFolderPermissions(node, childPath);
             if (!Path.Exists(childPath))
             {
+                Log($"  Created node {node.Id}: creating placeholder at {childPath}");
                 using (SuspendFolderProtection(parentPath))
                     _placeholderManager.CreatePlaceholders(parentPath, [node]);
 
@@ -925,8 +926,9 @@ public class SyncEngine : IDisposable
             }
             else
             {
+                Log($"  Created node {node.Id}: path exists, SetInSync {childPath}");
                 try { SetInSync(childPath); }
-                catch { /* not a placeholder — ignore */ }
+                catch (Exception ex) { LogError($"  SetInSync failed for {childPath}: {ex.Message}"); }
             }
             ApplyWriteProtection(childPath);
         }

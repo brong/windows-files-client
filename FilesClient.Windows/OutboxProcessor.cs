@@ -435,10 +435,12 @@ public class OutboxProcessor : IDisposable
             var node = await _queue.EnqueueAsync(QueuePriority.Background,
                 () => _jmapClient.CreateFileNodeAsync(parentId, blobId, fileName, contentType, "replace", ct), ct);
 
+            Log($"Outbox: EnsurePlaceholder {change.LocalPath} nodeId={node.Id}");
             SyncEngine.EnsurePlaceholder(change.LocalPath, node.Id);
             _engine.UpdateMappings(change.LocalPath, null, node.Id);
             _engine.RecordRecentUpload(change.LocalPath);
             SyncEngine.StripZoneIdentifier(change.LocalPath);
+            Log($"Outbox: SetInSync {change.LocalPath}");
             SyncEngine.SetInSync(change.LocalPath);
             Log($"Outbox: created {fileName} → node {node.Id}");
         }

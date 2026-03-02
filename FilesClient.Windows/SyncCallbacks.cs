@@ -223,6 +223,8 @@ internal class SyncCallbacks
             var nodeSize = node.Size ?? 0;
             bool isFullHydration = requiredOffset == 0 && requiredLength >= nodeSize;
 
+            Log($"FETCH_DATA: node={nodeId}, size={nodeSize}, isFullHydration={isFullHydration}, path={((isFullHydration && nodeSize > BlobGetMaxSize) ? "streaming" : "buffered")}");
+
             if (isFullHydration && nodeSize > BlobGetMaxSize)
             {
                 // Large full hydration — transfer data asynchronously on a
@@ -239,8 +241,12 @@ internal class SyncCallbacks
             var (data, dataStartOffset, totalSize) = FetchBlobDataAsync(node, requiredOffset, requiredLength, cts.Token)
                 .GetAwaiter().GetResult();
 
+            Log($"FETCH_DATA: buffered {data.Length} bytes for node={nodeId}, dataStartOffset={dataStartOffset}, totalSize={totalSize}");
+
             int sourceOffset = (int)(requiredOffset - dataStartOffset);
             TransferData(*callbackInfo, data, sourceOffset, requiredOffset, requiredLength, totalSize, cts.Token);
+
+            Log($"FETCH_DATA: transfer complete for node={nodeId}");
 
             // Record that we just hydrated this file so SyncEngine doesn't
             // re-upload it when FileSystemWatcher fires a Changed event.
@@ -702,6 +708,10 @@ internal class SyncCallbacks
                         TransferChunk(callbackInfo, buffer, 0, totalTransferred, bytesRead);
                         totalTransferred += bytesRead;
 
+                        // Log progress every ~1MB to avoid spam
+                        if (totalTransferred == bytesRead || totalTransferred % (1024 * 1024) < chunkSize)
+                            Log($"FETCH_DATA: stream progress node={nodeId}, {totalTransferred}/{totalSize} bytes ({totalTransferred * 100 / totalSize}%)");
+
                         if (totalSize > 0)
                         {
                             try
@@ -843,8 +853,9 @@ internal class SyncCallbacks
         }
     }
 
-    private static unsafe void TransferError(CF_CALLBACK_INFO callbackInfo, NTSTATUS status)
+    private unsafe void TransferError(CF_CALLBACK_INFO callbackInfo, NTSTATUS status)
     {
+        LogError($"TransferError: status=0x{(uint)status.Value:X8}, transferKey={callbackInfo.TransferKey} (marks placeholder NOT in-sync)");
         var opInfo = new CF_OPERATION_INFO
         {
             StructSize = (uint)sizeof(CF_OPERATION_INFO),
