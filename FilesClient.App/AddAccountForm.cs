@@ -5,7 +5,7 @@ namespace FilesClient.App;
 
 sealed class AddAccountForm : Form
 {
-    private const string DefaultSessionUrl = "https://dogfoodapi.fastmail.com/jmap/session";
+    private const string DefaultSessionUrl = "https://api.fastmail.com/jmap/session";
 
     private readonly ServiceClient _serviceClient;
 

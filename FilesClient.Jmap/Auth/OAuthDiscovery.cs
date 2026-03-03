@@ -16,12 +16,6 @@ public static class OAuthDiscovery
     };
 
     /// <summary>
-    /// Override host for .well-known/jmap lookup during testing.
-    /// Set to null to use the email domain directly (production behavior).
-    /// </summary>
-    public static string? DiscoveryHostOverride = "dogfoodapi.fastmail.com";
-
-    /// <summary>
     /// Discover OAuth metadata from an email domain.
     /// Returns the session URL (from .well-known/jmap redirect target) and OAuth server metadata.
     /// </summary>
@@ -29,11 +23,7 @@ public static class OAuthDiscovery
         string emailDomain, CancellationToken ct = default)
     {
         // Step 1: .well-known/jmap — follow redirects to get session URL
-        // fastmaildev.com users go through their own API; everyone else uses the override if set
-        var discoveryHost = emailDomain == "fastmaildev.com"
-            ? "api.fastmaildev.com"
-            : DiscoveryHostOverride ?? emailDomain;
-        var jmapUrl = $"https://{discoveryHost}/.well-known/jmap";
+        var jmapUrl = $"https://{emailDomain}/.well-known/jmap";
 
         // Use a handler that follows redirects so we get the final URL
         using var handler = new HttpClientHandler { AllowAutoRedirect = true };
