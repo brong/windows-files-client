@@ -61,7 +61,7 @@ public static class OAuthDiscovery
         // Step 2: .well-known/oauth-protected-resource
         var resourceUrl = $"{origin}/.well-known/oauth-protected-resource";
         var resourceResponse = await http.GetAsync(resourceUrl, ct);
-        resourceResponse.EnsureSuccessStatusCode();
+        await OAuthHelpers.EnsureSuccessAsync(resourceResponse, "OAuth protected resource");
 
         var resourceJson = await resourceResponse.Content.ReadAsStringAsync(ct);
         var resource = JsonSerializer.Deserialize<OAuthProtectedResource>(resourceJson, JsonOptions)
@@ -80,7 +80,7 @@ public static class OAuthDiscovery
             metadataUrl = $"{issuerUri.GetLeftPart(UriPartial.Authority)}/.well-known/oauth-authorization-server";
 
         var metadataResponse = await http.GetAsync(metadataUrl, ct);
-        metadataResponse.EnsureSuccessStatusCode();
+        await OAuthHelpers.EnsureSuccessAsync(metadataResponse, "OAuth authorization server metadata");
 
         var metadataJson = await metadataResponse.Content.ReadAsStringAsync(ct);
         var metadata = JsonSerializer.Deserialize<OAuthServerMetadata>(metadataJson, JsonOptions)

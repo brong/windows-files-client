@@ -44,7 +44,7 @@ public static class OAuthClient
         var json = JsonSerializer.Serialize(payload);
         var content = new StringContent(json, Encoding.UTF8, "application/json");
         var response = await http.PostAsync(registrationEndpoint, content, ct);
-        response.EnsureSuccessStatusCode();
+        await OAuthHelpers.EnsureSuccessAsync(response, "client registration");
 
         var responseJson = await response.Content.ReadAsStringAsync(ct);
         return JsonSerializer.Deserialize<OAuthClientRegistration>(responseJson, JsonOptions)
@@ -105,7 +105,7 @@ public static class OAuthClient
         });
 
         var response = await http.PostAsync(tokenEndpoint, form, ct);
-        response.EnsureSuccessStatusCode();
+        await OAuthHelpers.EnsureSuccessAsync(response, "token exchange");
 
         var json = await response.Content.ReadAsStringAsync(ct);
         return JsonSerializer.Deserialize<OAuthTokenResponse>(json, JsonOptions)
@@ -129,7 +129,7 @@ public static class OAuthClient
         });
 
         var response = await http.PostAsync(tokenEndpoint, form, ct);
-        response.EnsureSuccessStatusCode();
+        await OAuthHelpers.EnsureSuccessAsync(response, "token refresh");
 
         var json = await response.Content.ReadAsStringAsync(ct);
         return JsonSerializer.Deserialize<OAuthTokenResponse>(json, JsonOptions)
