@@ -1,4 +1,5 @@
 using System.Drawing;
+using FilesClient.Jmap.Auth;
 
 namespace FilesClient.App;
 
@@ -7,10 +8,20 @@ sealed class AddAccountForm : Form
     private const string DefaultSessionUrl = "https://api.fastmail.com/jmap/session";
 
     private readonly ServiceClient _serviceClient;
+
+    // OAuth flow controls
+    private readonly TextBox _emailBox;
+    private readonly Button _signInButton;
+
+    // Advanced (manual) flow controls
+    private readonly GroupBox _advancedGroup;
     private readonly TextBox _tokenBox;
     private readonly TextBox _sessionUrlBox;
     private readonly Button _connectButton;
+
+    // Shared
     private readonly Label _statusLabel;
+    private readonly LinkLabel _advancedToggle;
 
     public AddAccountForm(ServiceClient serviceClient)
     {
@@ -21,7 +32,7 @@ sealed class AddAccountForm : Form
 
         Text = "Add Account";
         var em = Font.Height;
-        Size = new Size(32 * em, 17 * em);
+        Size = new Size(32 * em, 12 * em);
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;
@@ -29,75 +40,261 @@ sealed class AddAccountForm : Form
         ShowInTaskbar = false;
 
         var pad = em;
-        var row1 = em;
-        var row1Input = row1 + (int)(em * 1.4);
-        var row2 = row1Input + (int)(em * 2.2);
-        var row2Input = row2 + (int)(em * 1.4);
-        var buttonY = row2Input + (int)(em * 2.5);
         var inputWidth = ClientSize.Width - 2 * pad;
+
+        // --- OAuth flow (primary) ---
+        var y = em;
+
+        var emailLabel = new Label
+        {
+            Text = "Email address:",
+            Location = new Point(pad, y),
+            AutoSize = true,
+        };
+        y += (int)(em * 1.4);
+
+        _emailBox = new TextBox
+        {
+            Location = new Point(pad, y),
+            Width = inputWidth,
+            Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top,
+        };
+        y += (int)(em * 2.2);
+
+        _signInButton = new Button
+        {
+            Text = "Sign in",
+            AutoSize = true,
+            Height = (int)(em * 1.8),
+            Anchor = AnchorStyles.Top | AnchorStyles.Right,
+        };
+        _signInButton.Location = new Point(ClientSize.Width - pad - _signInButton.PreferredSize.Width, y);
+        _signInButton.Click += OnSignInClicked;
+
+        _advancedToggle = new LinkLabel
+        {
+            Text = "Advanced options...",
+            AutoSize = true,
+            Location = new Point(pad, y + (int)(em * 0.3)),
+            Anchor = AnchorStyles.Top | AnchorStyles.Left,
+        };
+        _advancedToggle.LinkClicked += OnAdvancedToggleClicked;
+
+        y += (int)(em * 2.8);
+
+        // --- Status label (shared) ---
+        _statusLabel = new Label
+        {
+            Location = new Point(pad, y),
+            AutoSize = true,
+            MaximumSize = new Size(inputWidth, 0),
+            Anchor = AnchorStyles.Left | AnchorStyles.Top,
+            ForeColor = Color.Gray,
+        };
+
+        // --- Advanced group (collapsed by default) ---
+        var advancedY = y + (int)(em * 1.5);
+        _advancedGroup = new GroupBox
+        {
+            Text = "Manual Connection",
+            Location = new Point(pad, advancedY),
+            Size = new Size(inputWidth, (int)(em * 8.5)),
+            Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top,
+            Visible = false,
+        };
+
+        var innerPad = em / 2;
+        var innerY = (int)(em * 1.5);
 
         var urlLabel = new Label
         {
-            Text = "Session URL (optional):",
-            Location = new Point(pad, row1),
+            Text = "Session URL:",
+            Location = new Point(innerPad, innerY),
             AutoSize = true,
         };
+        innerY += (int)(em * 1.3);
+
         _sessionUrlBox = new TextBox
         {
-            Location = new Point(pad, row1Input),
-            Width = inputWidth,
+            Location = new Point(innerPad, innerY),
+            Width = _advancedGroup.ClientSize.Width - 2 * innerPad,
             Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top,
             Text = DefaultSessionUrl,
         };
+        innerY += (int)(em * 2.2);
 
         var tokenLabel = new Label
         {
             Text = "App password (token):",
-            Location = new Point(pad, row2),
+            Location = new Point(innerPad, innerY),
             AutoSize = true,
         };
+        innerY += (int)(em * 1.3);
+
         _tokenBox = new TextBox
         {
-            Location = new Point(pad, row2Input),
-            Width = inputWidth,
+            Location = new Point(innerPad, innerY),
+            Width = _advancedGroup.ClientSize.Width - 2 * innerPad,
             Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top,
             UseSystemPasswordChar = true,
         };
+        innerY += (int)(em * 2.2);
 
         _connectButton = new Button
         {
             Text = "Connect",
             AutoSize = true,
             Height = (int)(em * 1.8),
-            Anchor = AnchorStyles.Bottom | AnchorStyles.Right,
+            Anchor = AnchorStyles.Top | AnchorStyles.Right,
         };
-        _connectButton.Location = new Point(ClientSize.Width - pad - _connectButton.PreferredSize.Width, buttonY);
+        _connectButton.Location = new Point(
+            _advancedGroup.ClientSize.Width - innerPad - _connectButton.PreferredSize.Width, innerY);
         _connectButton.Click += OnConnectClicked;
 
+        _advancedGroup.Controls.AddRange([urlLabel, _sessionUrlBox, tokenLabel, _tokenBox, _connectButton]);
+
+        // --- Cancel button ---
         var cancelButton = new Button
         {
             Text = "Cancel",
             AutoSize = true,
             Height = (int)(em * 1.8),
-            Anchor = AnchorStyles.Bottom | AnchorStyles.Right,
             DialogResult = DialogResult.Cancel,
         };
-        cancelButton.Location = new Point(_connectButton.Left - cancelButton.PreferredSize.Width - em / 2, buttonY);
 
-        _statusLabel = new Label
-        {
-            Location = new Point(pad, buttonY),
-            AutoSize = true,
-            MaximumSize = new Size(cancelButton.Left - 2 * pad, 0),
-            Anchor = AnchorStyles.Left | AnchorStyles.Bottom,
-            ForeColor = Color.Gray,
-        };
+        Controls.AddRange([emailLabel, _emailBox, _signInButton, _advancedToggle,
+            _statusLabel, _advancedGroup, cancelButton]);
 
-        Controls.AddRange([tokenLabel, _tokenBox, urlLabel, _sessionUrlBox,
-            _connectButton, cancelButton, _statusLabel]);
+        // Position cancel at bottom-right
+        cancelButton.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
+        cancelButton.Location = new Point(
+            ClientSize.Width - pad - cancelButton.PreferredSize.Width,
+            ClientSize.Height - pad - cancelButton.Height);
 
-        AcceptButton = _connectButton;
+        AcceptButton = _signInButton;
         CancelButton = cancelButton;
+    }
+
+    private void OnAdvancedToggleClicked(object? sender, LinkLabelLinkClickedEventArgs e)
+    {
+        _advancedGroup.Visible = !_advancedGroup.Visible;
+        _advancedToggle.Text = _advancedGroup.Visible
+            ? "Hide advanced options"
+            : "Advanced options...";
+
+        // Resize form to fit
+        var em = Font.Height;
+        var extraHeight = _advancedGroup.Visible ? _advancedGroup.Height + em : 0;
+        Size = new Size(Size.Width, (int)(12 * em) + extraHeight);
+    }
+
+    private async void OnSignInClicked(object? sender, EventArgs e)
+    {
+        var email = _emailBox.Text.Trim();
+        if (string.IsNullOrEmpty(email) || !email.Contains('@'))
+        {
+            MessageBox.Show("Please enter a valid email address.", "Invalid Email",
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            _emailBox.Focus();
+            return;
+        }
+
+        _signInButton.Enabled = false;
+        _emailBox.Enabled = false;
+        _statusLabel.ForeColor = Color.DodgerBlue;
+
+        try
+        {
+            using var flow = new OAuthLoginFlow();
+            var progress = new Progress<string>(msg =>
+            {
+                if (InvokeRequired)
+                    BeginInvoke(() => _statusLabel.Text = msg);
+                else
+                    _statusLabel.Text = msg;
+            });
+
+            var cred = await flow.SignInAsync(email, progress);
+
+            // Discover accounts
+            _statusLabel.Text = "Discovering accounts...";
+            var discoverResult = await _serviceClient.DiscoverAccountsAsync(cred.SessionUrl, cred.AccessToken);
+
+            if (!discoverResult.Success || discoverResult.Accounts == null)
+            {
+                _statusLabel.Text = discoverResult.Error ?? "Discovery failed";
+                _statusLabel.ForeColor = Color.Red;
+                _signInButton.Enabled = true;
+                _emailBox.Enabled = true;
+                return;
+            }
+
+            if (discoverResult.Accounts.Count == 0)
+            {
+                _statusLabel.Text = "No FileNode accounts found";
+                _statusLabel.ForeColor = Color.Red;
+                _signInButton.Enabled = true;
+                _emailBox.Enabled = true;
+                return;
+            }
+
+            // Account selection
+            HashSet<string>? enabledAccountIds = null;
+            if (discoverResult.Accounts.Count >= 1)
+            {
+                var accounts = discoverResult.Accounts
+                    .Select(a => (a.AccountId, a.Name, a.IsPrimary)).ToList();
+
+                using var selectForm = new SelectAccountsForm(accounts, null);
+                if (selectForm.ShowDialog(this) != DialogResult.OK || selectForm.SelectedAccountIds == null)
+                {
+                    _signInButton.Enabled = true;
+                    _emailBox.Enabled = true;
+                    _statusLabel.Text = "";
+                    return;
+                }
+                enabledAccountIds = selectForm.SelectedAccountIds;
+
+                if (enabledAccountIds.Count == 0)
+                {
+                    _statusLabel.Text = "No accounts selected";
+                    _statusLabel.ForeColor = Color.Red;
+                    _signInButton.Enabled = true;
+                    _emailBox.Enabled = true;
+                    return;
+                }
+            }
+
+            // Add login via service (with OAuth fields)
+            _statusLabel.Text = "Starting sync...";
+            var addResult = await _serviceClient.AddLoginAsync(
+                cred.SessionUrl, cred.AccessToken, enabledAccountIds,
+                cred.RefreshToken, cred.TokenEndpoint, cred.ClientId,
+                cred.ExpiresAt.ToUnixTimeSeconds());
+
+            if (!addResult.Success)
+            {
+                _statusLabel.Text = $"Error: {addResult.Error}";
+                _statusLabel.ForeColor = Color.Red;
+                _signInButton.Enabled = true;
+                _emailBox.Enabled = true;
+                return;
+            }
+
+            _statusLabel.Text = $"Connected: {addResult.LoginId}";
+            _statusLabel.ForeColor = Color.Green;
+
+            await Task.Delay(500);
+            DialogResult = DialogResult.OK;
+            Close();
+        }
+        catch (Exception ex)
+        {
+            _statusLabel.Text = $"Error: {ex.Message}";
+            _statusLabel.ForeColor = Color.Red;
+            _signInButton.Enabled = true;
+            _emailBox.Enabled = true;
+        }
     }
 
     private async void OnConnectClicked(object? sender, EventArgs e)
@@ -166,7 +363,7 @@ sealed class AddAccountForm : Form
                 }
             }
 
-            // Phase 3: Add login via service
+            // Phase 3: Add login via service (no OAuth fields — manual token)
             _statusLabel.Text = "Starting sync...";
             var addResult = await _serviceClient.AddLoginAsync(sessionUrl, token, enabledAccountIds);
 

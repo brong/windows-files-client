@@ -1,5 +1,6 @@
 using System.Drawing;
 using FilesClient.Ipc;
+using FilesClient.Jmap.Auth;
 
 namespace FilesClient.App;
 
@@ -19,6 +20,8 @@ sealed class ManageAccountsForm : Form
     private readonly TextBox _tokenBox;
     private readonly Button _updateCredentialsButton;
     private readonly Button _removeLoginButton;
+    private readonly Button _reauthenticateButton;
+    private readonly Label _reauthStatusLabel;
 
     // Detail panel controls — synced account selected
     private readonly Panel _syncedAccountPanel;
@@ -159,6 +162,16 @@ sealed class ManageAccountsForm : Form
             Padding = Padding.Empty,
         };
 
+        _reauthenticateButton = new Button
+        {
+            Text = "Re-authenticate with browser...",
+            AutoSize = true,
+            Height = 30,
+            Margin = new Padding(0, 0, 8, 0),
+        };
+        _reauthenticateButton.Click += OnReauthenticateClicked;
+        loginButtonFlow.Controls.Add(_reauthenticateButton);
+
         _updateCredentialsButton = new Button
         {
             Text = "Update Credentials",
@@ -179,6 +192,14 @@ sealed class ManageAccountsForm : Form
 
         loginButtonFlow.Controls.AddRange([_updateCredentialsButton, _removeLoginButton]);
         loginLayout.Controls.Add(loginButtonFlow);
+
+        _reauthStatusLabel = new Label
+        {
+            AutoSize = true,
+            Margin = new Padding(0, 4, 0, 0),
+            ForeColor = Color.Gray,
+        };
+        loginLayout.Controls.Add(_reauthStatusLabel);
 
         _loginPanel.Controls.Add(loginLayout);
 
@@ -735,6 +756,73 @@ sealed class ManageAccountsForm : Form
         finally
         {
             _updateCredentialsButton.Enabled = true;
+        }
+    }
+
+    private async void OnReauthenticateClicked(object? sender, EventArgs e)
+    {
+        if (_treeView.SelectedNode?.Tag is not LoginNode loginNode)
+            return;
+
+        // Extract email domain from loginId (format: "user@host" or "user@domain@host")
+        var loginId = loginNode.LoginId;
+        var parts = loginId.Split('@');
+        string email;
+        if (parts.Length >= 3)
+            email = $"{parts[0]}@{parts[1]}"; // user@domain@host → user@domain
+        else if (parts.Length == 2)
+            email = loginId; // user@host → use as email
+        else
+        {
+            MessageBox.Show("Cannot determine email from login ID.", "Error",
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        _reauthenticateButton.Enabled = false;
+        _reauthStatusLabel.ForeColor = Color.DodgerBlue;
+        _reauthStatusLabel.Text = "";
+
+        try
+        {
+            using var flow = new OAuthLoginFlow();
+            var progress = new Progress<string>(msg =>
+            {
+                if (InvokeRequired)
+                    BeginInvoke(() => _reauthStatusLabel.Text = msg);
+                else
+                    _reauthStatusLabel.Text = msg;
+            });
+
+            var cred = await flow.SignInAsync(email, progress);
+
+            _reauthStatusLabel.Text = "Updating credentials...";
+            var result = await _serviceClient.UpdateLoginAsync(
+                loginNode.LoginId, cred.SessionUrl, cred.AccessToken,
+                cred.RefreshToken, cred.TokenEndpoint, cred.ClientId,
+                cred.ExpiresAt.ToUnixTimeSeconds());
+
+            if (!result.Success)
+            {
+                _reauthStatusLabel.Text = $"Failed: {result.Error}";
+                _reauthStatusLabel.ForeColor = Color.Red;
+            }
+            else
+            {
+                _reauthStatusLabel.Text = "Re-authenticated successfully.";
+                _reauthStatusLabel.ForeColor = Color.Green;
+                _tokenBox.Text = "";
+                _ = RefreshAllLoginAccountsAsync();
+            }
+        }
+        catch (Exception ex)
+        {
+            _reauthStatusLabel.Text = $"Error: {ex.Message}";
+            _reauthStatusLabel.ForeColor = Color.Red;
+        }
+        finally
+        {
+            _reauthenticateButton.Enabled = true;
         }
     }
 

@@ -10,6 +10,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\FilesClient.Ipc\FilesClient.Ipc.csproj" />
+    <ProjectReference Include="..\FilesClient.Jmap\FilesClient.Jmap.csproj" />
   </ItemGroup>
 
 </Project>

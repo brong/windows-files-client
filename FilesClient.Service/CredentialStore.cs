@@ -18,18 +18,31 @@ sealed class CredentialStore
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
     };
 
-    public record StoredLogin(string LoginId, string Token, string SessionUrl, HashSet<string>? EnabledAccountIds);
+    public record StoredLogin(
+        string LoginId, string Token, string SessionUrl, HashSet<string>? EnabledAccountIds,
+        string? RefreshToken = null, string? TokenEndpoint = null,
+        string? ClientId = null, long? ExpiresAtUnixSeconds = null)
+    {
+        public bool IsOAuth => RefreshToken != null;
+    }
 
-    private record CredentialPayload(string Token, string SessionUrl, HashSet<string>? EnabledAccountIds = null);
+    private record CredentialPayload(
+        string Token, string SessionUrl, HashSet<string>? EnabledAccountIds = null,
+        string? RefreshToken = null, string? TokenEndpoint = null,
+        string? ClientId = null, long? ExpiresAtUnixSeconds = null);
 
     /// <summary>
     /// Save (or overwrite) a credential for the given loginId.
     /// </summary>
-    public void Save(string loginId, string token, string sessionUrl, HashSet<string>? enabledAccountIds = null)
+    public void Save(string loginId, string token, string sessionUrl,
+        HashSet<string>? enabledAccountIds = null,
+        string? refreshToken = null, string? tokenEndpoint = null,
+        string? clientId = null, long? expiresAtUnixSeconds = null)
     {
         var vault = new PasswordVault();
         var payload = JsonSerializer.Serialize(
-            new CredentialPayload(token, sessionUrl, enabledAccountIds), SerializerOptions);
+            new CredentialPayload(token, sessionUrl, enabledAccountIds,
+                refreshToken, tokenEndpoint, clientId, expiresAtUnixSeconds), SerializerOptions);
 
         // Remove existing before adding (PasswordVault throws on duplicate)
         try
@@ -72,7 +85,11 @@ sealed class CredentialStore
                         cred.UserName,
                         payload.Token,
                         payload.SessionUrl ?? DefaultSessionUrl,
-                        payload.EnabledAccountIds));
+                        payload.EnabledAccountIds,
+                        payload.RefreshToken,
+                        payload.TokenEndpoint,
+                        payload.ClientId,
+                        payload.ExpiresAtUnixSeconds));
                 }
             }
             catch (Exception ex)

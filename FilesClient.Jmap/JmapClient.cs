@@ -67,8 +67,10 @@ public class JmapClient : IJmapClient
     }
 
     public JmapClient(string token, bool debug = false)
+        : this(new TokenAuth(token), debug) { }
+
+    public JmapClient(HttpMessageHandler handler, bool debug = false)
     {
-        HttpMessageHandler handler = new TokenAuth(token);
         if (debug)
         {
             Console.Error.WriteLine("[JMAP] Debug logging enabled");

@@ -100,13 +100,17 @@ sealed class ServiceClient : IDisposable
     }
 
     public async Task<AddLoginResultEvent> AddLoginAsync(string sessionUrl, string token,
-        HashSet<string>? enabledAccountIds = null, CancellationToken ct = default)
+        HashSet<string>? enabledAccountIds = null,
+        string? refreshToken = null, string? tokenEndpoint = null,
+        string? clientId = null, long? expiresAtUnixSeconds = null,
+        CancellationToken ct = default)
     {
         var tcs = new TaskCompletionSource<AddLoginResultEvent>();
         lock (_lock) _addLoginTcs = tcs;
 
         using var reg = ct.Register(() => tcs.TrySetCanceled());
-        await _client.SendCommandAsync(new AddLoginCommand(sessionUrl, token, enabledAccountIds), ct);
+        await _client.SendCommandAsync(new AddLoginCommand(sessionUrl, token, enabledAccountIds,
+            refreshToken, tokenEndpoint, clientId, expiresAtUnixSeconds), ct);
         return await tcs.Task;
     }
 
@@ -163,13 +167,16 @@ sealed class ServiceClient : IDisposable
     }
 
     public async Task<CommandResultEvent> UpdateLoginAsync(string loginId, string sessionUrl,
-        string token, CancellationToken ct = default)
+        string token, string? refreshToken = null, string? tokenEndpoint = null,
+        string? clientId = null, long? expiresAtUnixSeconds = null,
+        CancellationToken ct = default)
     {
         var tcs = new TaskCompletionSource<CommandResultEvent>();
         lock (_lock) _commandTcs = tcs;
 
         using var reg = ct.Register(() => tcs.TrySetCanceled());
-        await _client.SendCommandAsync(new UpdateLoginCommand(loginId, sessionUrl, token), ct);
+        await _client.SendCommandAsync(new UpdateLoginCommand(loginId, sessionUrl, token,
+            refreshToken, tokenEndpoint, clientId, expiresAtUnixSeconds), ct);
         return await tcs.Task;
     }
 

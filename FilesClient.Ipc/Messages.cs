@@ -43,7 +43,11 @@ public sealed record GetStatusCommand : IpcCommand;
 public sealed record AddLoginCommand(
     string SessionUrl,
     string Token,
-    HashSet<string>? EnabledAccountIds) : IpcCommand;
+    HashSet<string>? EnabledAccountIds,
+    string? RefreshToken = null,
+    string? TokenEndpoint = null,
+    string? ClientId = null,
+    long? ExpiresAtUnixSeconds = null) : IpcCommand;
 
 public sealed record DiscoverAccountsCommand(
     string SessionUrl,
@@ -63,7 +67,12 @@ public sealed record GetLoginAccountsCommand(string LoginId) : IpcCommand;
 
 public sealed record RefreshLoginAccountsCommand(string LoginId) : IpcCommand;
 
-public sealed record UpdateLoginCommand(string LoginId, string SessionUrl, string Token) : IpcCommand;
+public sealed record UpdateLoginCommand(
+    string LoginId, string SessionUrl, string Token,
+    string? RefreshToken = null,
+    string? TokenEndpoint = null,
+    string? ClientId = null,
+    long? ExpiresAtUnixSeconds = null) : IpcCommand;
 
 public sealed record DetachAccountCommand(string AccountId) : IpcCommand;
 

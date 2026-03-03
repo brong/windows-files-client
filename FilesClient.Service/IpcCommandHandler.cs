@@ -126,7 +126,9 @@ sealed class IpcCommandHandler
             var loginId = await _loginManager.AddLoginAsync(
                 cmd.SessionUrl, cmd.Token,
                 persist: true, iconPath: IconPath,
-                enabledAccountIds: cmd.EnabledAccountIds, ct: ct);
+                enabledAccountIds: cmd.EnabledAccountIds, ct: ct,
+                refreshToken: cmd.RefreshToken, tokenEndpoint: cmd.TokenEndpoint,
+                clientId: cmd.ClientId, expiresAtUnixSeconds: cmd.ExpiresAtUnixSeconds);
             return new AddLoginResultEvent(true, loginId, null);
         }
         catch (Exception ex)
@@ -249,7 +251,9 @@ sealed class IpcCommandHandler
     {
         try
         {
-            await _loginManager.UpdateLoginAsync(cmd.LoginId, cmd.SessionUrl, cmd.Token, IconPath, ct);
+            await _loginManager.UpdateLoginAsync(cmd.LoginId, cmd.SessionUrl, cmd.Token, IconPath, ct,
+                refreshToken: cmd.RefreshToken, tokenEndpoint: cmd.TokenEndpoint,
+                clientId: cmd.ClientId, expiresAtUnixSeconds: cmd.ExpiresAtUnixSeconds);
             return new CommandResultEvent("updateLogin", true, null);
         }
         catch (Exception ex)

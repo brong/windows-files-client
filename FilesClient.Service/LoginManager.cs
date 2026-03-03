@@ -10,7 +10,9 @@ namespace FilesClient.Service;
 sealed class LoginManager : IDisposable
 {
     private readonly record struct FailedLoginInfo(string LoginId, string SessionUrl, string Token,
-        HashSet<string>? EnabledAccountIds, string Error);
+        HashSet<string>? EnabledAccountIds, string Error,
+        string? RefreshToken = null, string? TokenEndpoint = null,
+        string? ClientId = null, long? ExpiresAtUnixSeconds = null);
 
     private readonly bool _debug;
     private readonly CredentialStore _credentialStore = new();
@@ -84,14 +86,17 @@ sealed class LoginManager : IDisposable
                 Console.WriteLine($"Loading login: {login.LoginId}");
                 await ConnectAndStartAsync(login.SessionUrl, login.Token, login.LoginId,
                     enabledAccountIds: login.EnabledAccountIds,
-                    persist: false, iconPath: iconPath, clean: clean, ct: ct);
+                    persist: false, iconPath: iconPath, clean: clean, ct: ct,
+                    refreshToken: login.RefreshToken, tokenEndpoint: login.TokenEndpoint,
+                    clientId: login.ClientId, expiresAtUnixSeconds: login.ExpiresAtUnixSeconds);
             }
             catch (Exception ex)
             {
                 Console.Error.WriteLine($"Failed to load login {login.LoginId}: {ex.Message}");
                 lock (_lock)
                     _failedLogins.Add(new FailedLoginInfo(login.LoginId, login.SessionUrl, login.Token,
-                        login.EnabledAccountIds, ex.Message));
+                        login.EnabledAccountIds, ex.Message,
+                        login.RefreshToken, login.TokenEndpoint, login.ClientId, login.ExpiresAtUnixSeconds));
             }
             finally
             {
@@ -133,11 +138,15 @@ sealed class LoginManager : IDisposable
     /// </summary>
     public async Task<string> AddLoginAsync(string sessionUrl, string token,
         bool persist = true, string? iconPath = null, bool clean = false,
-        HashSet<string>? enabledAccountIds = null, CancellationToken ct = default)
+        HashSet<string>? enabledAccountIds = null, CancellationToken ct = default,
+        string? refreshToken = null, string? tokenEndpoint = null,
+        string? clientId = null, long? expiresAtUnixSeconds = null)
     {
         var loginId = await ConnectAndStartAsync(sessionUrl, token, loginId: null,
             enabledAccountIds: enabledAccountIds,
-            persist: persist, iconPath: iconPath, clean: clean, ct: ct);
+            persist: persist, iconPath: iconPath, clean: clean, ct: ct,
+            refreshToken: refreshToken, tokenEndpoint: tokenEndpoint,
+            clientId: clientId, expiresAtUnixSeconds: expiresAtUnixSeconds);
         return loginId;
     }
 
@@ -233,7 +242,8 @@ sealed class LoginManager : IDisposable
             }
             else
             {
-                _credentialStore.Save(session.LoginId, session.Token, session.SessionUrl, remaining);
+                _credentialStore.Save(session.LoginId, session.Token, session.SessionUrl, remaining,
+                    session.RefreshToken, session.TokenEndpoint, session.ClientId, session.ExpiresAtUnixSeconds);
             }
         }
 
@@ -299,7 +309,9 @@ sealed class LoginManager : IDisposable
     /// rediscover accounts, restart existing supervisors, detach removed accounts.
     /// </summary>
     public async Task UpdateLoginAsync(string loginId, string sessionUrl, string token,
-        string? iconPath = null, CancellationToken ct = default)
+        string? iconPath = null, CancellationToken ct = default,
+        string? refreshToken = null, string? tokenEndpoint = null,
+        string? clientId = null, long? expiresAtUnixSeconds = null)
     {
         LoginSession? oldSession;
         List<AccountSupervisor> oldSupervisors;
@@ -336,7 +348,9 @@ sealed class LoginManager : IDisposable
             {
                 await ConnectAndStartAsync(sessionUrl, token, loginId,
                     enabledAccountIds: null, persist: true,
-                    iconPath: iconPath ?? _iconPath, clean: false, ct: ct);
+                    iconPath: iconPath ?? _iconPath, clean: false, ct: ct,
+                    refreshToken: refreshToken, tokenEndpoint: tokenEndpoint,
+                    clientId: clientId, expiresAtUnixSeconds: expiresAtUnixSeconds);
             }
             finally
             {
@@ -361,7 +375,21 @@ sealed class LoginManager : IDisposable
         }
 
         // Connect with new credentials
-        var jmapClient = new JmapClient(token, _debug);
+        JmapClient jmapClient;
+        Jmap.Auth.OAuthTokenHandler? oauthHandler = null;
+        if (refreshToken != null && tokenEndpoint != null && clientId != null)
+        {
+            var expiresAt = expiresAtUnixSeconds.HasValue
+                ? DateTimeOffset.FromUnixTimeSeconds(expiresAtUnixSeconds.Value)
+                : DateTimeOffset.UtcNow.AddSeconds(3600);
+            oauthHandler = new Jmap.Auth.OAuthTokenHandler(token, refreshToken,
+                tokenEndpoint, clientId, expiresAt);
+            jmapClient = new JmapClient(oauthHandler, _debug);
+        }
+        else
+        {
+            jmapClient = new JmapClient(token, _debug);
+        }
         await jmapClient.ConnectAsync(sessionUrl, ct);
 
         var newAccounts = jmapClient.GetFileNodeAccounts();
@@ -405,7 +433,8 @@ sealed class LoginManager : IDisposable
 
         // Create new session
         var newSession = new LoginSession(loginId, jmapClient, sessionUrl, token,
-            newAccounts.Select(a => a.AccountId).ToList());
+            newAccounts.Select(a => a.AccountId).ToList(),
+            refreshToken, tokenEndpoint, clientId, expiresAtUnixSeconds);
         lock (_lock)
             _sessions.Add(newSession);
 
@@ -447,11 +476,24 @@ sealed class LoginManager : IDisposable
             }
         }
 
+        // Subscribe to token refresh events for persistence
+        if (oauthHandler != null)
+        {
+            oauthHandler.TokenRefreshed += handler =>
+            {
+                var activeIds = enabledAccountIds.Count > 0 ? enabledAccountIds : null;
+                _credentialStore.Save(loginId, handler.AccessToken, sessionUrl, activeIds,
+                    handler.RefreshToken, handler.TokenEndpoint, handler.ClientId,
+                    handler.ExpiresAt.ToUnixTimeSeconds());
+            };
+        }
+
         // Restart push watcher
         StartPushWatcher(newSession, ct);
 
         // Update credential store
-        _credentialStore.Save(loginId, token, sessionUrl, enabledAccountIds);
+        _credentialStore.Save(loginId, token, sessionUrl, enabledAccountIds,
+            refreshToken, tokenEndpoint, clientId, expiresAtUnixSeconds);
 
         AccountsChanged?.Invoke();
         RaiseAggregateStatus();
@@ -514,7 +556,8 @@ sealed class LoginManager : IDisposable
             }
             else
             {
-                _credentialStore.Save(session.LoginId, session.Token, session.SessionUrl, remaining);
+                _credentialStore.Save(session.LoginId, session.Token, session.SessionUrl, remaining,
+                    session.RefreshToken, session.TokenEndpoint, session.ClientId, session.ExpiresAtUnixSeconds);
             }
         }
 
@@ -714,7 +757,8 @@ sealed class LoginManager : IDisposable
 
         // Update credential store with new enabled set
         var enabled = GetActiveAccountIds(loginId);
-        _credentialStore.Save(loginId, session.Token, session.SessionUrl, enabled);
+        _credentialStore.Save(loginId, session.Token, session.SessionUrl, enabled,
+            session.RefreshToken, session.TokenEndpoint, session.ClientId, session.ExpiresAtUnixSeconds);
 
         AccountsChanged?.Invoke();
         RaiseAggregateStatus();
@@ -877,16 +921,33 @@ sealed class LoginManager : IDisposable
         }
 
         // Update stored credential with new selection
-        _credentialStore.Save(loginId, session.Token, session.SessionUrl, enabledAccountIds);
+        _credentialStore.Save(loginId, session.Token, session.SessionUrl, enabledAccountIds,
+            session.RefreshToken, session.TokenEndpoint, session.ClientId, session.ExpiresAtUnixSeconds);
 
         AccountsChanged?.Invoke();
         RaiseAggregateStatus();
     }
 
     private async Task<string> ConnectAndStartAsync(string sessionUrl, string token, string? loginId,
-        HashSet<string>? enabledAccountIds, bool persist, string? iconPath, bool clean, CancellationToken ct)
+        HashSet<string>? enabledAccountIds, bool persist, string? iconPath, bool clean, CancellationToken ct,
+        string? refreshToken = null, string? tokenEndpoint = null,
+        string? clientId = null, long? expiresAtUnixSeconds = null)
     {
-        var jmapClient = new JmapClient(token, _debug);
+        JmapClient jmapClient;
+        Jmap.Auth.OAuthTokenHandler? oauthHandler = null;
+        if (refreshToken != null && tokenEndpoint != null && clientId != null)
+        {
+            var expiresAt = expiresAtUnixSeconds.HasValue
+                ? DateTimeOffset.FromUnixTimeSeconds(expiresAtUnixSeconds.Value)
+                : DateTimeOffset.UtcNow.AddSeconds(3600);
+            oauthHandler = new Jmap.Auth.OAuthTokenHandler(token, refreshToken,
+                tokenEndpoint, clientId, expiresAt);
+            jmapClient = new JmapClient(oauthHandler, _debug);
+        }
+        else
+        {
+            jmapClient = new JmapClient(token, _debug);
+        }
         Console.WriteLine("Connecting to JMAP...");
         await jmapClient.ConnectAsync(sessionUrl, ct);
         Console.WriteLine($"Connected as {jmapClient.Session.Username}");
@@ -913,7 +974,8 @@ sealed class LoginManager : IDisposable
         }
 
         var session = new LoginSession(loginId, jmapClient, sessionUrl, token,
-            accounts.Select(a => a.AccountId).ToList());
+            accounts.Select(a => a.AccountId).ToList(),
+            refreshToken, tokenEndpoint, clientId, expiresAtUnixSeconds);
 
         lock (_lock)
             _sessions.Add(session);
@@ -954,11 +1016,30 @@ sealed class LoginManager : IDisposable
             }
         }
 
+        // Subscribe to token refresh events for persistence
+        if (oauthHandler != null)
+        {
+            oauthHandler.TokenRefreshed += handler =>
+            {
+                session.Token = handler.AccessToken;
+                if (handler.RefreshToken != null)
+                    session.RefreshToken = handler.RefreshToken;
+                session.ExpiresAtUnixSeconds = handler.ExpiresAt.ToUnixTimeSeconds();
+
+                var activeIds = GetActiveAccountIds(loginId);
+                _credentialStore.Save(loginId, handler.AccessToken, sessionUrl,
+                    activeIds.Count > 0 ? activeIds : null,
+                    handler.RefreshToken, handler.TokenEndpoint, handler.ClientId,
+                    handler.ExpiresAt.ToUnixTimeSeconds());
+            };
+        }
+
         // Start shared push watcher for this session
         StartPushWatcher(session, ct);
 
         if (persist)
-            _credentialStore.Save(loginId, token, sessionUrl, enabledAccountIds);
+            _credentialStore.Save(loginId, token, sessionUrl, enabledAccountIds,
+                refreshToken, tokenEndpoint, clientId, expiresAtUnixSeconds);
 
         AccountsChanged?.Invoke();
         RaiseAggregateStatus();
@@ -1152,7 +1233,9 @@ sealed class LoginManager : IDisposable
                     Console.WriteLine($"[RetryLogin] Retrying failed login {f.LoginId}...");
                     await ConnectAndStartAsync(f.SessionUrl, f.Token, f.LoginId,
                         enabledAccountIds: f.EnabledAccountIds,
-                        persist: false, iconPath: _iconPath, clean: false, ct: _parentCt);
+                        persist: false, iconPath: _iconPath, clean: false, ct: _parentCt,
+                        refreshToken: f.RefreshToken, tokenEndpoint: f.TokenEndpoint,
+                        clientId: f.ClientId, expiresAtUnixSeconds: f.ExpiresAtUnixSeconds);
                 }
                 catch (Exception ex)
                 {
@@ -1251,19 +1334,32 @@ sealed class LoginSession
     public string LoginId { get; }
     public JmapClient Client { get; }
     public string SessionUrl { get; }
-    public string Token { get; }
+    public string Token { get; set; }
     public List<string> AccountIds { get; }
     public CancellationTokenSource? PushCts { get; set; }
     public Task? PushTask { get; set; }
     /// <summary>Parent CT used to create linked push CTS, stored so push can be restarted.</summary>
     public CancellationToken ParentCt { get; set; }
 
-    public LoginSession(string loginId, JmapClient client, string sessionUrl, string token, List<string> accountIds)
+    // OAuth fields (null for app-password logins)
+    public string? RefreshToken { get; set; }
+    public string? TokenEndpoint { get; set; }
+    public string? ClientId { get; set; }
+    public long? ExpiresAtUnixSeconds { get; set; }
+    public bool IsOAuth => RefreshToken != null;
+
+    public LoginSession(string loginId, JmapClient client, string sessionUrl, string token, List<string> accountIds,
+        string? refreshToken = null, string? tokenEndpoint = null,
+        string? clientId = null, long? expiresAtUnixSeconds = null)
     {
         LoginId = loginId;
         Client = client;
         SessionUrl = sessionUrl;
         Token = token;
         AccountIds = accountIds;
+        RefreshToken = refreshToken;
+        TokenEndpoint = tokenEndpoint;
+        ClientId = clientId;
+        ExpiresAtUnixSeconds = expiresAtUnixSeconds;
     }
 }
