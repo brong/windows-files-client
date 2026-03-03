@@ -25,9 +25,10 @@ internal static class OAuthHelpers
         catch { }
 
         var status = (int)response.StatusCode;
+        var url = response.RequestMessage?.RequestUri?.ToString() ?? "unknown URL";
         throw new InvalidOperationException(
             string.IsNullOrWhiteSpace(body)
-                ? $"{operation}: HTTP {status} {response.ReasonPhrase}"
-                : $"{operation}: HTTP {status} {response.ReasonPhrase} — {body}");
+                ? $"{operation}: HTTP {status} {response.ReasonPhrase} ({url})"
+                : $"{operation}: HTTP {status} {response.ReasonPhrase} ({url}) — {body}");
     }
 }
