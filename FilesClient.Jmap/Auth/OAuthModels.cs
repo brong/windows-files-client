@@ -3,11 +3,31 @@ using System.Text.Json.Serialization;
 namespace FilesClient.Jmap.Auth;
 
 /// <summary>
-/// Response from {origin}/.well-known/oauth-protected-resource
+/// Response from {domain}/.well-known/user-agent-configuration
+/// (draft-ietf-mailmaint-pacc)
 /// </summary>
-public record OAuthProtectedResource(
-    [property: JsonPropertyName("authorization_servers")]
-    List<string> AuthorizationServers);
+public record UserAgentConfiguration(
+    [property: JsonPropertyName("protocols")]
+    UserAgentProtocols? Protocols,
+
+    [property: JsonPropertyName("authentication")]
+    UserAgentAuthentication? Authentication);
+
+public record UserAgentProtocols(
+    [property: JsonPropertyName("jmap")]
+    UserAgentJmapConfig? Jmap);
+
+public record UserAgentJmapConfig(
+    [property: JsonPropertyName("url")]
+    string Url);
+
+public record UserAgentAuthentication(
+    [property: JsonPropertyName("oauth-public")]
+    UserAgentOAuthPublic? OAuthPublic);
+
+public record UserAgentOAuthPublic(
+    [property: JsonPropertyName("issuer")]
+    string Issuer);
 
 /// <summary>
 /// Response from {issuer}/.well-known/oauth-authorization-server

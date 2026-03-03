@@ -21,7 +21,7 @@ sealed class ManageAccountsForm : Form
     private readonly Button _updateCredentialsButton;
     private readonly Button _removeLoginButton;
     private readonly Button _reauthenticateButton;
-    private readonly Label _reauthStatusLabel;
+    private readonly TextBox _reauthStatusLabel;
 
     // Detail panel controls — synced account selected
     private readonly Panel _syncedAccountPanel;
@@ -193,13 +193,17 @@ sealed class ManageAccountsForm : Form
         loginButtonFlow.Controls.AddRange([_updateCredentialsButton, _removeLoginButton]);
         loginLayout.Controls.Add(loginButtonFlow);
 
-        _reauthStatusLabel = new Label
+        _reauthStatusLabel = new TextBox
         {
-            AutoSize = true,
-            MaximumSize = new Size(400, 0),
+            ReadOnly = true,
+            BorderStyle = BorderStyle.None,
+            BackColor = _loginPanel.BackColor,
+            ForeColor = Color.Gray,
+            Multiline = true,
+            WordWrap = true,
+            Width = 400,
             Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top,
             Margin = new Padding(0, 4, 0, 0),
-            ForeColor = Color.Gray,
         };
         loginLayout.Controls.Add(_reauthStatusLabel);
 

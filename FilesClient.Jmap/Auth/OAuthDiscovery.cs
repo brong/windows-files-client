@@ -4,9 +4,8 @@ namespace FilesClient.Jmap.Auth;
 
 /// <summary>
 /// Implements the OAuth discovery chain:
-/// 1. .well-known/jmap → session URL + origin
-/// 2. {origin}/.well-known/oauth-protected-resource → authorization server
-/// 3. {issuer}/.well-known/oauth-authorization-server → full metadata
+/// 1. {domain}/.well-known/user-agent-configuration → session URL + OAuth issuer
+/// 2. {issuer}/.well-known/oauth-authorization-server → full metadata
 /// </summary>
 public static class OAuthDiscovery
 {
@@ -17,57 +16,45 @@ public static class OAuthDiscovery
 
     /// <summary>
     /// Discover OAuth metadata from an email domain.
-    /// Returns the session URL (from .well-known/jmap redirect target) and OAuth server metadata.
+    /// Returns the session URL and OAuth server metadata.
     /// </summary>
     public static async Task<(string SessionUrl, OAuthServerMetadata Metadata)> DiscoverAsync(
         string emailDomain, CancellationToken ct = default)
     {
-        // Step 1: .well-known/jmap — follow redirects to get session URL
-        var jmapUrl = $"https://{emailDomain}/.well-known/jmap";
+        using var http = new HttpClient();
 
-        // Use a handler that follows redirects so we get the final URL
-        using var handler = new HttpClientHandler { AllowAutoRedirect = true };
-        using var http = new HttpClient(handler);
+        // Step 1: .well-known/user-agent-configuration → session URL + OAuth issuer
+        var configUrl = $"https://{emailDomain}/.well-known/user-agent-configuration";
 
-        HttpResponseMessage jmapResponse;
+        HttpResponseMessage configResponse;
         try
         {
-            jmapResponse = await http.GetAsync(jmapUrl, ct);
+            configResponse = await http.GetAsync(configUrl, ct);
         }
         catch (HttpRequestException ex)
         {
             throw new InvalidOperationException(
-                $"Failed to reach {jmapUrl}: {ex.Message}", ex);
+                $"Failed to reach {configUrl}: {ex.Message}", ex);
         }
 
-        // We need the final URL (after redirects), not the response body.
-        // A 401 is fine — it means we found the server but need auth.
-        var finalUrl = jmapResponse.RequestMessage?.RequestUri?.ToString()
-            ?? throw new InvalidOperationException("Could not determine JMAP session URL from redirect");
+        await OAuthHelpers.EnsureSuccessAsync(configResponse, "user-agent configuration");
 
-        var sessionUrl = finalUrl;
-        var origin = new Uri(finalUrl).GetLeftPart(UriPartial.Authority);
+        var configJson = await configResponse.Content.ReadAsStringAsync(ct);
+        var config = JsonSerializer.Deserialize<UserAgentConfiguration>(configJson, JsonOptions)
+            ?? throw new InvalidOperationException("Failed to parse user-agent configuration response");
 
-        // Step 2: .well-known/oauth-protected-resource
-        var resourceUrl = $"{origin}/.well-known/oauth-protected-resource";
-        var resourceResponse = await http.GetAsync(resourceUrl, ct);
-        await OAuthHelpers.EnsureSuccessAsync(resourceResponse, "OAuth protected resource");
+        var sessionUrl = config.Protocols?.Jmap?.Url
+            ?? throw new InvalidOperationException("No JMAP session URL in user-agent configuration");
+        var issuer = config.Authentication?.OAuthPublic?.Issuer
+            ?? throw new InvalidOperationException("No OAuth issuer in user-agent configuration");
 
-        var resourceJson = await resourceResponse.Content.ReadAsStringAsync(ct);
-        var resource = JsonSerializer.Deserialize<OAuthProtectedResource>(resourceJson, JsonOptions)
-            ?? throw new InvalidOperationException("Failed to parse OAuth protected resource response");
-
-        if (resource.AuthorizationServers == null || resource.AuthorizationServers.Count == 0)
-            throw new InvalidOperationException("No authorization servers found in protected resource response");
-
-        var issuer = resource.AuthorizationServers[0];
-
-        // Step 3: .well-known/oauth-authorization-server
-        var issuerUri = new Uri(issuer);
-        var metadataUrl = $"{issuerUri.GetLeftPart(UriPartial.Authority)}/.well-known/oauth-authorization-server{issuerUri.AbsolutePath.TrimEnd('/')}";
-        // If the issuer path is just "/", the URL is simply {origin}/.well-known/oauth-authorization-server
-        if (issuerUri.AbsolutePath == "/")
-            metadataUrl = $"{issuerUri.GetLeftPart(UriPartial.Authority)}/.well-known/oauth-authorization-server";
+        // Step 2: {issuer}/.well-known/oauth-authorization-server → full metadata
+        if (!Uri.TryCreate(issuer, UriKind.Absolute, out var issuerUri))
+            throw new InvalidOperationException(
+                $"OAuth issuer is not a valid absolute URI: \"{issuer}\"");
+        var metadataUrl = issuerUri.AbsolutePath == "/"
+            ? $"{issuerUri.GetLeftPart(UriPartial.Authority)}/.well-known/oauth-authorization-server"
+            : $"{issuerUri.GetLeftPart(UriPartial.Authority)}/.well-known/oauth-authorization-server{issuerUri.AbsolutePath.TrimEnd('/')}";
 
         var metadataResponse = await http.GetAsync(metadataUrl, ct);
         await OAuthHelpers.EnsureSuccessAsync(metadataResponse, "OAuth authorization server metadata");

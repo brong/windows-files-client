@@ -20,7 +20,7 @@ sealed class AddAccountForm : Form
     private readonly Button _connectButton;
 
     // Shared
-    private readonly Label _statusLabel;
+    private readonly TextBox _statusLabel;
     private readonly LinkLabel _advancedToggle;
 
     public AddAccountForm(ServiceClient serviceClient)
@@ -82,14 +82,18 @@ sealed class AddAccountForm : Form
 
         y += (int)(em * 2.8);
 
-        // --- Status label (shared) ---
-        _statusLabel = new Label
+        // --- Status label (shared, TextBox so text is selectable) ---
+        _statusLabel = new TextBox
         {
             Location = new Point(pad, y),
-            AutoSize = true,
-            MaximumSize = new Size(inputWidth, 0),
-            Anchor = AnchorStyles.Left | AnchorStyles.Top,
+            Width = inputWidth,
+            Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top,
+            ReadOnly = true,
+            BorderStyle = BorderStyle.None,
+            BackColor = BackColor,
             ForeColor = Color.Gray,
+            Multiline = true,
+            WordWrap = true,
         };
 
         // --- Advanced group (collapsed by default) ---
