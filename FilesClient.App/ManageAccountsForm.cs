@@ -196,6 +196,8 @@ sealed class ManageAccountsForm : Form
         _reauthStatusLabel = new Label
         {
             AutoSize = true,
+            MaximumSize = new Size(400, 0),
+            Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top,
             Margin = new Padding(0, 4, 0, 0),
             ForeColor = Color.Gray,
         };
