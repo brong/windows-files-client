@@ -194,6 +194,11 @@ sealed class LoginManager : IDisposable
         }
 
         _credentialStore.Remove(loginId);
+
+        // Clean up any orphaned sync root registrations left behind by
+        // partial cleanup failures (e.g. error 5 from cfapi).
+        AuditOrphanedSyncRoots();
+
         AccountsChanged?.Invoke();
         RaiseAggregateStatus();
     }
@@ -250,6 +255,10 @@ sealed class LoginManager : IDisposable
                     session.RefreshToken, session.TokenEndpoint, session.ClientId, session.ExpiresAtUnixSeconds);
             }
         }
+
+        // Clean up any orphaned sync root registrations left behind by
+        // partial cleanup failures (e.g. error 5 from cfapi).
+        AuditOrphanedSyncRoots();
 
         AccountsChanged?.Invoke();
         RaiseAggregateStatus();
