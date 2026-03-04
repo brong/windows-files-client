@@ -837,6 +837,20 @@ sealed class ManageAccountsForm : Form
             return;
 
         _removeLoginButton.Enabled = false;
+
+        // Mark the login and its account nodes as "Removing..." in the tree
+        var selectedNode = _treeView.SelectedNode;
+        if (selectedNode != null)
+        {
+            selectedNode.Text += " \u2014 Removing...";
+            selectedNode.ForeColor = Color.Gray;
+            foreach (TreeNode child in selectedNode.Nodes)
+            {
+                child.Text = child.Text.Split('\u2014')[0].TrimEnd() + " \u2014 Removing...";
+                child.ForeColor = Color.Gray;
+            }
+        }
+
         try
         {
             var cmdResult = await _serviceClient.RemoveLoginAsync(loginNode.LoginId);
@@ -847,7 +861,10 @@ sealed class ManageAccountsForm : Form
             {
                 _discoveredAccounts.Remove(loginNode.LoginId);
                 _loginAccountResults.Remove(loginNode.LoginId);
+                _refreshedLogins.Remove(loginNode.LoginId);
             }
+
+            RefreshTree();
         }
         catch (Exception ex)
         {

@@ -202,7 +202,6 @@ sealed class AddAccountForm : Form
                 _statusLabel.Text = discoverResult.Error ?? "Discovery failed";
                 _statusLabel.ForeColor = Color.Red;
                 _signInButton.Enabled = true;
-
                 return;
             }
 
@@ -211,7 +210,6 @@ sealed class AddAccountForm : Form
                 _statusLabel.Text = "No FileNode accounts found";
                 _statusLabel.ForeColor = Color.Red;
                 _signInButton.Enabled = true;
-
                 return;
             }
 
@@ -226,7 +224,6 @@ sealed class AddAccountForm : Form
                 if (selectForm.ShowDialog(this) != DialogResult.OK || selectForm.SelectedAccountIds == null)
                 {
                     _signInButton.Enabled = true;
-    
                     _statusLabel.Text = "";
                     return;
                 }
@@ -237,13 +234,11 @@ sealed class AddAccountForm : Form
                     _statusLabel.Text = "No accounts selected";
                     _statusLabel.ForeColor = Color.Red;
                     _signInButton.Enabled = true;
-    
                     return;
                 }
             }
 
-            // Add login via service (with OAuth fields)
-            _statusLabel.Text = "Starting sync...";
+            // Add login and close immediately
             var addResult = await _serviceClient.AddLoginAsync(
                 cred.SessionUrl, cred.AccessToken, enabledAccountIds,
                 cred.RefreshToken, cred.TokenEndpoint, cred.ClientId,
@@ -254,14 +249,9 @@ sealed class AddAccountForm : Form
                 _statusLabel.Text = $"Error: {addResult.Error}";
                 _statusLabel.ForeColor = Color.Red;
                 _signInButton.Enabled = true;
-
                 return;
             }
 
-            _statusLabel.Text = $"Connected: {addResult.LoginId}";
-            _statusLabel.ForeColor = Color.Green;
-
-            await Task.Delay(500);
             DialogResult = DialogResult.OK;
             Close();
         }
