@@ -23,8 +23,8 @@ sealed class ServiceClient : IDisposable
     private TaskCompletionSource<AddLoginResultEvent>? _addLoginTcs;
     private TaskCompletionSource<DiscoverAccountsResultEvent>? _discoverTcs;
     private TaskCompletionSource<CommandResultEvent>? _commandTcs;
-    private TaskCompletionSource<OutboxSnapshotEvent>? _outboxTcs;
-    private TaskCompletionSource<LoginAccountsResultEvent>? _loginAccountsTcs;
+    private readonly Dictionary<string, TaskCompletionSource<OutboxSnapshotEvent>> _outboxTcs = new();
+    private readonly Dictionary<string, TaskCompletionSource<LoginAccountsResultEvent>> _loginAccountsTcs = new();
 
     public IReadOnlyList<AccountInfo> Accounts
     {
@@ -159,7 +159,7 @@ sealed class ServiceClient : IDisposable
     public async Task<OutboxSnapshotEvent> GetOutboxAsync(string accountId, CancellationToken ct = default)
     {
         var tcs = new TaskCompletionSource<OutboxSnapshotEvent>();
-        lock (_lock) _outboxTcs = tcs;
+        lock (_lock) _outboxTcs[accountId] = tcs;
 
         using var reg = ct.Register(() => tcs.TrySetCanceled());
         await _client.SendCommandAsync(new GetOutboxCommand(accountId), ct);
@@ -225,7 +225,7 @@ sealed class ServiceClient : IDisposable
         CancellationToken ct = default)
     {
         var tcs = new TaskCompletionSource<LoginAccountsResultEvent>();
-        lock (_lock) _loginAccountsTcs = tcs;
+        lock (_lock) _loginAccountsTcs[loginId] = tcs;
 
         using var reg = ct.Register(() => tcs.TrySetCanceled());
         await _client.SendCommandAsync(new RefreshLoginAccountsCommand(loginId), ct);
@@ -236,7 +236,7 @@ sealed class ServiceClient : IDisposable
         CancellationToken ct = default)
     {
         var tcs = new TaskCompletionSource<LoginAccountsResultEvent>();
-        lock (_lock) _loginAccountsTcs = tcs;
+        lock (_lock) _loginAccountsTcs[loginId] = tcs;
 
         using var reg = ct.Register(() => tcs.TrySetCanceled());
         await _client.SendCommandAsync(new GetLoginAccountsCommand(loginId), ct);
@@ -339,16 +339,22 @@ sealed class ServiceClient : IDisposable
             case OutboxSnapshotEvent result:
                 lock (_lock)
                 {
-                    _outboxTcs?.TrySetResult(result);
-                    _outboxTcs = null;
+                    if (_outboxTcs.TryGetValue(result.AccountId, out var outboxTcs))
+                    {
+                        outboxTcs.TrySetResult(result);
+                        _outboxTcs.Remove(result.AccountId);
+                    }
                 }
                 break;
 
             case LoginAccountsResultEvent result:
                 lock (_lock)
                 {
-                    _loginAccountsTcs?.TrySetResult(result);
-                    _loginAccountsTcs = null;
+                    if (_loginAccountsTcs.TryGetValue(result.LoginId, out var loginTcs))
+                    {
+                        loginTcs.TrySetResult(result);
+                        _loginAccountsTcs.Remove(result.LoginId);
+                    }
                 }
                 break;
         }

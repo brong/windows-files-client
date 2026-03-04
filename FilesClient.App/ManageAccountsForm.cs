@@ -283,10 +283,13 @@ sealed class ManageAccountsForm : Form
         syncedButtonFlow.Controls.AddRange([_openFolderButton, _detachButton, _removeButton, _refreshButton, _cleanButton]);
         syncedTopLayout.Controls.Add(syncedButtonFlow);
 
-        // Activity list view (fills remaining space below buttons)
+        _syncedAccountPanel.Controls.Add(syncedTopLayout);
+
+        // Activity list view — created here, added to _detailPanel later (always visible)
         _activityListView = new ListView
         {
-            Dock = DockStyle.Fill,
+            Dock = DockStyle.Bottom,
+            Height = 160,
             View = View.Details,
             FullRowSelect = true,
             HeaderStyle = ColumnHeaderStyle.Clickable,
@@ -294,19 +297,15 @@ sealed class ManageAccountsForm : Form
             OwnerDraw = true,
         };
         var em = Font.Height;
-        _activityListView.Columns.Add("Name", 13 * em);
-        _activityListView.Columns.Add("Action", 7 * em);
-        _activityListView.Columns.Add("Status", 7 * em);
-        _activityListView.Columns.Add("Updated", 8 * em);
+        _activityListView.Columns.Add("Account", 9 * em);
+        _activityListView.Columns.Add("Name", 11 * em);
+        _activityListView.Columns.Add("Action", 6 * em);
+        _activityListView.Columns.Add("Status", 6 * em);
+        _activityListView.Columns.Add("Updated", 7 * em);
 
         _activityListView.DrawColumnHeader += (_, e) => e.DrawDefault = true;
         _activityListView.DrawItem += (_, _) => { };
         _activityListView.DrawSubItem += OnDrawActivitySubItem;
-
-        _syncedAccountPanel.Controls.Add(_activityListView);
-        _syncedAccountPanel.Controls.Add(syncedTopLayout);
-        // Z-order: top layout docks Top (last added = first docked), list fills remaining
-        _activityListView.BringToFront();
 
         // ======= Available (non-synced) account panel =======
         _availableAccountPanel = new Panel { Dock = DockStyle.Fill, Visible = false };
@@ -350,7 +349,7 @@ sealed class ManageAccountsForm : Form
             Padding = new Padding(0, 8, 0, 0),
         };
 
-        _detailPanel.Controls.AddRange([_loginPanel, _syncedAccountPanel, _availableAccountPanel, _noSelectionLabel]);
+        _detailPanel.Controls.AddRange([_loginPanel, _syncedAccountPanel, _availableAccountPanel, _noSelectionLabel, _activityListView]);
 
         // --- Bottom bar ---
         var bottomPanel = new Panel
@@ -468,21 +467,41 @@ sealed class ManageAccountsForm : Form
 
     private async void OnOutboxTick(object? sender, EventArgs e)
     {
-        if (!_syncedAccountPanel.Visible)
-            return;
-
         if (!_outboxDirty && !_hasActiveUploads)
             return;
 
         _outboxDirty = false;
 
-        var accountId = _displayedAccountId;
-        if (accountId == null) return;
+        // Poll all synced accounts concurrently
+        var syncedAccounts = _serviceClient.Accounts
+            .Where(a => a.Status != AccountStatus.Idle || a.PendingCount > 0 || _hasActiveUploads)
+            .ToList();
+
+        // If nothing looks active, still poll all synced accounts (they may have queued items)
+        if (syncedAccounts.Count == 0)
+            syncedAccounts = _serviceClient.Accounts.ToList();
+
+        if (syncedAccounts.Count == 0)
+        {
+            if (_activityListView.Items.Count > 0)
+                RefreshActivityList(new());
+            return;
+        }
 
         try
         {
-            var snapshot = await _serviceClient.GetOutboxAsync(accountId);
-            RefreshActivityList(snapshot.Entries);
+            var tasks = syncedAccounts.Select(a => _serviceClient.GetOutboxAsync(a.AccountId)).ToList();
+            var snapshots = await Task.WhenAll(tasks);
+
+            var allEntries = new List<(string DisplayName, OutboxEntry Entry)>();
+            for (int i = 0; i < snapshots.Length; i++)
+            {
+                var displayName = syncedAccounts[i].DisplayName;
+                foreach (var entry in snapshots[i].Entries)
+                    allEntries.Add((displayName, entry));
+            }
+
+            RefreshActivityList(allEntries);
         }
         catch
         {
@@ -490,7 +509,7 @@ sealed class ManageAccountsForm : Form
         }
     }
 
-    private void RefreshActivityList(List<OutboxEntry> entries)
+    private void RefreshActivityList(List<(string DisplayName, OutboxEntry Entry)> entries)
     {
         var now = DateTime.UtcNow;
 
@@ -498,10 +517,10 @@ sealed class ManageAccountsForm : Form
         _activityListView.Items.Clear();
 
         var sorted = entries.OrderByDescending(e =>
-            e.IsProcessing ? (e.UploadProgress ?? -1) : -2)
-            .ThenBy(e => e.CreatedAt);
+            e.Entry.IsProcessing ? (e.Entry.UploadProgress ?? -1) : -2)
+            .ThenBy(e => e.Entry.CreatedAt);
 
-        foreach (var entry in sorted)
+        foreach (var (displayName, entry) in sorted)
         {
             var name = entry.LocalPath != null
                 ? Path.GetFileName(entry.LocalPath)
@@ -520,7 +539,8 @@ sealed class ManageAccountsForm : Form
                 status = DeriveStatus(entry, now);
             }
 
-            var item = new ListViewItem(name);
+            var item = new ListViewItem(displayName);
+            item.SubItems.Add(name);
             item.SubItems.Add(action);
             var statusSubItem = item.SubItems.Add(status);
             if (progress.HasValue)
@@ -543,12 +563,12 @@ sealed class ManageAccountsForm : Form
         }
 
         _activityListView.EndUpdate();
-        _hasActiveUploads = entries.Any(e => e.IsProcessing);
+        _hasActiveUploads = entries.Any(e => e.Entry.IsProcessing);
     }
 
     private void OnDrawActivitySubItem(object? sender, DrawListViewSubItemEventArgs e)
     {
-        if (e.ColumnIndex == 2 && e.SubItem?.Tag is int percent)
+        if (e.ColumnIndex == 3 && e.SubItem?.Tag is int percent)
         {
             var g = e.Graphics!;
             var bounds = e.Bounds;
@@ -941,8 +961,7 @@ sealed class ManageAccountsForm : Form
         _displayedLoginId = null;
         _displayedAccountId = null;
 
-        // Stop outbox polling by default — re-enable below if synced account selected
-        _outboxTimer.Stop();
+        // (outbox timer runs globally, not tied to selection)
 
         if (node == null)
         {
@@ -970,11 +989,6 @@ sealed class ManageAccountsForm : Form
             {
                 _syncedAccountPanel.Visible = true;
                 UpdateSyncedAccountLabels(accountNode);
-
-                // Start outbox polling for this account
-                _outboxDirty = true;
-                _activityListView.Items.Clear();
-                _outboxTimer.Start();
             }
             else
             {
@@ -1435,6 +1449,7 @@ sealed class ManageAccountsForm : Form
         if (Visible)
         {
             _outboxDirty = true;
+            _outboxTimer.Start();
             // Briefly set TopMost to ensure the panel appears above other windows
             TopMost = true;
             BeginInvoke(() => TopMost = false);
