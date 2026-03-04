@@ -16,12 +16,12 @@ if %errorlevel%==0 (
 )
 
 echo Publishing FilesClient.Service...
-dotnet publish ..\FilesClient.Service\FilesClient.Service.csproj -c Release -r win-x64 --self-contained -o "%BUILDDIR%publish\Service"
+dotnet publish ..\FilesClient.Service\FilesClient.Service.csproj -c Release -r win-x64 --self-contained -p:PublishTrimmed=true -p:TrimMode=partial -o "%BUILDDIR%publish\Shared"
 if errorlevel 1 goto :error
 
 echo.
 echo Publishing FilesClient.App...
-dotnet publish ..\FilesClient.App\FilesClient.App.csproj -c Release -r win-x64 --self-contained -o "%BUILDDIR%publish\App"
+dotnet publish ..\FilesClient.App\FilesClient.App.csproj -c Release -r win-x64 --self-contained -p:PublishTrimmed=true -p:TrimMode=partial -o "%BUILDDIR%publish\Shared"
 if errorlevel 1 goto :error
 
 :: Copy WiX project files to build dir if using temp

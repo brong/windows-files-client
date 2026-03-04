@@ -6,12 +6,12 @@
   </PropertyGroup>
 
   <PropertyGroup>
-    <ServicePublishDir>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\publish\Service'))</ServicePublishDir>
-    <AppPublishDir>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\publish\App'))</AppPublishDir>
-    <DefineConstants>ServicePublishDir=$(ServicePublishDir);AppPublishDir=$(AppPublishDir)</DefineConstants>
+    <PublishDir>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\publish\Shared'))</PublishDir>
+    <DefineConstants>PublishDir=$(PublishDir)</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="WixToolset.UI.wixext" Version="5.0.*" />
     <PackageReference Include="WixToolset.Util.wixext" Version="5.0.*" />
   </ItemGroup>
 

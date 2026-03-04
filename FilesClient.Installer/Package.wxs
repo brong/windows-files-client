@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
-     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
 
   <Package Name="Fastmail Files"
            Version="1.0.0.0"
@@ -28,13 +29,7 @@
       <Directory Id="FASTMAILDIR" Name="Fastmail">
         <Directory Id="INSTALLDIR" Name="Fastmail Files">
 
-          <Directory Id="SERVICEDIR" Name="Service">
-            <Files Include="$(var.ServicePublishDir)\**" />
-          </Directory>
-
-          <Directory Id="APPDIR" Name="App">
-            <Files Include="$(var.AppPublishDir)\**" />
-          </Directory>
+          <Files Include="$(var.PublishDir)\**" />
 
           <!-- HKCU Run keys for auto-start on login -->
           <Component Id="ServiceRunKey" Guid="DAC96A4E-F83A-44E7-884F-6343D75AE7B0">
@@ -42,7 +37,7 @@
                            Key="Software\Microsoft\Windows\CurrentVersion\Run"
                            Name="Fastmail Files Service"
                            Type="string"
-                           Value="&quot;[SERVICEDIR]FilesClient.Service.exe&quot;"
+                           Value="&quot;[INSTALLDIR]FilesClient.Service.exe&quot;"
                            KeyPath="yes" />
           </Component>
 
@@ -51,7 +46,7 @@
                            Key="Software\Microsoft\Windows\CurrentVersion\Run"
                            Name="Fastmail Files"
                            Type="string"
-                           Value="&quot;[APPDIR]FilesClient.App.exe&quot;"
+                           Value="&quot;[INSTALLDIR]FilesClient.App.exe&quot;"
                            KeyPath="yes" />
           </Component>
 
@@ -59,23 +54,26 @@
       </Directory>
     </StandardDirectory>
 
-    <!-- Launch both processes after install (unelevated, as logged-in user) -->
-    <CustomAction Id="LaunchService"
-                  Directory="SERVICEDIR"
-                  ExeCommand="&quot;[SERVICEDIR]FilesClient.Service.exe&quot;"
-                  Impersonate="yes"
-                  Return="asyncNoWait" />
+    <!-- UI properties -->
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLDIR" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch Fastmail Files" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
 
+    <!-- Standard install-dir wizard: Welcome → Install Dir → Ready → Progress → Finish -->
+    <UI>
+      <ui:WixUI Id="WixUI_InstallDir" />
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchApp"
+               Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed" />
+    </UI>
+
+    <!-- Launch tray app from finish page so user can configure accounts.
+         Service is NOT auto-launched; the App starts it via IPC when needed.
+         Both processes auto-start on next login via the HKCU Run keys above. -->
     <CustomAction Id="LaunchApp"
-                  Directory="APPDIR"
-                  ExeCommand="&quot;[APPDIR]FilesClient.App.exe&quot;"
+                  Directory="INSTALLDIR"
+                  ExeCommand="&quot;[INSTALLDIR]FilesClient.App.exe&quot;"
                   Impersonate="yes"
                   Return="asyncNoWait" />
-
-    <InstallExecuteSequence>
-      <Custom Action="LaunchService" After="InstallFinalize" Condition="NOT REMOVE~=&quot;ALL&quot;" />
-      <Custom Action="LaunchApp" After="LaunchService" Condition="NOT REMOVE~=&quot;ALL&quot;" />
-    </InstallExecuteSequence>
 
   </Package>
 </Wix>
