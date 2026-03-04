@@ -615,8 +615,11 @@ sealed class ManageAccountsForm : Form
 
     private async Task RefreshAllLoginAccountsAsync()
     {
-        var loginIds = _serviceClient.Accounts
-            .Select(a => a.LoginId)
+        // Include all known logins — not just those with synced accounts —
+        // so that non-synced accounts are discovered for newly added logins.
+        var loginIds = _serviceClient.Accounts.Select(a => a.LoginId)
+            .Union(_serviceClient.ConnectingLoginIds)
+            .Union(_serviceClient.FailedLogins.Select(f => f.LoginId))
             .Where(id => !string.IsNullOrEmpty(id)).Distinct().ToList();
 
         // Phase 1: cached accounts (fast)
@@ -793,6 +796,60 @@ sealed class ManageAccountsForm : Form
         // Always refresh the detail panel — the same account may have changed
         // state (e.g. non-synced → synced) even if the selection ID is the same
         OnSelectionChanged();
+
+        // If any login doesn't have discovered accounts yet, kick off discovery.
+        // This handles new logins arriving via AccountsChanged after AddAccountForm.
+        var undiscoveredLogins = allLoginIds
+            .Where(id => !_discoveredAccounts.ContainsKey(id) && !connectingIds.Contains(id))
+            .ToList();
+        if (undiscoveredLogins.Count > 0)
+            _ = DiscoverAccountsForLoginsAsync(undiscoveredLogins);
+    }
+
+    /// <summary>
+    /// Fetch discovered accounts for specific logins and refresh the tree.
+    /// </summary>
+    private async Task DiscoverAccountsForLoginsAsync(List<string> loginIds)
+    {
+        bool changed = false;
+        foreach (var loginId in loginIds)
+        {
+            try
+            {
+                var result = await _serviceClient.GetLoginAccountsAsync(loginId);
+                _loginAccountResults[loginId] = result;
+                if (result.Accounts != null)
+                {
+                    _discoveredAccounts[loginId] = result.Accounts;
+                    changed = true;
+                }
+            }
+            catch { }
+        }
+
+        foreach (var loginId in loginIds)
+        {
+            try
+            {
+                var result = await _serviceClient.RefreshLoginAccountsAsync(loginId);
+                _loginAccountResults[loginId] = result;
+                if (result.Accounts != null)
+                {
+                    _discoveredAccounts[loginId] = result.Accounts;
+                    changed = true;
+                }
+                _refreshedLogins.Add(loginId);
+            }
+            catch
+            {
+                _refreshedLogins.Add(loginId);
+            }
+        }
+
+        if (changed)
+        {
+            if (InvokeRequired) BeginInvoke(RefreshTree); else RefreshTree();
+        }
     }
 
     /// <summary>
@@ -853,6 +910,25 @@ sealed class ManageAccountsForm : Form
 
     private void OnSelectionChanged()
     {
+        var node = _treeView.SelectedNode;
+
+        // Determine what the new selection refers to
+        string? newLoginId = null;
+        string? newAccountId = null;
+        if (node?.Tag is LoginNode ln)
+            newLoginId = ln.LoginId;
+        else if (node?.Tag is AccountNode an)
+            newAccountId = an.AccountId;
+
+        // If the same synced account is still selected, just update labels
+        // without clearing the activity list or restarting the outbox timer.
+        if (newAccountId != null && newAccountId == _displayedAccountId
+            && node?.Tag is AccountNode sameAn && sameAn.IsSynced && sameAn.SyncInfo != null)
+        {
+            UpdateSyncedAccountLabels(sameAn);
+            return;
+        }
+
         _loginPanel.Visible = false;
         _syncedAccountPanel.Visible = false;
         _availableAccountPanel.Visible = false;
@@ -865,7 +941,6 @@ sealed class ManageAccountsForm : Form
         // Stop outbox polling by default — re-enable below if synced account selected
         _outboxTimer.Stop();
 
-        var node = _treeView.SelectedNode;
         if (node == null)
         {
             _noSelectionLabel.Visible = true;
@@ -891,34 +966,7 @@ sealed class ManageAccountsForm : Form
             if (accountNode.IsSynced && accountNode.SyncInfo != null)
             {
                 _syncedAccountPanel.Visible = true;
-                var info = accountNode.SyncInfo;
-                _syncedAccountName.Text = info.DisplayName;
-
-                if (accountNode.IsMissing)
-                {
-                    _accountStatusLabel.Text = "This account is no longer available on the server.";
-                    _accountStatusLabel.ForeColor = Color.FromArgb(200, 120, 0);
-                    _refreshButton.Visible = false;
-                    _cleanButton.Visible = false;
-                    _openFolderButton.Visible = false;
-                }
-                else
-                {
-                    _accountStatusLabel.Text = info.Status switch
-                    {
-                        AccountStatus.Idle when info.PendingCount > 0 => $"Status: {info.PendingCount} pending",
-                        AccountStatus.Idle => "Status: Up to date",
-                        AccountStatus.Syncing => "Status: Syncing",
-                        AccountStatus.Error => $"Status: Error \u2014 {info.StatusDetail}",
-                        AccountStatus.Disconnected => "Status: Offline",
-                        _ => "Status: Unknown",
-                    };
-                    _accountStatusLabel.ForeColor = default;
-                    _refreshButton.Visible = true;
-                    _cleanButton.Visible = true;
-                    _openFolderButton.Visible = true;
-                }
-                _syncFolderLabel.Text = $"Folder: {info.SyncRootPath}";
+                UpdateSyncedAccountLabels(accountNode);
 
                 // Start outbox polling for this account
                 _outboxDirty = true;
@@ -937,11 +985,51 @@ sealed class ManageAccountsForm : Form
         }
     }
 
+    private void UpdateSyncedAccountLabels(AccountNode accountNode)
+    {
+        var info = accountNode.SyncInfo!;
+        _syncedAccountName.Text = info.DisplayName;
+
+        if (accountNode.IsMissing)
+        {
+            _accountStatusLabel.Text = "This account is no longer available on the server.";
+            _accountStatusLabel.ForeColor = Color.FromArgb(200, 120, 0);
+            _refreshButton.Visible = false;
+            _cleanButton.Visible = false;
+            _openFolderButton.Visible = false;
+        }
+        else
+        {
+            _accountStatusLabel.Text = info.Status switch
+            {
+                AccountStatus.Idle when info.PendingCount > 0 => $"Status: {info.PendingCount} pending",
+                AccountStatus.Idle => "Status: Up to date",
+                AccountStatus.Syncing => "Status: Syncing",
+                AccountStatus.Error => $"Status: Error \u2014 {info.StatusDetail}",
+                AccountStatus.Disconnected => "Status: Offline",
+                _ => "Status: Unknown",
+            };
+            _accountStatusLabel.ForeColor = default;
+            _refreshButton.Visible = true;
+            _cleanButton.Visible = true;
+            _openFolderButton.Visible = true;
+        }
+        _syncFolderLabel.Text = $"Folder: {info.SyncRootPath}";
+    }
+
     private void OnAddLoginClicked(object? sender, EventArgs e)
     {
-        using var addForm = new AddAccountForm(_serviceClient);
-        if (addForm.ShowDialog(this) == DialogResult.OK)
-            _ = RefreshAllLoginAccountsAsync();
+        _operationInProgress = true;
+        try
+        {
+            using var addForm = new AddAccountForm(_serviceClient);
+            if (addForm.ShowDialog(this) == DialogResult.OK)
+                _ = RefreshAllLoginAccountsAsync();
+        }
+        finally
+        {
+            _operationInProgress = false;
+        }
     }
 
     private async void OnUpdateCredentialsClicked(object? sender, EventArgs e)
@@ -1342,12 +1430,16 @@ sealed class ManageAccountsForm : Form
     protected override void OnDeactivate(EventArgs e)
     {
         base.OnDeactivate(e);
-        // Dropbox-style: hide when user clicks elsewhere
-        // Use BeginInvoke to avoid hiding during modal dialogs (MessageBox, AddAccountForm)
+        // Dropbox-style: hide when user clicks elsewhere.
+        // Don't hide during operations (OAuth, re-auth), modal dialogs, or
+        // when a child form (AddAccountForm, MessageBox) owns focus.
         BeginInvoke(() =>
         {
-            if (!ContainsFocus && !_operationInProgress)
-                Hide();
+            if (_operationInProgress)
+                return;
+            if (ContainsFocus || OwnedForms.Length > 0)
+                return;
+            Hide();
         });
     }
 
