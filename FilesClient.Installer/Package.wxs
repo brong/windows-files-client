@@ -62,13 +62,21 @@
     <!-- Standard install-dir wizard: Welcome → Install Dir → Ready → Progress → Finish -->
     <UI>
       <ui:WixUI Id="WixUI_InstallDir" />
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchService"
+               Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed" />
       <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchApp"
                Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed" />
     </UI>
 
-    <!-- Launch tray app from finish page so user can configure accounts.
-         Service is NOT auto-launched; the App starts it via IPC when needed.
-         Both processes auto-start on next login via the HKCU Run keys above. -->
+    <!-- Launch both processes from finish page checkbox.
+         Service starts first (sync engine), then App (tray UI).
+         Both auto-start on next login via the HKCU Run keys above. -->
+    <CustomAction Id="LaunchService"
+                  Directory="INSTALLDIR"
+                  ExeCommand="&quot;[INSTALLDIR]FilesClient.Service.exe&quot;"
+                  Impersonate="yes"
+                  Return="asyncNoWait" />
+
     <CustomAction Id="LaunchApp"
                   Directory="INSTALLDIR"
                   ExeCommand="&quot;[INSTALLDIR]FilesClient.App.exe&quot;"
