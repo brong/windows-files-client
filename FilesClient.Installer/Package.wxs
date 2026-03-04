@@ -73,8 +73,8 @@
                   Return="asyncNoWait" />
 
     <InstallExecuteSequence>
-      <Custom Action="LaunchService" After="InstallFinalize"><![CDATA[NOT REMOVE~="ALL"]]></Custom>
-      <Custom Action="LaunchApp" After="LaunchService"><![CDATA[NOT REMOVE~="ALL"]]></Custom>
+      <Custom Action="LaunchService" After="InstallFinalize" Condition="NOT REMOVE~=&quot;ALL&quot;" />
+      <Custom Action="LaunchApp" After="LaunchService" Condition="NOT REMOVE~=&quot;ALL&quot;" />
     </InstallExecuteSequence>
 
   </Package>
