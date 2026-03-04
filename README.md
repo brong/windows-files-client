@@ -68,6 +68,19 @@ From WSL2 or a Windows terminal:
 dotnet build
 ```
 
+### MSI Installer
+
+To build a self-contained MSI installer (bundles .NET 9 runtime, no prerequisites):
+
+```
+cd FilesClient.Installer
+build.cmd
+```
+
+This publishes both `FilesClient.Service` and `FilesClient.App` as self-contained win-x64 binaries, then packages them into `bin\Release\FastmailFiles.msi`.
+
+The MSI installs to `C:\Program Files\Fastmail\Fastmail Files\` with separate `Service\` and `App\` subdirectories, registers HKCU Run keys for auto-start on login, and launches both processes after install. Major upgrades cleanly replace the previous version.
+
 ## Usage
 
 ```

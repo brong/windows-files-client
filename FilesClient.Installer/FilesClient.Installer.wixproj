@@ -1,0 +1,18 @@
+<Project Sdk="WixToolset.Sdk/5.0.2">
+
+  <PropertyGroup>
+    <OutputName>FastmailFiles</OutputName>
+    <DefaultLanguage>en-US</DefaultLanguage>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <ServicePublishDir>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\publish\Service'))</ServicePublishDir>
+    <AppPublishDir>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\publish\App'))</AppPublishDir>
+    <DefineConstants>ServicePublishDir=$(ServicePublishDir);AppPublishDir=$(AppPublishDir)</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="WixToolset.Util.wixext" Version="5.0.*" />
+  </ItemGroup>
+
+</Project>
