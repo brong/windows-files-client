@@ -32,7 +32,7 @@ sealed class AddAccountForm : Form
 
         Text = "Add Account";
         var em = Font.Height;
-        Size = new Size(32 * em, 12 * em);
+        Size = new Size(32 * em, 14 * em);
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;

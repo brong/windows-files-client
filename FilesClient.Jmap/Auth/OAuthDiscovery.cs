@@ -48,6 +48,10 @@ public static class OAuthDiscovery
         var issuer = config.Authentication?.OAuthPublic?.Issuer
             ?? throw new InvalidOperationException("No OAuth issuer in user-agent configuration");
 
+        // Ensure issuer has a scheme — server may return bare hostname
+        if (!issuer.Contains("://"))
+            issuer = $"https://{issuer}";
+
         // Step 2: {issuer}/.well-known/oauth-authorization-server → full metadata
         if (!Uri.TryCreate(issuer, UriKind.Absolute, out var issuerUri))
             throw new InvalidOperationException(

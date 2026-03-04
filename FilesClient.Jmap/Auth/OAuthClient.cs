@@ -11,7 +11,7 @@ namespace FilesClient.Jmap.Auth;
 /// </summary>
 public static class OAuthClient
 {
-    public const string FilesScope = "urn:ietf:params:oauth:scope:files offline_access";
+    public const string FilesScope = "urn:ietf:params:jmap:core urn:ietf:params:oauth:scope:files";
     public const string ClientName = "Fastmail Files";
     public const string SoftwareId = "4a1c3d2e-8f7b-4e6a-9d5c-1b0a2e3f4d5c";
 
@@ -38,6 +38,10 @@ public static class OAuthClient
             ["response_types"] = new[] { "code" },
             ["scope"] = scope,
             ["client_name"] = ClientName,
+            ["client_uri"] = "https://www.fastmail.com/files/",
+            ["logo_uri"] = "https://www.fastmail.com/assets/images/fm-logo.svg",
+            ["tos_uri"] = "https://www.fastmail.com/about/tos/",
+            ["policy_uri"] = "https://www.fastmail.com/about/privacy/",
             ["software_id"] = SoftwareId,
         };
 
