@@ -238,22 +238,14 @@ sealed class AddAccountForm : Form
                 }
             }
 
-            // Add login and close immediately
-            var addResult = await _serviceClient.AddLoginAsync(
+            // Close immediately and add login in the background
+            DialogResult = DialogResult.OK;
+            Close();
+
+            _ = _serviceClient.AddLoginAsync(
                 cred.SessionUrl, cred.AccessToken, enabledAccountIds,
                 cred.RefreshToken, cred.TokenEndpoint, cred.ClientId,
                 cred.ExpiresAt.ToUnixTimeSeconds());
-
-            if (!addResult.Success)
-            {
-                _statusLabel.Text = $"Error: {addResult.Error}";
-                _statusLabel.ForeColor = Color.Red;
-                _signInButton.Enabled = true;
-                return;
-            }
-
-            DialogResult = DialogResult.OK;
-            Close();
         }
         catch (Exception ex)
         {

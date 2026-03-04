@@ -50,6 +50,7 @@ sealed class ManageAccountsForm : Form
     private string? _displayedLoginId;
     private string? _displayedAccountId;
     private bool _suppressSelectionChanged;
+    private bool _operationInProgress;
 
     // Discovered accounts per login (populated async on form open)
     private readonly Dictionary<string, List<DiscoveredAccount>> _discoveredAccounts = new();
@@ -568,16 +569,9 @@ sealed class ManageAccountsForm : Form
         _treeView.EndUpdate();
         _suppressSelectionChanged = false;
 
-        // Only reset the detail panel if the logical selection actually changed
-        string? newLoginId = null;
-        string? newAccountId = null;
-        if (_treeView.SelectedNode?.Tag is LoginNode selLn)
-            newLoginId = selLn.LoginId;
-        else if (_treeView.SelectedNode?.Tag is AccountNode selAn)
-            newAccountId = selAn.AccountId;
-
-        if (newLoginId != _displayedLoginId || newAccountId != _displayedAccountId)
-            OnSelectionChanged();
+        // Always refresh the detail panel — the same account may have changed
+        // state (e.g. non-synced → synced) even if the selection ID is the same
+        OnSelectionChanged();
     }
 
     /// <summary>
@@ -721,6 +715,7 @@ sealed class ManageAccountsForm : Form
 
     private async void OnUpdateCredentialsClicked(object? sender, EventArgs e)
     {
+        if (_operationInProgress) return;
         if (_treeView.SelectedNode?.Tag is not LoginNode loginNode)
             return;
 
@@ -741,7 +736,7 @@ sealed class ManageAccountsForm : Form
             return;
         }
 
-        _updateCredentialsButton.Enabled = false;
+        SetAllButtonsEnabled(false);
         try
         {
             var result = await _serviceClient.UpdateLoginAsync(loginNode.LoginId, sessionUrl, token);
@@ -761,16 +756,17 @@ sealed class ManageAccountsForm : Form
         }
         finally
         {
-            _updateCredentialsButton.Enabled = true;
+            SetAllButtonsEnabled(true);
         }
     }
 
     private async void OnReauthenticateClicked(object? sender, EventArgs e)
     {
+        if (_operationInProgress) return;
         if (_treeView.SelectedNode?.Tag is not LoginNode loginNode)
             return;
 
-        _reauthenticateButton.Enabled = false;
+        SetAllButtonsEnabled(false);
         _reauthStatusLabel.ForeColor = Color.DodgerBlue;
         _reauthStatusLabel.Text = "";
 
@@ -813,12 +809,13 @@ sealed class ManageAccountsForm : Form
         }
         finally
         {
-            _reauthenticateButton.Enabled = true;
+            SetAllButtonsEnabled(true);
         }
     }
 
     private async void OnRemoveLoginClicked(object? sender, EventArgs e)
     {
+        if (_operationInProgress) return;
         if (_treeView.SelectedNode?.Tag is not LoginNode loginNode)
             return;
 
@@ -836,7 +833,7 @@ sealed class ManageAccountsForm : Form
         if (result != DialogResult.Yes)
             return;
 
-        _removeLoginButton.Enabled = false;
+        SetAllButtonsEnabled(false);
 
         // Mark the login and its account nodes as "Removing..." in the tree
         var selectedNode = _treeView.SelectedNode;
@@ -873,12 +870,13 @@ sealed class ManageAccountsForm : Form
         }
         finally
         {
-            _removeLoginButton.Enabled = true;
+            SetAllButtonsEnabled(true);
         }
     }
 
     private async void OnDetachClicked(object? sender, EventArgs e)
     {
+        if (_operationInProgress) return;
         if (_treeView.SelectedNode?.Tag is not AccountNode { IsSynced: true, SyncInfo: not null } accountNode)
             return;
 
@@ -895,7 +893,12 @@ sealed class ManageAccountsForm : Form
         if (result != DialogResult.Yes)
             return;
 
-        SetSyncedButtonsEnabled(false);
+        SetAllButtonsEnabled(false);
+        if (_treeView.SelectedNode != null)
+        {
+            _treeView.SelectedNode.Text = _treeView.SelectedNode.Text.Split('\u2014')[0].TrimEnd() + " \u2014 Detaching...";
+            _treeView.SelectedNode.ForeColor = Color.Gray;
+        }
         try
         {
             var cmdResult = await _serviceClient.DetachAccountAsync(accountNode.AccountId);
@@ -910,12 +913,13 @@ sealed class ManageAccountsForm : Form
         }
         finally
         {
-            SetSyncedButtonsEnabled(true);
+            SetAllButtonsEnabled(true);
         }
     }
 
     private async void OnRemoveClicked(object? sender, EventArgs e)
     {
+        if (_operationInProgress) return;
         if (_treeView.SelectedNode?.Tag is not AccountNode { IsSynced: true, SyncInfo: not null } accountNode)
             return;
 
@@ -931,7 +935,12 @@ sealed class ManageAccountsForm : Form
         if (result != DialogResult.Yes)
             return;
 
-        SetSyncedButtonsEnabled(false);
+        SetAllButtonsEnabled(false);
+        if (_treeView.SelectedNode != null)
+        {
+            _treeView.SelectedNode.Text = _treeView.SelectedNode.Text.Split('\u2014')[0].TrimEnd() + " \u2014 Removing...";
+            _treeView.SelectedNode.ForeColor = Color.Gray;
+        }
         try
         {
             var cmdResult = await _serviceClient.CleanUpAccountAsync(accountNode.AccountId);
@@ -946,12 +955,13 @@ sealed class ManageAccountsForm : Form
         }
         finally
         {
-            SetSyncedButtonsEnabled(true);
+            SetAllButtonsEnabled(true);
         }
     }
 
     private async void OnRefreshClicked(object? sender, EventArgs e)
     {
+        if (_operationInProgress) return;
         if (_treeView.SelectedNode?.Tag is not AccountNode { IsSynced: true } accountNode)
             return;
 
@@ -965,7 +975,12 @@ sealed class ManageAccountsForm : Form
         if (result != DialogResult.Yes)
             return;
 
-        SetSyncedButtonsEnabled(false);
+        SetAllButtonsEnabled(false);
+        if (_treeView.SelectedNode != null)
+        {
+            _treeView.SelectedNode.Text = _treeView.SelectedNode.Text.Split('\u2014')[0].TrimEnd() + " \u2014 Refreshing...";
+            _treeView.SelectedNode.ForeColor = Color.Gray;
+        }
         try
         {
             var cmdResult = await _serviceClient.RefreshAccountAsync(accountNode.AccountId);
@@ -980,12 +995,13 @@ sealed class ManageAccountsForm : Form
         }
         finally
         {
-            SetSyncedButtonsEnabled(true);
+            SetAllButtonsEnabled(true);
         }
     }
 
     private async void OnCleanClicked(object? sender, EventArgs e)
     {
+        if (_operationInProgress) return;
         if (_treeView.SelectedNode?.Tag is not AccountNode { IsSynced: true, SyncInfo: not null } accountNode)
             return;
 
@@ -1001,7 +1017,15 @@ sealed class ManageAccountsForm : Form
         if (result != DialogResult.Yes)
             return;
 
-        SetSyncedButtonsEnabled(false);
+        SetAllButtonsEnabled(false);
+
+        // Mark the node as "Cleaning..." in the tree
+        if (_treeView.SelectedNode != null)
+        {
+            _treeView.SelectedNode.Text = _treeView.SelectedNode.Text.Split('\u2014')[0].TrimEnd() + " \u2014 Cleaning...";
+            _treeView.SelectedNode.ForeColor = Color.Gray;
+        }
+
         try
         {
             var cmdResult = await _serviceClient.CleanAccountAsync(accountNode.AccountId);
@@ -1016,16 +1040,17 @@ sealed class ManageAccountsForm : Form
         }
         finally
         {
-            SetSyncedButtonsEnabled(true);
+            SetAllButtonsEnabled(true);
         }
     }
 
     private async void OnAddAccountClicked(object? sender, EventArgs e)
     {
+        if (_operationInProgress) return;
         if (_treeView.SelectedNode?.Tag is not AccountNode { IsSynced: false } accountNode)
             return;
 
-        _addAccountButton.Enabled = false;
+        SetAllButtonsEnabled(false);
         try
         {
             var cmdResult = await _serviceClient.EnableAccountAsync(accountNode.LoginId, accountNode.AccountId);
@@ -1042,16 +1067,21 @@ sealed class ManageAccountsForm : Form
         }
         finally
         {
-            _addAccountButton.Enabled = true;
+            SetAllButtonsEnabled(true);
         }
     }
 
-    private void SetSyncedButtonsEnabled(bool enabled)
+    private void SetAllButtonsEnabled(bool enabled)
     {
+        _operationInProgress = !enabled;
         _detachButton.Enabled = enabled;
         _removeButton.Enabled = enabled;
         _refreshButton.Enabled = enabled;
         _cleanButton.Enabled = enabled;
+        _removeLoginButton.Enabled = enabled;
+        _updateCredentialsButton.Enabled = enabled;
+        _reauthenticateButton.Enabled = enabled;
+        _addAccountButton.Enabled = enabled;
     }
 
     protected override void OnLoad(EventArgs e)

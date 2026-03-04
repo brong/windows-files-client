@@ -57,6 +57,7 @@ sealed class TrayIcon : IDisposable
         _syncContext?.Post(_ =>
         {
             if (_notifyIcon == null) return;
+            PopulateContextMenu();
             RefreshTooltip();
         }, null);
     }
