@@ -53,6 +53,7 @@ internal sealed class FileChangeWatcher : IDisposable
         _watcher = new FileSystemWatcher(_syncRootPath)
         {
             IncludeSubdirectories = true,
+            InternalBufferSize = 1024 * 1024, // 1MB to handle large sync bursts (default 8KB)
             NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName
                 | NotifyFilters.LastWrite | NotifyFilters.Size
                 | NotifyFilters.Attributes,
@@ -61,6 +62,7 @@ internal sealed class FileChangeWatcher : IDisposable
         _watcher.Created += (_, e) => OnCreated(e.FullPath);
         _watcher.Changed += (_, e) => OnChanged(e.FullPath);
         _watcher.Renamed += (_, e) => OnRenamed?.Invoke(e.OldFullPath, e.FullPath);
+        _watcher.Error += OnWatcherError;
 
         _watcher.EnableRaisingEvents = true;
         Console.WriteLine($"{_logPrefix} File change watcher started.");
@@ -71,6 +73,25 @@ internal sealed class FileChangeWatcher : IDisposable
         if (_watcher != null)
             _watcher.EnableRaisingEvents = false;
         _debounceTimer.Change(Timeout.Infinite, Timeout.Infinite);
+    }
+
+    private void OnWatcherError(object sender, ErrorEventArgs e)
+    {
+        Console.Error.WriteLine($"{_logPrefix} FileSystemWatcher error: {e.GetException().Message}");
+        // Restart the watcher — after a buffer overflow it stops delivering events
+        try
+        {
+            if (_watcher != null)
+            {
+                _watcher.EnableRaisingEvents = false;
+                _watcher.EnableRaisingEvents = true;
+                Console.WriteLine($"{_logPrefix} FileSystemWatcher restarted after error.");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"{_logPrefix} Failed to restart FileSystemWatcher: {ex.Message}");
+        }
     }
 
     private void OnChanged(string path)
