@@ -1030,6 +1030,8 @@ sealed class ManageAccountsForm : Form
             if (!cmdResult.Success)
                 MessageBox.Show($"Failed to add account: {cmdResult.Error}", "Error",
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
+            else
+                await RefreshAllLoginAccountsAsync();
         }
         catch (Exception ex)
         {

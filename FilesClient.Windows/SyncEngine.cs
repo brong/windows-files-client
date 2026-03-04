@@ -355,8 +355,18 @@ public class SyncEngine : IDisposable
         Log($"Creating placeholders ({tree.Sum(t => t.children.Length)} items)...");
         foreach (var (parentId, localParentPath, children) in tree)
         {
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var newChildren = children
-                .Where(c => !Path.Exists(Path.Combine(localParentPath, PlaceholderManager.SanitizeName(c.Name))))
+                .Where(c =>
+                {
+                    var sanitized = PlaceholderManager.SanitizeName(c.Name);
+                    if (!seen.Add(sanitized))
+                    {
+                        Log($"  Skipping duplicate sanitized name: {c.Name} -> {sanitized} (node {c.Id})");
+                        return false;
+                    }
+                    return !Path.Exists(Path.Combine(localParentPath, sanitized));
+                })
                 .ToArray();
 
             if (newChildren.Length > 0)
