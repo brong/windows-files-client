@@ -333,6 +333,12 @@ sealed class LoginManager : IDisposable
                     _failedLogins.RemoveAll(f => f.LoginId == loginId);
                     wasFailedLogin = true;
                 }
+                else if (_connectingLoginIds.Contains(loginId))
+                {
+                    // Login is currently being retried — treat as failed login
+                    // so we replace with the new credentials.
+                    wasFailedLogin = true;
+                }
                 else
                 {
                     throw new InvalidOperationException($"Login {loginId} not found");
