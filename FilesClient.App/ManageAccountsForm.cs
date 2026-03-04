@@ -644,36 +644,50 @@ sealed class ManageAccountsForm : Form
             .Union(_serviceClient.FailedLogins.Select(f => f.LoginId))
             .Where(id => !string.IsNullOrEmpty(id)).Distinct().ToList();
 
-        // Phase 1: cached accounts (fast)
-        foreach (var loginId in loginIds)
+        // Phase 1: cached accounts (fast, all logins in parallel)
+        var cachedTasks = loginIds.Select(async loginId =>
         {
             try
             {
                 var result = await _serviceClient.GetLoginAccountsAsync(loginId);
-                _loginAccountResults[loginId] = result;
-                if (result.Accounts != null)
-                    _discoveredAccounts[loginId] = result.Accounts;
+                return (loginId, result, (Exception?)null);
             }
-            catch { }
+            catch (Exception ex) { return (loginId, (LoginAccountsResultEvent?)null, (Exception?)ex); }
+        }).ToList();
+
+        foreach (var (loginId, result, _) in await Task.WhenAll(cachedTasks))
+        {
+            if (result == null) continue;
+            _loginAccountResults[loginId] = result;
+            if (result.Accounts != null)
+                _discoveredAccounts[loginId] = result.Accounts;
         }
         if (InvokeRequired) BeginInvoke(RefreshTree); else RefreshTree();
 
-        // Phase 2: fresh from server (slow)
-        foreach (var loginId in loginIds)
+        // Phase 2: fresh from server (slow, all logins in parallel)
+        var refreshTasks = loginIds.Select(async loginId =>
         {
             try
             {
                 var result = await _serviceClient.RefreshLoginAccountsAsync(loginId);
+                return (loginId, result, (Exception?)null);
+            }
+            catch (Exception ex) { return (loginId, (LoginAccountsResultEvent?)null, (Exception?)ex); }
+        }).ToList();
+
+        foreach (var (loginId, result, ex) in await Task.WhenAll(refreshTasks))
+        {
+            if (result != null)
+            {
                 _loginAccountResults[loginId] = result;
                 if (result.Accounts != null)
                     _discoveredAccounts[loginId] = result.Accounts;
-                _refreshedLogins.Add(loginId);
             }
-            catch (Exception ex)
+            else if (ex != null)
             {
                 Console.Error.WriteLine($"Failed to refresh accounts for {loginId}: {ex.Message}");
-                _refreshedLogins.Add(loginId);
             }
+            _refreshedLogins.Add(loginId);
         }
         if (InvokeRequired) BeginInvoke(RefreshTree); else RefreshTree();
     }
@@ -1450,6 +1464,7 @@ sealed class ManageAccountsForm : Form
         {
             _outboxDirty = true;
             _outboxTimer.Start();
+            EnsureOnScreen();
             // Briefly set TopMost to ensure the panel appears above other windows
             TopMost = true;
             BeginInvoke(() => TopMost = false);
@@ -1482,6 +1497,20 @@ sealed class ManageAccountsForm : Form
         var x = screen.Right - Width - 8;
         var y = screen.Bottom - Height - 8;
         Location = new Point(x, y);
+    }
+
+    /// <summary>
+    /// If the form is off-screen (e.g. monitor disconnected), reposition near tray.
+    /// </summary>
+    private void EnsureOnScreen()
+    {
+        var bounds = Bounds;
+        foreach (var screen in Screen.AllScreens)
+        {
+            if (screen.WorkingArea.IntersectsWith(bounds))
+                return; // at least partially visible
+        }
+        PositionNearTray();
     }
 
     private void AutoSizeToContent()
