@@ -445,6 +445,7 @@ sealed class ManageAccountsForm : Form
 
     private void OnExitClicked(object? sender, EventArgs e)
     {
+        _operationInProgress = true;
         var result = MessageBox.Show(
             "This will close the Fastmail Files tray icon.\n\n" +
             "Your files will continue to sync in the background.",
@@ -456,6 +457,7 @@ sealed class ManageAccountsForm : Form
             _appCts.Cancel();
             Application.ExitThread();
         }
+        _operationInProgress = false;
     }
 
     private void OnOpenFolderClicked(object? sender, EventArgs e)
@@ -1138,6 +1140,8 @@ sealed class ManageAccountsForm : Form
         if (_treeView.SelectedNode?.Tag is not LoginNode loginNode)
             return;
 
+        SetAllButtonsEnabled(false);
+
         var accountsForLogin = _serviceClient.Accounts.Where(a => a.LoginId == loginNode.LoginId).ToList();
         var accountWord = accountsForLogin.Count == 1 ? "account" : $"{accountsForLogin.Count} accounts";
 
@@ -1150,9 +1154,10 @@ sealed class ManageAccountsForm : Form
             MessageBoxIcon.Warning);
 
         if (result != DialogResult.Yes)
+        {
+            SetAllButtonsEnabled(true);
             return;
-
-        SetAllButtonsEnabled(false);
+        }
 
         // Mark the login and its account nodes as "Removing..." in the tree
         var selectedNode = _treeView.SelectedNode;
@@ -1199,6 +1204,8 @@ sealed class ManageAccountsForm : Form
         if (_treeView.SelectedNode?.Tag is not AccountNode { IsSynced: true, SyncInfo: not null } accountNode)
             return;
 
+        SetAllButtonsEnabled(false);
+
         var info = accountNode.SyncInfo;
         var result = MessageBox.Show(
             $"Detach {info.DisplayName}?\n\n" +
@@ -1210,9 +1217,10 @@ sealed class ManageAccountsForm : Form
             MessageBoxIcon.Question);
 
         if (result != DialogResult.Yes)
+        {
+            SetAllButtonsEnabled(true);
             return;
-
-        SetAllButtonsEnabled(false);
+        }
         if (_treeView.SelectedNode != null)
         {
             _treeView.SelectedNode.Text = _treeView.SelectedNode.Text.Split('\u2014')[0].TrimEnd() + " \u2014 Detaching...";
@@ -1242,6 +1250,8 @@ sealed class ManageAccountsForm : Form
         if (_treeView.SelectedNode?.Tag is not AccountNode { IsSynced: true, SyncInfo: not null } accountNode)
             return;
 
+        SetAllButtonsEnabled(false);
+
         var info = accountNode.SyncInfo;
         var result = MessageBox.Show(
             $"Remove {info.DisplayName}?\n\n" +
@@ -1252,9 +1262,10 @@ sealed class ManageAccountsForm : Form
             MessageBoxIcon.Warning);
 
         if (result != DialogResult.Yes)
+        {
+            SetAllButtonsEnabled(true);
             return;
-
-        SetAllButtonsEnabled(false);
+        }
         if (_treeView.SelectedNode != null)
         {
             _treeView.SelectedNode.Text = _treeView.SelectedNode.Text.Split('\u2014')[0].TrimEnd() + " \u2014 Removing...";
@@ -1284,6 +1295,8 @@ sealed class ManageAccountsForm : Form
         if (_treeView.SelectedNode?.Tag is not AccountNode { IsSynced: true } accountNode)
             return;
 
+        SetAllButtonsEnabled(false);
+
         var result = MessageBox.Show(
             $"Force refresh {accountNode.Name}?\n\n" +
             "This will delete the local cache and re-sync all files from the server.",
@@ -1292,9 +1305,10 @@ sealed class ManageAccountsForm : Form
             MessageBoxIcon.Question);
 
         if (result != DialogResult.Yes)
+        {
+            SetAllButtonsEnabled(true);
             return;
-
-        SetAllButtonsEnabled(false);
+        }
         if (_treeView.SelectedNode != null)
         {
             _treeView.SelectedNode.Text = _treeView.SelectedNode.Text.Split('\u2014')[0].TrimEnd() + " \u2014 Refreshing...";
@@ -1324,6 +1338,8 @@ sealed class ManageAccountsForm : Form
         if (_treeView.SelectedNode?.Tag is not AccountNode { IsSynced: true, SyncInfo: not null } accountNode)
             return;
 
+        SetAllButtonsEnabled(false);
+
         var info = accountNode.SyncInfo;
         var result = MessageBox.Show(
             $"Clean and rebuild {info.DisplayName}?\n\n" +
@@ -1334,9 +1350,10 @@ sealed class ManageAccountsForm : Form
             MessageBoxIcon.Warning);
 
         if (result != DialogResult.Yes)
+        {
+            SetAllButtonsEnabled(true);
             return;
-
-        SetAllButtonsEnabled(false);
+        }
 
         // Mark the node as "Cleaning..." in the tree
         if (_treeView.SelectedNode != null)
