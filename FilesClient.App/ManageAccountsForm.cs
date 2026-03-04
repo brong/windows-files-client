@@ -770,21 +770,6 @@ sealed class ManageAccountsForm : Form
         if (_treeView.SelectedNode?.Tag is not LoginNode loginNode)
             return;
 
-        // Extract email domain from loginId (format: "user@host" or "user@domain@host")
-        var loginId = loginNode.LoginId;
-        var parts = loginId.Split('@');
-        string email;
-        if (parts.Length >= 3)
-            email = $"{parts[0]}@{parts[1]}"; // user@domain@host → user@domain
-        else if (parts.Length == 2)
-            email = loginId; // user@host → use as email
-        else
-        {
-            MessageBox.Show("Cannot determine email from login ID.", "Error",
-                MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            return;
-        }
-
         _reauthenticateButton.Enabled = false;
         _reauthStatusLabel.ForeColor = Color.DodgerBlue;
         _reauthStatusLabel.Text = "";
@@ -800,7 +785,7 @@ sealed class ManageAccountsForm : Form
                     _reauthStatusLabel.Text = msg;
             });
 
-            var cred = await flow.SignInAsync(email, progress);
+            var cred = await flow.SignInAsync(progress);
 
             _reauthStatusLabel.Text = "Updating credentials...";
             var result = await _serviceClient.UpdateLoginAsync(

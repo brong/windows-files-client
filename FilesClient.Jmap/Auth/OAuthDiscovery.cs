@@ -15,16 +15,17 @@ public static class OAuthDiscovery
     };
 
     /// <summary>
-    /// Discover OAuth metadata from an email domain.
+    /// Discover OAuth metadata from Fastmail.
     /// Returns the session URL and OAuth server metadata.
     /// </summary>
     public static async Task<(string SessionUrl, OAuthServerMetadata Metadata)> DiscoverAsync(
-        string emailDomain, CancellationToken ct = default)
+        CancellationToken ct = default)
     {
         using var http = new HttpClient();
 
         // Step 1: .well-known/user-agent-configuration → session URL + OAuth issuer
-        var configUrl = $"https://{emailDomain}/.well-known/user-agent-configuration";
+        // Always discover against fastmail.com for now
+        var configUrl = "https://fastmail.com/.well-known/user-agent-configuration";
 
         HttpResponseMessage configResponse;
         try

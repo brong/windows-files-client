@@ -10,7 +10,6 @@ sealed class AddAccountForm : Form
     private readonly ServiceClient _serviceClient;
 
     // OAuth flow controls
-    private readonly TextBox _emailBox;
     private readonly Button _signInButton;
 
     // Advanced (manual) flow controls
@@ -32,7 +31,7 @@ sealed class AddAccountForm : Form
 
         Text = "Add Account";
         var em = Font.Height;
-        Size = new Size(32 * em, 14 * em);
+        Size = new Size(32 * em, 12 * em);
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;
@@ -45,42 +44,26 @@ sealed class AddAccountForm : Form
         // --- OAuth flow (primary) ---
         var y = em;
 
-        var emailLabel = new Label
-        {
-            Text = "Email address:",
-            Location = new Point(pad, y),
-            AutoSize = true,
-        };
-        y += (int)(em * 1.4);
-
-        _emailBox = new TextBox
-        {
-            Location = new Point(pad, y),
-            Width = inputWidth,
-            Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top,
-        };
-        y += (int)(em * 2.2);
-
         _signInButton = new Button
         {
-            Text = "Sign in",
+            Text = "Sign in with Fastmail",
             AutoSize = true,
-            Height = (int)(em * 1.8),
-            Anchor = AnchorStyles.Top | AnchorStyles.Right,
+            Height = (int)(em * 2.2),
+            Location = new Point(pad, y),
+            Anchor = AnchorStyles.Top | AnchorStyles.Left,
         };
-        _signInButton.Location = new Point(ClientSize.Width - pad - _signInButton.PreferredSize.Width, y);
         _signInButton.Click += OnSignInClicked;
 
         _advancedToggle = new LinkLabel
         {
             Text = "Advanced options...",
             AutoSize = true,
-            Location = new Point(pad, y + (int)(em * 0.3)),
+            Location = new Point(pad, y + (int)(em * 2.8)),
             Anchor = AnchorStyles.Top | AnchorStyles.Left,
         };
         _advancedToggle.LinkClicked += OnAdvancedToggleClicked;
 
-        y += (int)(em * 2.8);
+        y += (int)(em * 4.5);
 
         // --- Status label (shared, TextBox so text is selectable) ---
         _statusLabel = new TextBox
@@ -166,7 +149,7 @@ sealed class AddAccountForm : Form
             DialogResult = DialogResult.Cancel,
         };
 
-        Controls.AddRange([emailLabel, _emailBox, _signInButton, _advancedToggle,
+        Controls.AddRange([_signInButton, _advancedToggle,
             _statusLabel, _advancedGroup, cancelButton]);
 
         // Position cancel at bottom-right
@@ -194,17 +177,7 @@ sealed class AddAccountForm : Form
 
     private async void OnSignInClicked(object? sender, EventArgs e)
     {
-        var email = _emailBox.Text.Trim();
-        if (string.IsNullOrEmpty(email) || !email.Contains('@'))
-        {
-            MessageBox.Show("Please enter a valid email address.", "Invalid Email",
-                MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            _emailBox.Focus();
-            return;
-        }
-
         _signInButton.Enabled = false;
-        _emailBox.Enabled = false;
         _statusLabel.ForeColor = Color.DodgerBlue;
 
         try
@@ -218,7 +191,7 @@ sealed class AddAccountForm : Form
                     _statusLabel.Text = msg;
             });
 
-            var cred = await flow.SignInAsync(email, progress);
+            var cred = await flow.SignInAsync(progress);
 
             // Discover accounts
             _statusLabel.Text = "Discovering accounts...";
@@ -229,7 +202,7 @@ sealed class AddAccountForm : Form
                 _statusLabel.Text = discoverResult.Error ?? "Discovery failed";
                 _statusLabel.ForeColor = Color.Red;
                 _signInButton.Enabled = true;
-                _emailBox.Enabled = true;
+
                 return;
             }
 
@@ -238,7 +211,7 @@ sealed class AddAccountForm : Form
                 _statusLabel.Text = "No FileNode accounts found";
                 _statusLabel.ForeColor = Color.Red;
                 _signInButton.Enabled = true;
-                _emailBox.Enabled = true;
+
                 return;
             }
 
@@ -253,7 +226,7 @@ sealed class AddAccountForm : Form
                 if (selectForm.ShowDialog(this) != DialogResult.OK || selectForm.SelectedAccountIds == null)
                 {
                     _signInButton.Enabled = true;
-                    _emailBox.Enabled = true;
+    
                     _statusLabel.Text = "";
                     return;
                 }
@@ -264,7 +237,7 @@ sealed class AddAccountForm : Form
                     _statusLabel.Text = "No accounts selected";
                     _statusLabel.ForeColor = Color.Red;
                     _signInButton.Enabled = true;
-                    _emailBox.Enabled = true;
+    
                     return;
                 }
             }
@@ -281,7 +254,7 @@ sealed class AddAccountForm : Form
                 _statusLabel.Text = $"Error: {addResult.Error}";
                 _statusLabel.ForeColor = Color.Red;
                 _signInButton.Enabled = true;
-                _emailBox.Enabled = true;
+
                 return;
             }
 
@@ -297,7 +270,6 @@ sealed class AddAccountForm : Form
             _statusLabel.Text = $"Error: {ex.Message}";
             _statusLabel.ForeColor = Color.Red;
             _signInButton.Enabled = true;
-            _emailBox.Enabled = true;
         }
     }
 

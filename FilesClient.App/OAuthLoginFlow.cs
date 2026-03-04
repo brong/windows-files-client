@@ -18,14 +18,12 @@ sealed class OAuthLoginFlow : IDisposable
     /// Runs the full OAuth flow for the given email address.
     /// Opens the user's browser for authentication and waits for the callback.
     /// </summary>
-    public async Task<OAuthCredential> SignInAsync(string email, IProgress<string>? progress = null,
+    public async Task<OAuthCredential> SignInAsync(IProgress<string>? progress = null,
         CancellationToken ct = default)
     {
-        var domain = email.Contains('@') ? email.Split('@')[1] : email;
-
         // Step 1: Discover OAuth metadata
         progress?.Report("Discovering server...");
-        var (sessionUrl, metadata) = await OAuthDiscovery.DiscoverAsync(domain, ct);
+        var (sessionUrl, metadata) = await OAuthDiscovery.DiscoverAsync(ct: ct);
 
         if (metadata.RegistrationEndpoint == null)
             throw new InvalidOperationException("Server does not support dynamic client registration");
