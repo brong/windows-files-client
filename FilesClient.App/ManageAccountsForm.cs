@@ -7,11 +7,13 @@ namespace FilesClient.App;
 sealed class ManageAccountsForm : Form
 {
     private readonly ServiceClient _serviceClient;
+    private readonly CancellationTokenSource _appCts;
     private readonly TreeView _treeView;
     private readonly Panel _detailPanel;
     private readonly System.Windows.Forms.Timer _refreshTimer;
     private readonly System.Windows.Forms.Timer _statusDebounceTimer;
     private readonly System.Windows.Forms.Timer _accountsDebounceTimer;
+    private readonly System.Windows.Forms.Timer _outboxTimer;
 
     // Detail panel controls — login selected
     private readonly Panel _loginPanel;
@@ -32,6 +34,8 @@ sealed class ManageAccountsForm : Form
     private readonly Button _removeButton;
     private readonly Button _refreshButton;
     private readonly Button _cleanButton;
+    private readonly Button _openFolderButton;
+    private readonly ListView _activityListView;
 
     // Detail panel controls — non-synced account selected
     private readonly Panel _availableAccountPanel;
@@ -51,23 +55,27 @@ sealed class ManageAccountsForm : Form
     private string? _displayedAccountId;
     private bool _suppressSelectionChanged;
     private bool _operationInProgress;
+    private bool _outboxDirty = true;
+    private bool _hasActiveUploads;
 
     // Discovered accounts per login (populated async on form open)
     private readonly Dictionary<string, List<DiscoveredAccount>> _discoveredAccounts = new();
     private readonly Dictionary<string, LoginAccountsResultEvent> _loginAccountResults = new();
     private readonly HashSet<string> _refreshedLogins = new();
 
-    public ManageAccountsForm(ServiceClient serviceClient)
+    public ManageAccountsForm(ServiceClient serviceClient, CancellationTokenSource appCts)
     {
         _serviceClient = serviceClient;
+        _appCts = appCts;
 
         Font = SystemFonts.MessageBoxFont ?? new Font("Segoe UI", 9f);
         AutoScaleMode = AutoScaleMode.Font;
 
-        Text = "Fastmail Files - Manage Accounts";
+        Text = "Fastmail Files";
         MinimumSize = new Size(700, 400);
-        StartPosition = FormStartPosition.CenterScreen;
-        ShowInTaskbar = true;
+        StartPosition = FormStartPosition.Manual;
+        ShowInTaskbar = false;
+        FormBorderStyle = FormBorderStyle.SizableToolWindow;
         AppIcon.Apply(this);
 
         // --- TreeView on the left ---
@@ -214,7 +222,7 @@ sealed class ManageAccountsForm : Form
         // ======= Synced account detail panel =======
         _syncedAccountPanel = new Panel { Dock = DockStyle.Fill, Visible = false };
 
-        var syncedLayout = new TableLayoutPanel
+        var syncedTopLayout = new TableLayoutPanel
         {
             Dock = DockStyle.Top,
             AutoSize = true,
@@ -222,7 +230,7 @@ sealed class ManageAccountsForm : Form
             ColumnCount = 1,
             Padding = Padding.Empty,
         };
-        syncedLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        syncedTopLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
         _syncedAccountName = new Label
         {
@@ -230,14 +238,14 @@ sealed class ManageAccountsForm : Form
             AutoSize = true,
             Margin = new Padding(0, 0, 0, 12),
         };
-        syncedLayout.Controls.Add(_syncedAccountName);
+        syncedTopLayout.Controls.Add(_syncedAccountName);
 
         _accountStatusLabel = new Label
         {
             AutoSize = true,
             Margin = new Padding(0, 0, 0, 4),
         };
-        syncedLayout.Controls.Add(_accountStatusLabel);
+        syncedTopLayout.Controls.Add(_accountStatusLabel);
 
         _syncFolderLabel = new Label
         {
@@ -245,7 +253,7 @@ sealed class ManageAccountsForm : Form
             ForeColor = Color.FromArgb(80, 80, 80),
             Margin = new Padding(0, 0, 0, 16),
         };
-        syncedLayout.Controls.Add(_syncFolderLabel);
+        syncedTopLayout.Controls.Add(_syncFolderLabel);
 
         var syncedButtonFlow = new FlowLayoutPanel
         {
@@ -256,6 +264,9 @@ sealed class ManageAccountsForm : Form
             Margin = new Padding(0, 0, 0, 0),
             Padding = Padding.Empty,
         };
+
+        _openFolderButton = new Button { Text = "Open Folder", AutoSize = true, Height = 30, Margin = new Padding(0, 0, 8, 6) };
+        _openFolderButton.Click += OnOpenFolderClicked;
 
         _detachButton = new Button { Text = "Detach", AutoSize = true, Height = 30, Margin = new Padding(0, 0, 8, 6) };
         _detachButton.Click += OnDetachClicked;
@@ -269,10 +280,33 @@ sealed class ManageAccountsForm : Form
         _cleanButton = new Button { Text = "Clean", AutoSize = true, Height = 30, Margin = new Padding(0, 0, 0, 6) };
         _cleanButton.Click += OnCleanClicked;
 
-        syncedButtonFlow.Controls.AddRange([_detachButton, _removeButton, _refreshButton, _cleanButton]);
-        syncedLayout.Controls.Add(syncedButtonFlow);
+        syncedButtonFlow.Controls.AddRange([_openFolderButton, _detachButton, _removeButton, _refreshButton, _cleanButton]);
+        syncedTopLayout.Controls.Add(syncedButtonFlow);
 
-        _syncedAccountPanel.Controls.Add(syncedLayout);
+        // Activity list view (fills remaining space below buttons)
+        _activityListView = new ListView
+        {
+            Dock = DockStyle.Fill,
+            View = View.Details,
+            FullRowSelect = true,
+            HeaderStyle = ColumnHeaderStyle.Clickable,
+            ShowItemToolTips = true,
+            OwnerDraw = true,
+        };
+        var em = Font.Height;
+        _activityListView.Columns.Add("Name", 13 * em);
+        _activityListView.Columns.Add("Action", 7 * em);
+        _activityListView.Columns.Add("Status", 7 * em);
+        _activityListView.Columns.Add("Updated", 8 * em);
+
+        _activityListView.DrawColumnHeader += (_, e) => e.DrawDefault = true;
+        _activityListView.DrawItem += (_, _) => { };
+        _activityListView.DrawSubItem += OnDrawActivitySubItem;
+
+        _syncedAccountPanel.Controls.Add(_activityListView);
+        _syncedAccountPanel.Controls.Add(syncedTopLayout);
+        // Z-order: top layout docks Top (last added = first docked), list fills remaining
+        _activityListView.BringToFront();
 
         // ======= Available (non-synced) account panel =======
         _availableAccountPanel = new Panel { Dock = DockStyle.Fill, Visible = false };
@@ -334,6 +368,16 @@ sealed class ManageAccountsForm : Form
         };
         addLoginButton.Click += OnAddLoginClicked;
 
+        var exitButton = new Button
+        {
+            Text = "Exit",
+            AutoSize = true,
+            Height = 30,
+            Anchor = AnchorStyles.Right | AnchorStyles.Top,
+        };
+        exitButton.Location = new Point(bottomPanel.Width - exitButton.Width - 14, 9);
+        exitButton.Click += OnExitClicked;
+
         var closeButton = new Button
         {
             Text = "Close",
@@ -341,10 +385,11 @@ sealed class ManageAccountsForm : Form
             Height = 30,
             Anchor = AnchorStyles.Right | AnchorStyles.Top,
         };
-        closeButton.Location = new Point(bottomPanel.Width - closeButton.Width - 14, 9);
-        closeButton.Click += (_, _) => Close();
+        // Position Close to the left of Exit
+        closeButton.Location = new Point(bottomPanel.Width - exitButton.Width - closeButton.Width - 22, 9);
+        closeButton.Click += (_, _) => Hide();
 
-        bottomPanel.Controls.AddRange([addLoginButton, closeButton]);
+        bottomPanel.Controls.AddRange([addLoginButton, closeButton, exitButton]);
 
         // --- Assemble ---
         Controls.Add(_detailPanel);
@@ -378,6 +423,7 @@ sealed class ManageAccountsForm : Form
 
         _serviceClient.StatusChanged += () =>
         {
+            _outboxDirty = true;
             if (InvokeRequired)
                 BeginInvoke(() => _statusDebounceTimer.Start());
             else
@@ -389,8 +435,182 @@ sealed class ManageAccountsForm : Form
         _refreshTimer.Tick += (_, _) => UpdateStatusText();
         _refreshTimer.Start();
 
+        // Outbox polling timer for inline activity display
+        _outboxTimer = new System.Windows.Forms.Timer { Interval = 500 };
+        _outboxTimer.Tick += OnOutboxTick;
+
         RefreshTree();
         _ = RefreshAllLoginAccountsAsync();
+    }
+
+    private void OnExitClicked(object? sender, EventArgs e)
+    {
+        var result = MessageBox.Show(
+            "This will close the Fastmail Files tray icon.\n\n" +
+            "Your files will continue to sync in the background.",
+            "Fastmail Files",
+            MessageBoxButtons.OKCancel,
+            MessageBoxIcon.Information);
+        if (result == DialogResult.OK)
+        {
+            _appCts.Cancel();
+            Application.ExitThread();
+        }
+    }
+
+    private void OnOpenFolderClicked(object? sender, EventArgs e)
+    {
+        if (_treeView.SelectedNode?.Tag is AccountNode { IsSynced: true, SyncInfo: not null } accountNode)
+            TrayIcon.OpenSyncFolder(accountNode.SyncInfo.SyncRootPath);
+    }
+
+    private async void OnOutboxTick(object? sender, EventArgs e)
+    {
+        if (!_syncedAccountPanel.Visible)
+            return;
+
+        if (!_outboxDirty && !_hasActiveUploads)
+            return;
+
+        _outboxDirty = false;
+
+        var accountId = _displayedAccountId;
+        if (accountId == null) return;
+
+        try
+        {
+            var snapshot = await _serviceClient.GetOutboxAsync(accountId);
+            RefreshActivityList(snapshot.Entries);
+        }
+        catch
+        {
+            // IPC not available — leave list as-is
+        }
+    }
+
+    private void RefreshActivityList(List<OutboxEntry> entries)
+    {
+        var now = DateTime.UtcNow;
+
+        _activityListView.BeginUpdate();
+        _activityListView.Items.Clear();
+
+        var sorted = entries.OrderByDescending(e =>
+            e.IsProcessing ? (e.UploadProgress ?? -1) : -2)
+            .ThenBy(e => e.CreatedAt);
+
+        foreach (var entry in sorted)
+        {
+            var name = entry.LocalPath != null
+                ? Path.GetFileName(entry.LocalPath)
+                : entry.NodeId ?? "(unknown)";
+
+            var action = DeriveAction(entry);
+            string status;
+            int? progress = null;
+            if (entry.IsProcessing)
+            {
+                progress = entry.UploadProgress;
+                status = progress.HasValue ? "" : "Syncing...";
+            }
+            else
+            {
+                status = DeriveStatus(entry, now);
+            }
+
+            var item = new ListViewItem(name);
+            item.SubItems.Add(action);
+            var statusSubItem = item.SubItems.Add(status);
+            if (progress.HasValue)
+                statusSubItem.Tag = progress.Value;
+            item.SubItems.Add(FormatRelativeTime(entry.UpdatedAt, now));
+
+            var tooltip = entry.LocalPath ?? entry.NodeId ?? "";
+            if (progress.HasValue)
+                tooltip += $"\nUploading {progress.Value}%";
+            if (entry.LastError != null)
+                tooltip += $"\nError: {entry.LastError}";
+            item.ToolTipText = tooltip;
+
+            if (entry.IsProcessing)
+                item.ForeColor = Color.DodgerBlue;
+            else if (entry.LastError != null)
+                item.ForeColor = Color.Red;
+
+            _activityListView.Items.Add(item);
+        }
+
+        _activityListView.EndUpdate();
+        _hasActiveUploads = entries.Any(e => e.IsProcessing);
+    }
+
+    private void OnDrawActivitySubItem(object? sender, DrawListViewSubItemEventArgs e)
+    {
+        if (e.ColumnIndex == 2 && e.SubItem?.Tag is int percent)
+        {
+            var g = e.Graphics!;
+            var bounds = e.Bounds;
+
+            using (var bgBrush = new SolidBrush(_activityListView.BackColor))
+                g.FillRectangle(bgBrush, bounds);
+
+            var barHeight = Math.Max(4, bounds.Height / 3);
+            var barY = bounds.Y + (bounds.Height - barHeight) / 2;
+            var trackRect = new Rectangle(bounds.X + 4, barY, bounds.Width - 8, barHeight);
+
+            using (var trackBrush = new SolidBrush(Color.FromArgb(228, 228, 228)))
+                g.FillRectangle(trackBrush, trackRect);
+
+            if (percent > 0)
+            {
+                var fillWidth = (int)(trackRect.Width * percent / 100.0);
+                var fillRect = new Rectangle(trackRect.X, trackRect.Y, fillWidth, trackRect.Height);
+                using var fillBrush = new SolidBrush(Color.DodgerBlue);
+                g.FillRectangle(fillBrush, fillRect);
+            }
+        }
+        else
+        {
+            e.DrawDefault = true;
+        }
+    }
+
+    private static string DeriveAction(OutboxEntry entry)
+    {
+        if (entry.IsDeleted)
+            return "Delete";
+        if (entry.IsFolder && entry.NodeId == null)
+            return "Create folder";
+        if (entry.IsDirtyContent)
+            return "Upload";
+        if (entry.IsDirtyLocation && !entry.IsDirtyContent)
+            return "Move";
+        return "Sync";
+    }
+
+    private static string DeriveStatus(OutboxEntry entry, DateTime now)
+    {
+        if (entry.AttemptCount > 0 && entry.LastError != null)
+            return $"Error ({entry.AttemptCount})";
+        if (entry.NextRetryAfter.HasValue && entry.NextRetryAfter.Value > now)
+            return "Waiting";
+        if (entry.AttemptCount > 0)
+            return "Retrying";
+        return "Pending";
+    }
+
+    private static string FormatRelativeTime(DateTime utcTime, DateTime now)
+    {
+        var elapsed = now - utcTime;
+        if (elapsed.TotalSeconds < 10)
+            return "just now";
+        if (elapsed.TotalSeconds < 60)
+            return $"{(int)elapsed.TotalSeconds} sec ago";
+        if (elapsed.TotalMinutes < 60)
+            return $"{(int)elapsed.TotalMinutes} min ago";
+        if (elapsed.TotalHours < 24)
+            return $"{(int)elapsed.TotalHours} hr ago";
+        return utcTime.ToLocalTime().ToString("g");
     }
 
     private async Task RefreshAllLoginAccountsAsync()
@@ -642,6 +862,9 @@ sealed class ManageAccountsForm : Form
         _displayedLoginId = null;
         _displayedAccountId = null;
 
+        // Stop outbox polling by default — re-enable below if synced account selected
+        _outboxTimer.Stop();
+
         var node = _treeView.SelectedNode;
         if (node == null)
         {
@@ -677,6 +900,7 @@ sealed class ManageAccountsForm : Form
                     _accountStatusLabel.ForeColor = Color.FromArgb(200, 120, 0);
                     _refreshButton.Visible = false;
                     _cleanButton.Visible = false;
+                    _openFolderButton.Visible = false;
                 }
                 else
                 {
@@ -692,8 +916,14 @@ sealed class ManageAccountsForm : Form
                     _accountStatusLabel.ForeColor = default;
                     _refreshButton.Visible = true;
                     _cleanButton.Visible = true;
+                    _openFolderButton.Visible = true;
                 }
                 _syncFolderLabel.Text = $"Folder: {info.SyncRootPath}";
+
+                // Start outbox polling for this account
+                _outboxDirty = true;
+                _activityListView.Items.Clear();
+                _outboxTimer.Start();
             }
             else
             {
@@ -1075,6 +1305,7 @@ sealed class ManageAccountsForm : Form
     private void SetAllButtonsEnabled(bool enabled)
     {
         _operationInProgress = !enabled;
+        _openFolderButton.Enabled = enabled;
         _detachButton.Enabled = enabled;
         _removeButton.Enabled = enabled;
         _refreshButton.Enabled = enabled;
@@ -1089,6 +1320,43 @@ sealed class ManageAccountsForm : Form
     {
         base.OnLoad(e);
         AutoSizeToContent();
+        PositionNearTray();
+    }
+
+    protected override void OnVisibleChanged(EventArgs e)
+    {
+        base.OnVisibleChanged(e);
+        if (Visible)
+        {
+            _outboxDirty = true;
+            // Briefly set TopMost to ensure the panel appears above other windows
+            TopMost = true;
+            BeginInvoke(() => TopMost = false);
+        }
+        else
+        {
+            _outboxTimer.Stop();
+        }
+    }
+
+    protected override void OnDeactivate(EventArgs e)
+    {
+        base.OnDeactivate(e);
+        // Dropbox-style: hide when user clicks elsewhere
+        // Use BeginInvoke to avoid hiding during modal dialogs (MessageBox, AddAccountForm)
+        BeginInvoke(() =>
+        {
+            if (!ContainsFocus && !_operationInProgress)
+                Hide();
+        });
+    }
+
+    private void PositionNearTray()
+    {
+        var screen = Screen.PrimaryScreen?.WorkingArea ?? Screen.FromControl(this).WorkingArea;
+        var x = screen.Right - Width - 8;
+        var y = screen.Bottom - Height - 8;
+        Location = new Point(x, y);
     }
 
     private void AutoSizeToContent()
@@ -1152,18 +1420,18 @@ sealed class ManageAccountsForm : Form
 
         Size = new Size(finalWidth, finalHeight);
         _treeView.Width = treeWidth;
-
-        // Re-center after resize
-        if (StartPosition == FormStartPosition.CenterScreen)
-        {
-            Location = new Point(
-                screen.X + (screen.Width - finalWidth) / 2,
-                screen.Y + (screen.Height - finalHeight) / 2);
-        }
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
+        if (e.CloseReason == CloseReason.UserClosing)
+        {
+            e.Cancel = true;
+            Hide();
+            return;
+        }
+        _outboxTimer.Stop();
+        _outboxTimer.Dispose();
         _refreshTimer.Stop();
         _refreshTimer.Dispose();
         _statusDebounceTimer.Stop();

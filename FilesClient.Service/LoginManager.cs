@@ -223,8 +223,12 @@ sealed class LoginManager : IDisposable
             Console.Error.WriteLine($"Error stopping supervisor {supervisor.DisplayName}: {ex.Message}");
         }
 
-        CleanSupervisorSyncRoot(supervisor);
+        // Dispose first to disconnect from the cloud filter driver — otherwise
+        // CfConnectSyncRoot holds handles on directories and deletion fails
+        // with ACCESS_DENIED (error 5).
         supervisor.Dispose();
+
+        CleanSupervisorSyncRoot(supervisor);
 
         lock (_lock)
             _supervisors.Remove(supervisor);
@@ -657,18 +661,21 @@ sealed class LoginManager : IDisposable
             Console.Error.WriteLine($"Error stopping supervisor {supervisor.DisplayName}: {ex.Message}");
         }
 
-        // Clean: unregister + delete all files
-        CleanSupervisorSyncRoot(supervisor);
-
         var displayName = supervisor.DisplayName;
         var syncRootPath = supervisor.SyncRootPath;
         var username = supervisor.Username;
         var accounts = session.Client.GetFileNodeAccounts();
         var isPrimary = accounts.FirstOrDefault(a => a.AccountId == accountId).IsPrimary;
 
+        // Dispose first to disconnect from the cloud filter driver — otherwise
+        // CfConnectSyncRoot holds handles on directories and deletion fails
+        // with ACCESS_DENIED (error 5).
         supervisor.Dispose();
         lock (_lock)
             _supervisors.Remove(supervisor);
+
+        // Clean: unregister + delete all files
+        CleanSupervisorSyncRoot(supervisor);
 
         // Delete node cache
         var scopeKey = $"{username}/{accountId}";

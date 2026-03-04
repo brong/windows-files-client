@@ -16,12 +16,10 @@ sealed class TrayIcon : IDisposable
     private readonly ManualResetEventSlim _ready = new();
     private Thread? _thread;
     private NotifyIcon? _notifyIcon;
-    private ContextMenuStrip? _contextMenu;
     private SynchronizationContext? _syncContext;
     private Icon? _baseIcon;
     private IntPtr _currentHIcon;
     private bool _disposed;
-    private StatusForm? _statusForm;
     private ManageAccountsForm? _manageForm;
     private Color _lastDotColor;
     private readonly System.Windows.Forms.Timer _refreshTimer = new() { Interval = 300 };
@@ -51,7 +49,7 @@ sealed class TrayIcon : IDisposable
 
     public void ShowManageAccounts()
     {
-        _syncContext?.Post(_ => OpenManageAccountsForm(), null);
+        _syncContext?.Post(_ => ToggleManageAccountsForm(), null);
     }
 
     private void OnAccountsChanged()
@@ -199,21 +197,15 @@ sealed class TrayIcon : IDisposable
     {
         _baseIcon = LoadBaseIcon();
 
-        _contextMenu = new ContextMenuStrip();
-        _contextMenu.Opening += (_, _) =>
-        {
-            // Rebuild menu items with fresh state each time user opens the menu
-            PopulateContextMenu();
-            // Kick off a connection check — if the pipe is dead this will
-            // update state and rebuild the menu immediately after
-            _ = CheckAndRebuildMenuAsync();
-        };
-
         _notifyIcon = new NotifyIcon
         {
             Visible = true,
             Text = "Fastmail Files - Starting...",
-            ContextMenuStrip = _contextMenu,
+        };
+
+        _notifyIcon.MouseClick += (_, e) =>
+        {
+            ToggleManageAccountsForm();
         };
 
         SetIconWithDot(Color.Gray);
@@ -249,8 +241,6 @@ sealed class TrayIcon : IDisposable
         _notifyIcon.Visible = false;
         _notifyIcon.Dispose();
         _notifyIcon = null;
-        _contextMenu.Dispose();
-        _contextMenu = null;
         DestroyCurrentHIcon();
         _baseIcon?.Dispose();
     }
@@ -300,90 +290,7 @@ sealed class TrayIcon : IDisposable
         }
     }
 
-    private async Task CheckAndRebuildMenuAsync()
-    {
-        var wasPreviouslyConnected = _serviceClient.IsConnected;
-        await _serviceClient.CheckConnectionAsync();
-        // If the check changed the connection state, rebuild the open menu
-        if (wasPreviouslyConnected != _serviceClient.IsConnected)
-        {
-            PopulateContextMenu();
-            RefreshTooltip();
-        }
-    }
-
-    private void PopulateContextMenu()
-    {
-        if (_contextMenu == null) return;
-        _contextMenu.Items.Clear();
-
-        var connected = _serviceClient.IsConnected;
-
-        if (!connected)
-        {
-            _contextMenu.Items.Add(new ToolStripMenuItem("Service not running") { Enabled = false });
-        }
-        else
-        {
-            var accounts = _serviceClient.Accounts;
-            var connecting = _serviceClient.ConnectingLoginIds;
-            var failed = _serviceClient.FailedLogins;
-
-            if (accounts.Count == 0 && connecting.Count == 0 && failed.Count == 0)
-            {
-                var noAccounts = new ToolStripMenuItem("No accounts configured") { Enabled = false };
-                _contextMenu.Items.Add(noAccounts);
-            }
-            else if (accounts.Count == 0 && failed.Count == 0)
-            {
-                foreach (var loginId in connecting)
-                    _contextMenu.Items.Add(new ToolStripMenuItem($"{loginId} \u2014 Connecting...") { Enabled = false });
-            }
-            else if (accounts.Count == 1 && connecting.Count == 0 && failed.Count == 0)
-            {
-                var a = accounts[0];
-                _contextMenu.Items.Add($"Open {a.DisplayName}", null, (_, _) => OpenSyncFolder(a.SyncRootPath));
-                _contextMenu.Items.Add("View pending changes...", null, (_, _) => ShowStatusForm(a));
-            }
-            else
-            {
-                foreach (var a in accounts)
-                {
-                    var sub = new ToolStripMenuItem(a.DisplayName);
-                    var captured = a;
-                    sub.DropDownItems.Add("Open sync folder", null, (_, _) => OpenSyncFolder(captured.SyncRootPath));
-                    sub.DropDownItems.Add("View pending changes...", null, (_, _) => ShowStatusForm(captured));
-                    _contextMenu.Items.Add(sub);
-                }
-                foreach (var loginId in connecting)
-                    _contextMenu.Items.Add(new ToolStripMenuItem($"{loginId} \u2014 Connecting...") { Enabled = false });
-                foreach (var f in failed)
-                    _contextMenu.Items.Add(new ToolStripMenuItem($"{f.LoginId} \u2014 Offline") { Enabled = false, ForeColor = Color.FromArgb(200, 120, 0) });
-            }
-        }
-
-        _contextMenu.Items.Add(new ToolStripSeparator());
-        _contextMenu.Items.Add("Manage accounts...", null, (_, _) => OpenManageAccountsForm());
-
-        _contextMenu.Items.Add(new ToolStripSeparator());
-
-        _contextMenu.Items.Add("Exit", null, (_, _) =>
-        {
-            var result = MessageBox.Show(
-                "This will close the Fastmail Files tray icon.\n\n" +
-                "Your files will continue to sync in the background.",
-                "Fastmail Files",
-                MessageBoxButtons.OKCancel,
-                MessageBoxIcon.Information);
-            if (result == DialogResult.OK)
-            {
-                _cts.Cancel();
-                Application.ExitThread();
-            }
-        });
-    }
-
-    private static void OpenSyncFolder(string path)
+    public static void OpenSyncFolder(string path)
     {
         try
         {
@@ -396,32 +303,18 @@ sealed class TrayIcon : IDisposable
         catch { /* best-effort */ }
     }
 
-    private void ShowStatusForm(AccountInfo account)
+    private void ToggleManageAccountsForm()
     {
-        _syncContext?.Post(_ =>
+        if (_manageForm != null && !_manageForm.IsDisposed && _manageForm.Visible)
         {
-            if (_statusForm == null || _statusForm.IsDisposed)
-                _statusForm = new StatusForm(account.Username, account.AccountId, _serviceClient);
+            _manageForm.Hide();
+            return;
+        }
 
-            if (_statusForm.Visible)
-                _statusForm.Activate();
-            else
-                _statusForm.Show();
-        }, null);
-    }
+        if (_manageForm == null || _manageForm.IsDisposed)
+            _manageForm = new ManageAccountsForm(_serviceClient, _cts);
 
-    private void OpenManageAccountsForm()
-    {
-        _syncContext?.Post(_ =>
-        {
-            if (_manageForm == null || _manageForm.IsDisposed)
-                _manageForm = new ManageAccountsForm(_serviceClient);
-
-            if (_manageForm.Visible)
-                _manageForm.Activate();
-            else
-                _manageForm.Show();
-        }, null);
+        _manageForm.Show();
     }
 
     public void Dispose()
