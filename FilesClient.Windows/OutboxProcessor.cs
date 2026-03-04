@@ -321,6 +321,9 @@ public class OutboxProcessor : IDisposable
                         await _queue.EnqueueAsync(QueuePriority.Background,
                             () => _jmapClient.MoveFileNodeAsync(change.NodeId, parentId, fileName, ct: ct), ct);
                     }
+                    // File may have been replaced with a non-placeholder copy (e.g. local
+                    // "copy over existing") — convert back to placeholder before SetInSync.
+                    SyncEngine.EnsurePlaceholder(change.LocalPath, change.NodeId);
                     SyncEngine.SetInSync(change.LocalPath);
                     return true;
                 }
