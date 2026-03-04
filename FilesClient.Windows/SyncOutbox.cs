@@ -87,6 +87,24 @@ public class SyncOutbox : IDisposable
         get { lock (_lock) return _entries.Count; }
     }
 
+    /// <summary>Delete all persisted state and clear in-memory entries.</summary>
+    public void Clear()
+    {
+        lock (_lock)
+        {
+            _entries.Clear();
+            _byPath.Clear();
+            _byNodeId.Clear();
+            _processingIds.Clear();
+            _dirty = false;
+        }
+
+        try { if (File.Exists(_persistPath)) File.Delete(_persistPath); }
+        catch { }
+
+        Log("Outbox cleared");
+    }
+
     /// <summary>Load persisted state from disk. Call once at startup.</summary>
     public void Load()
     {

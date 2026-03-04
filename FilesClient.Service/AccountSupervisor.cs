@@ -64,6 +64,8 @@ sealed class AccountSupervisor : IDisposable
         }
 
         _engine = new SyncEngine(_syncRootPath, _jmapClient, _queue, _jmapClient.Context.ScopeKey, _displayName);
+        if (clean)
+            _engine.ClearOutbox();
         _engine.StatusChanged += OnEngineStatusChanged;
         _engine.StatusDetailChanged += OnEngineStatusDetailChanged;
         _engine.PendingCountChanged += OnEnginePendingCountChanged;

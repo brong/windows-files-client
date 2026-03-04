@@ -238,22 +238,15 @@ sealed class LoginManager : IDisposable
         lock (_lock)
             _supervisors.Remove(supervisor);
 
-        // Update or remove the stored credential
+        // Update the stored credential — keep session alive even with 0 accounts
+        // so the user can re-enable accounts without re-adding the login.
         if (session != null)
         {
             var remaining = GetActiveAccountIds(session.LoginId);
             if (remaining.Count == 0)
-            {
                 StopPushWatcher(session);
-                _credentialStore.Remove(session.LoginId);
-                lock (_lock)
-                    _sessions.Remove(session);
-            }
-            else
-            {
-                _credentialStore.Save(session.LoginId, session.Token, session.SessionUrl, remaining,
-                    session.RefreshToken, session.TokenEndpoint, session.ClientId, session.ExpiresAtUnixSeconds);
-            }
+            _credentialStore.Save(session.LoginId, session.Token, session.SessionUrl, remaining,
+                session.RefreshToken, session.TokenEndpoint, session.ClientId, session.ExpiresAtUnixSeconds);
         }
 
         // Clean up any orphaned sync root registrations left behind by
@@ -561,17 +554,9 @@ sealed class LoginManager : IDisposable
         {
             var remaining = GetActiveAccountIds(session.LoginId);
             if (remaining.Count == 0)
-            {
                 StopPushWatcher(session);
-                _credentialStore.Remove(session.LoginId);
-                lock (_lock)
-                    _sessions.Remove(session);
-            }
-            else
-            {
-                _credentialStore.Save(session.LoginId, session.Token, session.SessionUrl, remaining,
-                    session.RefreshToken, session.TokenEndpoint, session.ClientId, session.ExpiresAtUnixSeconds);
-            }
+            _credentialStore.Save(session.LoginId, session.Token, session.SessionUrl, remaining,
+                session.RefreshToken, session.TokenEndpoint, session.ClientId, session.ExpiresAtUnixSeconds);
         }
 
         AccountsChanged?.Invoke();
@@ -770,6 +755,10 @@ sealed class LoginManager : IDisposable
             supervisor.Dispose();
             throw;
         }
+
+        // Restart push watcher if it was stopped (e.g. all accounts were removed then one re-enabled)
+        if (session.PushTask == null)
+            StartPushWatcher(session, session.ParentCt);
 
         // Update credential store with new enabled set
         var enabled = GetActiveAccountIds(loginId);

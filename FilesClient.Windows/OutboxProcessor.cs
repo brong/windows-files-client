@@ -101,7 +101,7 @@ public class OutboxProcessor : IDisposable
             catch (OperationCanceledException) { break; }
             catch (Exception ex)
             {
-                LogError($"Outbox dispatch error: {ex.Message}");
+                LogError($"Outbox dispatch error: {ex}");
                 try { await Task.Delay(1000, ct); }
                 catch (OperationCanceledException) { break; }
             }

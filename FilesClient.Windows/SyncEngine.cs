@@ -197,6 +197,9 @@ public class SyncEngine : IDisposable
         _outboxProcessor = new OutboxProcessor(_outbox, this, jmapClient, queue, _logPrefix);
     }
 
+    /// <summary>Clear persisted outbox state (e.g. after --clean). Call before PopulateAsync.</summary>
+    public void ClearOutbox() => _outbox.Clear();
+
     public async Task RegisterAsync(string displayName, string accountId, string? iconPath = null)
     {
         await _syncRoot.RegisterAsync(displayName, "1.0", accountId, iconPath);
