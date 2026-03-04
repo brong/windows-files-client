@@ -23,6 +23,8 @@ sealed class TrayIcon : IDisposable
     private bool _disposed;
     private StatusForm? _statusForm;
     private ManageAccountsForm? _manageForm;
+    private Color _lastDotColor;
+    private readonly System.Windows.Forms.Timer _refreshTimer = new() { Interval = 300 };
 
     public TrayIcon(CancellationTokenSource cts, string? iconPath, ServiceClient serviceClient)
     {
@@ -54,29 +56,31 @@ sealed class TrayIcon : IDisposable
 
     private void OnAccountsChanged()
     {
-        _syncContext?.Post(_ =>
-        {
-            if (_notifyIcon == null) return;
-            PopulateContextMenu();
-            RefreshTooltip();
-        }, null);
+        ScheduleRefresh();
     }
 
     private void OnStatusChanged()
     {
-        _syncContext?.Post(_ =>
-        {
-            if (_notifyIcon == null) return;
-            RefreshTooltip();
-        }, null);
+        ScheduleRefresh();
     }
 
     private void OnConnectionChanged(bool connected)
     {
+        ScheduleRefresh();
+    }
+
+    /// <summary>
+    /// Coalesce rapid-fire status/account events into a single UI refresh.
+    /// The timer runs on the STA thread so the Tick handler is safe for UI work.
+    /// </summary>
+    private void ScheduleRefresh()
+    {
         _syncContext?.Post(_ =>
         {
             if (_notifyIcon == null) return;
-            RefreshTooltip();
+            // Restart the timer — only the last event in a burst actually fires
+            _refreshTimer.Stop();
+            _refreshTimer.Start();
         }, null);
     }
 
@@ -215,6 +219,15 @@ sealed class TrayIcon : IDisposable
         SetIconWithDot(Color.Gray);
 
         _syncContext = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
+
+        // Debounce timer for coalescing rapid status events
+        _refreshTimer.Tick += (_, _) =>
+        {
+            _refreshTimer.Stop();
+            if (_notifyIcon != null)
+                RefreshTooltip();
+        };
+
         _ready.Set();
 
         // One-shot timer to refresh UI once the message loop is pumping
@@ -231,6 +244,8 @@ sealed class TrayIcon : IDisposable
         Application.Run();
 
         // Cleanup after Application.ExitThread()
+        _refreshTimer.Stop();
+        _refreshTimer.Dispose();
         _notifyIcon.Visible = false;
         _notifyIcon.Dispose();
         _notifyIcon = null;
@@ -254,6 +269,8 @@ sealed class TrayIcon : IDisposable
     private void SetIconWithDot(Color dotColor)
     {
         if (_notifyIcon == null || _baseIcon == null) return;
+        if (dotColor == _lastDotColor && _currentHIcon != IntPtr.Zero) return;
+        _lastDotColor = dotColor;
 
         using var bmp = new Bitmap(16, 16);
         using (var g = Graphics.FromImage(bmp))
@@ -352,8 +369,17 @@ sealed class TrayIcon : IDisposable
 
         _contextMenu.Items.Add("Exit", null, (_, _) =>
         {
-            _cts.Cancel();
-            Application.ExitThread();
+            var result = MessageBox.Show(
+                "This will close the Fastmail Files tray icon.\n\n" +
+                "Your files will continue to sync in the background.",
+                "Fastmail Files",
+                MessageBoxButtons.OKCancel,
+                MessageBoxIcon.Information);
+            if (result == DialogResult.OK)
+            {
+                _cts.Cancel();
+                Application.ExitThread();
+            }
         });
     }
 

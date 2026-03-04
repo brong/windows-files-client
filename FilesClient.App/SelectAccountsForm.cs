@@ -26,6 +26,7 @@ sealed class SelectAccountsForm : Form
         MinimizeBox = false;
         StartPosition = FormStartPosition.CenterParent;
         ShowInTaskbar = false;
+        AppIcon.Apply(this);
 
         var pad = em;
         var labelY = em;

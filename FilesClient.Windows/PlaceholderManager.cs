@@ -23,21 +23,44 @@ internal class PlaceholderManager
         _logPrefix = logPrefix;
     }
 
+    // Names that are reserved path components on Windows — a folder named ".."
+    // would resolve to the parent directory via Path.Combine.
+    private static readonly HashSet<string> ReservedNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".", "..",
+        "CON", "PRN", "AUX", "NUL",
+        "COM0", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT0", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    };
+
     /// <summary>
-    /// Replace characters that are invalid in Windows filenames with underscore.
+    /// Replace characters that are invalid in Windows filenames with underscore,
+    /// and prefix reserved names (., .., CON, etc.) to avoid path traversal
+    /// or device name collisions.
     /// </summary>
     internal static string SanitizeName(string name)
     {
-        if (name.IndexOfAny(InvalidChars) < 0)
-            return name;
+        var result = name;
 
-        var chars = name.ToCharArray();
-        for (int i = 0; i < chars.Length; i++)
+        if (result.IndexOfAny(InvalidChars) >= 0)
         {
-            if (Array.IndexOf(InvalidChars, chars[i]) >= 0)
-                chars[i] = '_';
+            var chars = result.ToCharArray();
+            for (int i = 0; i < chars.Length; i++)
+            {
+                if (Array.IndexOf(InvalidChars, chars[i]) >= 0)
+                    chars[i] = '_';
+            }
+            result = new string(chars);
         }
-        return new string(chars).TrimEnd(' ', '.');
+
+        result = result.TrimEnd(' ', '.');
+
+        // After trimming, check if empty or a reserved name (e.g. ".." or "CON").
+        // Prefix with underscore to avoid path traversal or device name collisions.
+        if (result.Length == 0 || ReservedNames.Contains(result))
+            result = "_" + result;
+
+        return result;
     }
 
     public unsafe void CreatePlaceholders(string parentPath, FileNode[] children)

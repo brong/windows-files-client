@@ -68,6 +68,7 @@ sealed class ManageAccountsForm : Form
         MinimumSize = new Size(700, 400);
         StartPosition = FormStartPosition.CenterScreen;
         ShowInTaskbar = true;
+        AppIcon.Apply(this);
 
         // --- TreeView on the left ---
         _treeView = new TreeView

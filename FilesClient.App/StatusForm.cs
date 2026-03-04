@@ -27,6 +27,7 @@ sealed class StatusForm : Form
         MinimumSize = new Size(26 * em, 16 * em);
         StartPosition = FormStartPosition.CenterScreen;
         ShowInTaskbar = true;
+        AppIcon.Apply(this);
 
         // Account header
         _headerLabel = new Label
