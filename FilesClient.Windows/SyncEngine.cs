@@ -145,6 +145,30 @@ public class SyncEngine : IDisposable
     private void Log(string msg) => Console.WriteLine($"{_logPrefix} {msg}");
     private void LogError(string msg) => Console.Error.WriteLine($"{_logPrefix} {msg}");
 
+    /// <summary>
+    /// Map a server node to a local path, but only if the path exists on disk
+    /// and isn't already mapped to a different node.
+    /// Returns true if the mapping was established.
+    /// </summary>
+    private bool TryMapNode(string path, string nodeId)
+    {
+        if (!Path.Exists(path))
+            return false;
+
+        // Don't overwrite an existing mapping to a different node
+        // (e.g. two server files with the same sanitized name)
+        if (_pathToNodeId.TryGetValue(path, out var existingNodeId)
+            && existingNodeId != nodeId)
+        {
+            Log($"  Skipping mapping for node {nodeId}: path already mapped to {existingNodeId}: {path}");
+            return false;
+        }
+
+        _pathToNodeId[path] = nodeId;
+        _nodeIdToPath[nodeId] = path;
+        return true;
+    }
+
     public SyncEngine(string syncRootPath, IJmapClient jmapClient, JmapQueue queue, string scopeKey, string displayName)
     {
         _syncRootPath = syncRootPath;
@@ -375,12 +399,12 @@ public class SyncEngine : IDisposable
             foreach (var child in children)
             {
                 var childPath = Path.Combine(localParentPath, PlaceholderManager.SanitizeName(child.Name));
-                _pathToNodeId[childPath] = child.Id;
-                _nodeIdToPath[child.Id] = childPath;
+                if (!TryMapNode(childPath, child.Id))
+                    continue;
                 TrackFolderPermissions(child, childPath);
 
                 // Ensure pre-existing items are proper placeholders and in-sync
-                if (Path.Exists(childPath) && !newChildren.Contains(child))
+                if (!newChildren.Contains(child))
                 {
                     try { SetInSync(childPath); }
                     catch
@@ -704,28 +728,38 @@ public class SyncEngine : IDisposable
                     }
                 }
 
-                _pathToNodeId[expectedPath] = child.Id;
-                _nodeIdToPath[child.Id] = expectedPath;
-                TrackFolderPermissions(child, expectedPath);
-
-                if (!Path.Exists(expectedPath))
-                    newChildren.Add(child);
-                else
+                if (Path.Exists(expectedPath))
                 {
-                    try { SetInSync(expectedPath); }
-                    catch
+                    if (TryMapNode(expectedPath, child.Id))
                     {
-                        if (ReadPlaceholderNodeId(expectedPath) == null)
+                        TrackFolderPermissions(child, expectedPath);
+                        try { SetInSync(expectedPath); }
+                        catch
                         {
-                            try { ConvertToPlaceholder(expectedPath, child.Id, child.IsFolder); }
-                            catch { }
+                            if (ReadPlaceholderNodeId(expectedPath) == null)
+                            {
+                                try { ConvertToPlaceholder(expectedPath, child.Id, child.IsFolder); }
+                                catch { }
+                            }
                         }
                     }
+                }
+                else
+                {
+                    newChildren.Add(child);
                 }
             }
 
             if (newChildren.Count > 0)
                 _placeholderManager.CreatePlaceholders(localParentPath, newChildren.ToArray());
+
+            // Second pass: map newly created items that now exist on disk
+            foreach (var child in newChildren)
+            {
+                var childPath = Path.Combine(localParentPath, PlaceholderManager.SanitizeName(child.Name));
+                if (TryMapNode(childPath, child.Id))
+                    TrackFolderPermissions(child, childPath);
+            }
         }
 
         // Mark directories as ALWAYS_FULL
@@ -880,21 +914,19 @@ public class SyncEngine : IDisposable
             }
             else
             {
-                // No rename — just ensure mappings are up-to-date
-                _pathToNodeId[newPath] = node.Id;
-                _nodeIdToPath[node.Id] = newPath;
-                TrackFolderPermissions(node, newPath);
+                // No rename — create placeholder if missing, then map
                 if (!Path.Exists(newPath))
                 {
                     using (SuspendFolderProtection(parentPath))
                         _placeholderManager.CreatePlaceholders(parentPath, [node]);
                 }
-                else
+                if (TryMapNode(newPath, node.Id))
                 {
+                    TrackFolderPermissions(node, newPath);
                     try { SetInSync(newPath); }
-                    catch { /* not a placeholder — ignore */ }
+                    catch { /* not a placeholder or just created — ignore */ }
+                    ApplyWriteProtection(newPath);
                 }
-                ApplyWriteProtection(newPath);
             }
         }
 
@@ -915,30 +947,34 @@ public class SyncEngine : IDisposable
                 continue;
 
             var childPath = Path.Combine(parentPath, PlaceholderManager.SanitizeName(node.Name));
-            _pathToNodeId[childPath] = node.Id;
-            _nodeIdToPath[node.Id] = childPath;
-            TrackFolderPermissions(node, childPath);
-            if (!Path.Exists(childPath))
+            bool existed = Path.Exists(childPath);
+            if (!existed)
             {
                 Log($"  Created node {node.Id}: creating placeholder at {childPath}");
                 using (SuspendFolderProtection(parentPath))
                     _placeholderManager.CreatePlaceholders(parentPath, [node]);
-
-                // If this file was created under a pinned directory, hydrate it
-                if (!node.IsFolder && IsUnderPinnedDirectory(childPath))
-                {
-                    try { HydratePlaceholder(childPath); }
-                    catch (Exception ex)
-                    {
-                        LogError($"  Auto-hydration failed for {node.Name}: {ex.Message}");
-                    }
-                }
             }
-            else
+
+            if (!TryMapNode(childPath, node.Id))
+            {
+                Log($"  Created node {node.Id}: not on disk or path conflict, skipping");
+                continue;
+            }
+            TrackFolderPermissions(node, childPath);
+
+            if (existed)
             {
                 Log($"  Created node {node.Id}: path exists, SetInSync {childPath}");
                 try { SetInSync(childPath); }
                 catch (Exception ex) { LogError($"  SetInSync failed for {childPath}: {ex.Message}"); }
+            }
+            else if (!node.IsFolder && IsUnderPinnedDirectory(childPath))
+            {
+                try { HydratePlaceholder(childPath); }
+                catch (Exception ex)
+                {
+                    LogError($"  Auto-hydration failed for {node.Name}: {ex.Message}");
+                }
             }
             ApplyWriteProtection(childPath);
         }
