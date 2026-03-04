@@ -922,9 +922,10 @@ sealed class ManageAccountsForm : Form
         else if (node?.Tag is AccountNode an)
             newAccountId = an.AccountId;
 
-        // If the same synced account is still selected, just update labels
-        // without clearing the activity list or restarting the outbox timer.
+        // If the same synced account is still selected AND we're already showing
+        // the synced panel, just update labels without clearing the activity list.
         if (newAccountId != null && newAccountId == _displayedAccountId
+            && _syncedAccountPanel.Visible
             && node?.Tag is AccountNode sameAn && sameAn.IsSynced && sameAn.SyncInfo != null)
         {
             UpdateSyncedAccountLabels(sameAn);
