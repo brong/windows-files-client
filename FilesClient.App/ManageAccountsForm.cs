@@ -707,6 +707,7 @@ sealed class ManageAccountsForm : Form
         var accounts = _serviceClient.Accounts;
         var connectingIds = _serviceClient.ConnectingLoginIds;
         var failedLogins = _serviceClient.FailedLogins;
+        var serviceConnected = _serviceClient.IsConnected;
 
         // Preserve selection
         string? selectedLoginId = null;
@@ -722,6 +723,16 @@ sealed class ManageAccountsForm : Form
 
         _treeView.BeginUpdate();
         _treeView.Nodes.Clear();
+
+        if (!serviceConnected)
+        {
+            _treeView.Nodes.Add(new TreeNode("Service not running")
+                { ForeColor = Color.Gray });
+            _treeView.EndUpdate();
+            _suppressSelectionChanged = false;
+            OnSelectionChanged();
+            return;
+        }
 
         // Group synced accounts by loginId
         var byLogin = accounts

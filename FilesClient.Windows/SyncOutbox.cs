@@ -552,6 +552,7 @@ public class SyncOutbox : IDisposable
             _workSignal.Reset();
         }
         catch (ObjectDisposedException) { }
+        catch (UnauthorizedAccessException) { /* disposed ManualResetEventSlim on some runtimes */ }
     }
 
     /// <summary>Force a save of the outbox to disk.</summary>

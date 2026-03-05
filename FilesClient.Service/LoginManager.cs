@@ -479,6 +479,7 @@ sealed class LoginManager : IDisposable
 
         // Restart supervisors for accounts still on server that were previously synced
         var enabledAccountIds = new HashSet<string>();
+        var updateStarted = new List<AccountSupervisor>();
         foreach (var (accountId, accountName, isPrimary) in newAccounts)
         {
             if (!previouslyActive.Contains(accountId))
@@ -496,8 +497,6 @@ sealed class LoginManager : IDisposable
                 SanitizeFolderName(displayName));
 
             var supervisor = new AccountSupervisor(client, syncRootPath, displayName, _debug);
-            supervisor.StatusChanged += _ => RaiseAggregateStatus();
-            supervisor.PendingCountChanged += _ => RaiseAggregateStatus();
 
             lock (_lock)
                 _supervisors.Add(supervisor);
@@ -505,6 +504,7 @@ sealed class LoginManager : IDisposable
             try
             {
                 await supervisor.StartAsync(iconPath, clean: false, ct);
+                updateStarted.Add(supervisor);
             }
             catch (Exception ex)
             {
@@ -513,6 +513,12 @@ sealed class LoginManager : IDisposable
                     _supervisors.Remove(supervisor);
                 supervisor.Dispose();
             }
+        }
+
+        foreach (var supervisor in updateStarted)
+        {
+            supervisor.StatusChanged += _ => RaiseAggregateStatus();
+            supervisor.PendingCountChanged += _ => RaiseAggregateStatus();
         }
 
         // Restart push watcher
@@ -912,8 +918,9 @@ sealed class LoginManager : IDisposable
 
         // Start supervisors for newly enabled accounts
         var currentActive = GetActiveAccountIds(loginId);
-        var accounts = session.Client.GetFileNodeAccounts();
-        foreach (var (accountId, accountName, isPrimary) in accounts)
+        var configAccounts = session.Client.GetFileNodeAccounts();
+        var configStarted = new List<AccountSupervisor>();
+        foreach (var (accountId, accountName, isPrimary) in configAccounts)
         {
             if (!enabledAccountIds.Contains(accountId) || currentActive.Contains(accountId))
                 continue;
@@ -928,8 +935,6 @@ sealed class LoginManager : IDisposable
                 SanitizeFolderName(displayName));
 
             var supervisor = new AccountSupervisor(client, syncRootPath, displayName, _debug);
-            supervisor.StatusChanged += _ => RaiseAggregateStatus();
-            supervisor.PendingCountChanged += _ => RaiseAggregateStatus();
 
             lock (_lock)
                 _supervisors.Add(supervisor);
@@ -937,6 +942,7 @@ sealed class LoginManager : IDisposable
             try
             {
                 await supervisor.StartAsync(iconPath, clean, ct);
+                configStarted.Add(supervisor);
             }
             catch (Exception ex)
             {
@@ -945,6 +951,12 @@ sealed class LoginManager : IDisposable
                     _supervisors.Remove(supervisor);
                 supervisor.Dispose();
             }
+        }
+
+        foreach (var supervisor in configStarted)
+        {
+            supervisor.StatusChanged += _ => RaiseAggregateStatus();
+            supervisor.PendingCountChanged += _ => RaiseAggregateStatus();
         }
 
         // Update stored credential with new selection
@@ -1037,7 +1049,10 @@ sealed class LoginManager : IDisposable
         lock (_lock)
             _sessions.Add(session);
 
-        // Create a supervisor for each enabled account
+        // Create a supervisor for each enabled account.
+        // Wire up status events AFTER all supervisors start so that
+        // intermediate status changes don't cause premature UI updates.
+        var startedSupervisors = new List<AccountSupervisor>();
         foreach (var (accountId, accountName, isPrimary) in accounts)
         {
             // Skip accounts not in the enabled set (null = all enabled)
@@ -1054,8 +1069,6 @@ sealed class LoginManager : IDisposable
                 SanitizeFolderName(displayName));
 
             var supervisor = new AccountSupervisor(client, syncRootPath, displayName, _debug);
-            supervisor.StatusChanged += _ => RaiseAggregateStatus();
-            supervisor.PendingCountChanged += _ => RaiseAggregateStatus();
 
             lock (_lock)
                 _supervisors.Add(supervisor);
@@ -1063,6 +1076,7 @@ sealed class LoginManager : IDisposable
             try
             {
                 await supervisor.StartAsync(iconPath, clean, ct);
+                startedSupervisors.Add(supervisor);
             }
             catch (Exception ex)
             {
@@ -1071,6 +1085,13 @@ sealed class LoginManager : IDisposable
                     _supervisors.Remove(supervisor);
                 supervisor.Dispose();
             }
+        }
+
+        // Now wire up status events — all accounts are visible at once
+        foreach (var supervisor in startedSupervisors)
+        {
+            supervisor.StatusChanged += _ => RaiseAggregateStatus();
+            supervisor.PendingCountChanged += _ => RaiseAggregateStatus();
         }
 
         // Start shared push watcher for this session
