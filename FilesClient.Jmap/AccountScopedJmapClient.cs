@@ -279,7 +279,11 @@ public class AccountScopedJmapClient : IJmapClient
         {
             quotaCallId = NextCallId();
             capabilities = [JmapClient.CoreCapability, JmapClient.FileNodeCapability, JmapClient.QuotaCapability];
-            calls.Add(("Quota/get", new { accountId = _accountId, ids = (string[]?)null }, quotaCallId));
+            calls.Add(("Quota/get", new Dictionary<string, JsonElement>
+            {
+                ["accountId"] = JsonSerializer.SerializeToElement(_accountId),
+                ["ids"] = JsonSerializer.SerializeToElement<string[]?>(null),
+            }, quotaCallId));
         }
 
         var request = JmapRequest.Create(capabilities, calls.ToArray());
@@ -538,7 +542,11 @@ public class AccountScopedJmapClient : IJmapClient
 
         var result = await CallAsync<GetResponse<Quota>>(
             [JmapClient.CoreCapability, JmapClient.QuotaCapability],
-            "Quota/get", new { accountId = _accountId, ids = (string[]?)null }, ct);
+            "Quota/get", new Dictionary<string, JsonElement>
+            {
+                ["accountId"] = JsonSerializer.SerializeToElement(_accountId),
+                ["ids"] = JsonSerializer.SerializeToElement<string[]?>(null),
+            }, ct);
         return result.List;
     }
 
