@@ -402,6 +402,31 @@ sealed class LoginManager : IDisposable
         {
             jmapClient = new JmapClient(token, _debug);
         }
+
+        // Subscribe to token refresh events BEFORE ConnectAsync so refreshes
+        // during the initial session fetch are persisted.
+        LoginSession? newSession = null;
+        if (oauthHandler != null)
+        {
+            oauthHandler.TokenRefreshed += handler =>
+            {
+                var s = newSession;
+                if (s != null)
+                {
+                    s.Token = handler.AccessToken;
+                    if (handler.RefreshToken != null)
+                        s.RefreshToken = handler.RefreshToken;
+                    s.ExpiresAtUnixSeconds = handler.ExpiresAt.ToUnixTimeSeconds();
+                }
+
+                var activeIds = s != null ? GetActiveAccountIds(loginId) : null;
+                _credentialStore.Save(loginId, handler.AccessToken, sessionUrl,
+                    activeIds is { Count: > 0 } ? activeIds : null,
+                    handler.RefreshToken, handler.TokenEndpoint, handler.ClientId,
+                    handler.ExpiresAt.ToUnixTimeSeconds());
+            };
+        }
+
         await jmapClient.ConnectAsync(sessionUrl, ct);
 
         var newAccounts = jmapClient.GetFileNodeAccounts();
@@ -443,10 +468,12 @@ sealed class LoginManager : IDisposable
             }
         }
 
-        // Create new session
-        var newSession = new LoginSession(loginId, jmapClient, sessionUrl, token,
+        // Create new session (use handler's current values in case token was refreshed during ConnectAsync)
+        newSession = new LoginSession(loginId, jmapClient, sessionUrl,
+            oauthHandler?.AccessToken ?? token,
             newAccounts.Select(a => a.AccountId).ToList(),
-            refreshToken, tokenEndpoint, clientId, expiresAtUnixSeconds);
+            oauthHandler?.RefreshToken ?? refreshToken, tokenEndpoint, clientId,
+            oauthHandler != null ? oauthHandler.ExpiresAt.ToUnixTimeSeconds() : expiresAtUnixSeconds);
         lock (_lock)
             _sessions.Add(newSession);
 
@@ -488,24 +515,13 @@ sealed class LoginManager : IDisposable
             }
         }
 
-        // Subscribe to token refresh events for persistence
-        if (oauthHandler != null)
-        {
-            oauthHandler.TokenRefreshed += handler =>
-            {
-                var activeIds = enabledAccountIds.Count > 0 ? enabledAccountIds : null;
-                _credentialStore.Save(loginId, handler.AccessToken, sessionUrl, activeIds,
-                    handler.RefreshToken, handler.TokenEndpoint, handler.ClientId,
-                    handler.ExpiresAt.ToUnixTimeSeconds());
-            };
-        }
-
         // Restart push watcher
         StartPushWatcher(newSession, ct);
 
-        // Update credential store
-        _credentialStore.Save(loginId, token, sessionUrl, enabledAccountIds,
-            refreshToken, tokenEndpoint, clientId, expiresAtUnixSeconds);
+        // Update credential store with current (possibly refreshed) values
+        _credentialStore.Save(loginId, oauthHandler?.AccessToken ?? token, sessionUrl, enabledAccountIds,
+            oauthHandler?.RefreshToken ?? refreshToken, tokenEndpoint, clientId,
+            oauthHandler != null ? oauthHandler.ExpiresAt.ToUnixTimeSeconds() : expiresAtUnixSeconds);
 
         AccountsChanged?.Invoke();
         RaiseAggregateStatus();
@@ -959,6 +975,33 @@ sealed class LoginManager : IDisposable
         {
             jmapClient = new JmapClient(token, _debug);
         }
+        // Subscribe to token refresh events BEFORE ConnectAsync so that any
+        // proactive refresh during the initial session fetch is captured.
+        // We use a local holder that the event updates; once we have a LoginSession
+        // we switch the handler to update the session directly.
+        LoginSession? session = null;
+        if (oauthHandler != null)
+        {
+            oauthHandler.TokenRefreshed += handler =>
+            {
+                var s = session;
+                if (s != null)
+                {
+                    s.Token = handler.AccessToken;
+                    if (handler.RefreshToken != null)
+                        s.RefreshToken = handler.RefreshToken;
+                    s.ExpiresAtUnixSeconds = handler.ExpiresAt.ToUnixTimeSeconds();
+                }
+
+                var lid = loginId ?? "unknown";
+                var activeIds = s != null ? GetActiveAccountIds(lid) : enabledAccountIds;
+                _credentialStore.Save(lid, handler.AccessToken, sessionUrl,
+                    activeIds is { Count: > 0 } ? activeIds : null,
+                    handler.RefreshToken, handler.TokenEndpoint, handler.ClientId,
+                    handler.ExpiresAt.ToUnixTimeSeconds());
+            };
+        }
+
         Console.WriteLine("Connecting to JMAP...");
         await jmapClient.ConnectAsync(sessionUrl, ct);
         Console.WriteLine($"Connected as {jmapClient.Session.Username}");
@@ -984,9 +1027,12 @@ sealed class LoginManager : IDisposable
             throw new InvalidOperationException("No accounts with FileNode capability found");
         }
 
-        var session = new LoginSession(loginId, jmapClient, sessionUrl, token,
+        // Use the handler's current values in case token was refreshed during ConnectAsync
+        session = new LoginSession(loginId, jmapClient, sessionUrl,
+            oauthHandler?.AccessToken ?? token,
             accounts.Select(a => a.AccountId).ToList(),
-            refreshToken, tokenEndpoint, clientId, expiresAtUnixSeconds);
+            oauthHandler?.RefreshToken ?? refreshToken, tokenEndpoint, clientId,
+            oauthHandler != null ? oauthHandler.ExpiresAt.ToUnixTimeSeconds() : expiresAtUnixSeconds);
 
         lock (_lock)
             _sessions.Add(session);
@@ -1025,24 +1071,6 @@ sealed class LoginManager : IDisposable
                     _supervisors.Remove(supervisor);
                 supervisor.Dispose();
             }
-        }
-
-        // Subscribe to token refresh events for persistence
-        if (oauthHandler != null)
-        {
-            oauthHandler.TokenRefreshed += handler =>
-            {
-                session.Token = handler.AccessToken;
-                if (handler.RefreshToken != null)
-                    session.RefreshToken = handler.RefreshToken;
-                session.ExpiresAtUnixSeconds = handler.ExpiresAt.ToUnixTimeSeconds();
-
-                var activeIds = GetActiveAccountIds(loginId);
-                _credentialStore.Save(loginId, handler.AccessToken, sessionUrl,
-                    activeIds.Count > 0 ? activeIds : null,
-                    handler.RefreshToken, handler.TokenEndpoint, handler.ClientId,
-                    handler.ExpiresAt.ToUnixTimeSeconds());
-            };
         }
 
         // Start shared push watcher for this session
