@@ -55,6 +55,25 @@
       </Directory>
     </StandardDirectory>
 
+    <!-- Start Menu shortcut -->
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="STARTMENUDIR" Name="Fastmail Files">
+        <Component Id="StartMenuShortcut" Guid="A1B2C3D4-E5F6-4A7B-8C9D-0E1F2A3B4C5D">
+          <Shortcut Id="AppShortcut"
+                    Name="Fastmail Files"
+                    Target="[INSTALLDIR]FilesClient.App.exe"
+                    WorkingDirectory="INSTALLDIR" />
+          <RemoveFolder Id="RemoveStartMenuDir" On="uninstall" />
+          <RegistryValue Root="HKCU"
+                         Key="Software\Fastmail\Fastmail Files"
+                         Name="StartMenuShortcut"
+                         Type="integer"
+                         Value="1"
+                         KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
     <!-- UI properties -->
     <Property Id="WIXUI_INSTALLDIR" Value="INSTALLDIR" />
     <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch Fastmail Files" />
