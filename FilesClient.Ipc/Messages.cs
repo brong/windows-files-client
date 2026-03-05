@@ -12,7 +12,9 @@ public record AccountInfo(
     string Username,
     AccountStatus Status,
     string? StatusDetail,
-    int PendingCount);
+    int PendingCount,
+    long? QuotaUsed = null,
+    long? QuotaLimit = null);
 
 public record OutboxEntry(
     Guid Id,

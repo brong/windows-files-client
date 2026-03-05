@@ -76,6 +76,8 @@ public class JmapSession
         return [];
     }
 
+    public bool HasCapability(string capability) => Capabilities.ContainsKey(capability);
+
     public long? GetChunkSize(string accountId)
     {
         if (!Accounts.TryGetValue(accountId, out var account))

@@ -1,5 +1,6 @@
 using System.Threading.Channels;
 using FilesClient.Jmap;
+using FilesClient.Jmap.Models;
 using FilesClient.Windows;
 
 namespace FilesClient.Service;
@@ -32,6 +33,8 @@ sealed class AccountSupervisor : IDisposable
     public string? StatusDetail { get; private set; }
     public int PendingCount { get; private set; }
     public SyncOutbox? Outbox => _engine?.Outbox;
+    public long? QuotaUsed { get; private set; }
+    public long? QuotaLimit { get; private set; }
 
     /// <summary>
     /// When false, background sync polling is suppressed (metered connection).
@@ -42,6 +45,7 @@ sealed class AccountSupervisor : IDisposable
     public event Action<AccountSupervisor>? StatusChanged;
     public event Action<AccountSupervisor>? StatusDetailChanged;
     public event Action<AccountSupervisor>? PendingCountChanged;
+    public event Action<AccountSupervisor>? QuotaChanged;
 
     public AccountSupervisor(IJmapClient jmapClient, string syncRootPath, string displayName, bool debug)
     {
@@ -78,6 +82,17 @@ sealed class AccountSupervisor : IDisposable
         Console.WriteLine($"[{_displayName}] Populating placeholders...");
         var state = await _engine.PopulateAsync(ct);
         Console.WriteLine($"[{_displayName}] Initial sync complete. State: {state}");
+
+        // Fetch initial quota info if available
+        try
+        {
+            var quotas = await _jmapClient.GetQuotasAsync(ct);
+            UpdateQuota(quotas);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Console.Error.WriteLine($"[{_displayName}] Initial quota fetch failed: {ex.Message}");
+        }
 
         // Reconcile local changes made while offline
         _engine.ReconcileLocalChanges();
@@ -143,7 +158,9 @@ sealed class AccountSupervisor : IDisposable
 
                 try
                 {
-                    currentState = await _engine!.PollChangesAsync(currentState, ct);
+                    var pollResult = await _engine!.PollChangesAsync(currentState, ct);
+                    currentState = pollResult.State;
+                    UpdateQuota(pollResult.Quotas);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
@@ -171,6 +188,29 @@ sealed class AccountSupervisor : IDisposable
     {
         PendingCount = count;
         PendingCountChanged?.Invoke(this);
+    }
+
+    private void UpdateQuota(Quota[]? quotas)
+    {
+        if (quotas == null || quotas.Length == 0)
+            return;
+
+        // Pick the "octets" quota with best scope: account > domain > global
+        var octetsQuota = quotas
+            .Where(q => q.ResourceType == "octets")
+            .OrderBy(q => q.Scope switch { "account" => 0, "domain" => 1, _ => 2 })
+            .FirstOrDefault();
+
+        if (octetsQuota == null)
+            return;
+
+        var oldUsed = QuotaUsed;
+        var oldLimit = QuotaLimit;
+        QuotaUsed = octetsQuota.Used;
+        QuotaLimit = octetsQuota.HardLimit;
+
+        if (oldUsed != QuotaUsed || oldLimit != QuotaLimit)
+            QuotaChanged?.Invoke(this);
     }
 
     public void Dispose()

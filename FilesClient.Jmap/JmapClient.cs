@@ -18,9 +18,11 @@ public class JmapClient : IJmapClient
     public const string FileNodeCapability = "https://www.fastmail.com/dev/filenode";
     public const string BlobCapability = "urn:ietf:params:jmap:blob";
     public const string BlobExtCapability = "https://www.fastmail.com/dev/blobext";
+    public const string QuotaCapability = "urn:ietf:params:jmap:quota";
     private static readonly string[] FileNodeUsing = [CoreCapability, FileNodeCapability];
     private static readonly string[] BlobUsing = [CoreCapability, BlobCapability];
     private static readonly string[] BlobExtUsing = [CoreCapability, BlobCapability, BlobExtCapability];
+    private static readonly string[] QuotaUsing = [CoreCapability, QuotaCapability];
     /// <summary>Properties to request in FileNode/get calls — includes myRights for permission enforcement.</summary>
     internal static readonly string[] FileNodeProperties =
         ["id", "parentId", "blobId", "name", "type", "size", "created", "modified", "role", "myRights"];
@@ -258,14 +260,15 @@ public class JmapClient : IJmapClient
             FileNodeUsing, "FileNode/changes", new { accountId = AccountId, sinceState }, ct);
     }
 
-    public async Task<(ChangesResponse Changes, FileNode[] Created, FileNode[] Updated)>
+    public async Task<(ChangesResponse Changes, FileNode[] Created, FileNode[] Updated, Quota[]? Quotas)>
         GetChangesAndNodesAsync(string sinceState, CancellationToken ct = default)
     {
         var changesCallId = "c" + Interlocked.Increment(ref _nextCallId);
         var createdCallId = "c" + Interlocked.Increment(ref _nextCallId);
         var updatedCallId = "c" + Interlocked.Increment(ref _nextCallId);
 
-        var request = JmapRequest.Create(FileNodeUsing,
+        var calls = new List<(string method, object args, string callId)>
+        {
             ("FileNode/changes", new { accountId = AccountId, sinceState }, changesCallId),
             ("FileNode/get", new Dictionary<string, object>
             {
@@ -278,8 +281,20 @@ public class JmapClient : IJmapClient
                 ["accountId"] = AccountId,
                 ["#ids"] = new { resultOf = changesCallId, name = "FileNode/changes", path = "/updated" },
                 ["properties"] = FileNodeProperties,
-            }, updatedCallId));
+            }, updatedCallId),
+        };
 
+        // Batch Quota/get into the same request when the capability is available
+        string? quotaCallId = null;
+        string[] capabilities = FileNodeUsing;
+        if (Session.HasCapability(QuotaCapability))
+        {
+            quotaCallId = "c" + Interlocked.Increment(ref _nextCallId);
+            capabilities = [CoreCapability, FileNodeCapability, QuotaCapability];
+            calls.Add(("Quota/get", new { accountId = AccountId, ids = (string[]?)null }, quotaCallId));
+        }
+
+        var request = JmapRequest.Create(capabilities, calls.ToArray());
         var json = JsonSerializer.Serialize(request, JmapSerializerOptions.Default);
         var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
         var httpResponse = await _http.PostAsync(Session.ApiUrl, content, ct);
@@ -300,7 +315,14 @@ public class JmapClient : IJmapClient
         var created = GetValidatedResult<GetResponse<FileNode>>(responseMap, createdCallId, "FileNode/get");
         var updated = GetValidatedResult<GetResponse<FileNode>>(responseMap, updatedCallId, "FileNode/get");
 
-        return (changes, created.List, updated.List);
+        Quota[]? quotas = null;
+        if (quotaCallId != null && responseMap.ContainsKey(quotaCallId))
+        {
+            var quotaResult = GetValidatedResult<GetResponse<Quota>>(responseMap, quotaCallId, "Quota/get");
+            quotas = quotaResult.List;
+        }
+
+        return (changes, created.List, updated.List, quotas);
     }
 
     private static T GetValidatedResult<T>(
@@ -699,6 +721,16 @@ public class JmapClient : IJmapClient
             throw new InvalidOperationException($"Blob/get returned no results for {blobId}");
 
         return blobResponse.List[0];
+    }
+
+    public async Task<Quota[]> GetQuotasAsync(CancellationToken ct = default)
+    {
+        if (!Session.HasCapability(QuotaCapability))
+            return [];
+
+        var result = await CallAsync<GetResponse<Quota>>(
+            QuotaUsing, "Quota/get", new { accountId = AccountId, ids = (string[]?)null }, ct);
+        return result.List;
     }
 
     /// <summary>

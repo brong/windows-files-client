@@ -30,6 +30,7 @@ sealed class ManageAccountsForm : Form
     private readonly Label _syncedAccountName;
     private readonly Label _accountStatusLabel;
     private readonly Label _syncFolderLabel;
+    private readonly Label _quotaLabel;
     private readonly Button _detachButton;
     private readonly Button _removeButton;
     private readonly Button _refreshButton;
@@ -251,9 +252,18 @@ sealed class ManageAccountsForm : Form
         {
             AutoSize = true,
             ForeColor = Color.FromArgb(80, 80, 80),
-            Margin = new Padding(0, 0, 0, 16),
+            Margin = new Padding(0, 0, 0, 4),
         };
         syncedTopLayout.Controls.Add(_syncFolderLabel);
+
+        _quotaLabel = new Label
+        {
+            AutoSize = true,
+            ForeColor = Color.FromArgb(80, 80, 80),
+            Margin = new Padding(0, 0, 0, 16),
+            Visible = false,
+        };
+        syncedTopLayout.Controls.Add(_quotaLabel);
 
         var syncedButtonFlow = new FlowLayoutPanel
         {
@@ -1046,6 +1056,27 @@ sealed class ManageAccountsForm : Form
             _openFolderButton.Visible = true;
         }
         _syncFolderLabel.Text = $"Folder: {info.SyncRootPath}";
+
+        if (info.QuotaUsed.HasValue && info.QuotaLimit.HasValue && info.QuotaLimit.Value > 0)
+        {
+            _quotaLabel.Text = $"Storage: {FormatBytes(info.QuotaUsed.Value)} of {FormatBytes(info.QuotaLimit.Value)} used";
+            _quotaLabel.Visible = true;
+        }
+        else
+        {
+            _quotaLabel.Visible = false;
+        }
+    }
+
+    private static string FormatBytes(long bytes)
+    {
+        if (bytes >= 1L << 30)
+            return $"{bytes / (double)(1L << 30):0.#} GB";
+        if (bytes >= 1L << 20)
+            return $"{bytes / (double)(1L << 20):0.#} MB";
+        if (bytes >= 1L << 10)
+            return $"{bytes / (double)(1L << 10):0.#} KB";
+        return $"{bytes} bytes";
     }
 
     private void OnAddLoginClicked(object? sender, EventArgs e)

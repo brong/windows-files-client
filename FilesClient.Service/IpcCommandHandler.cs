@@ -73,15 +73,7 @@ sealed class IpcCommandHandler
     public StatusSnapshotEvent BuildStatusSnapshot()
     {
         var supervisors = _loginManager.Supervisors;
-        var accounts = supervisors.Select(s => new AccountInfo(
-            s.AccountId,
-            _loginManager.GetLoginIdForAccount(s.AccountId) ?? "",
-            s.DisplayName,
-            s.SyncRootPath,
-            s.Username,
-            MapStatus(s.Status),
-            s.StatusDetail,
-            s.PendingCount)).ToList();
+        var accounts = supervisors.Select(BuildAccountInfo).ToList();
 
         return new StatusSnapshotEvent(
             accounts,
@@ -94,15 +86,7 @@ sealed class IpcCommandHandler
     public AccountsChangedEvent BuildAccountsChanged()
     {
         var supervisors = _loginManager.Supervisors;
-        var accounts = supervisors.Select(s => new AccountInfo(
-            s.AccountId,
-            _loginManager.GetLoginIdForAccount(s.AccountId) ?? "",
-            s.DisplayName,
-            s.SyncRootPath,
-            s.Username,
-            MapStatus(s.Status),
-            s.StatusDetail,
-            s.PendingCount)).ToList();
+        var accounts = supervisors.Select(BuildAccountInfo).ToList();
 
         return new AccountsChangedEvent(
             accounts,
@@ -313,6 +297,18 @@ sealed class IpcCommandHandler
             return new CommandResultEvent("enableAccount", false, ex.Message);
         }
     }
+
+    private AccountInfo BuildAccountInfo(AccountSupervisor s) => new(
+        s.AccountId,
+        _loginManager.GetLoginIdForAccount(s.AccountId) ?? "",
+        s.DisplayName,
+        s.SyncRootPath,
+        s.Username,
+        MapStatus(s.Status),
+        s.StatusDetail,
+        s.PendingCount,
+        s.QuotaUsed,
+        s.QuotaLimit);
 
     private static AccountStatus MapStatus(SyncStatus status) => status switch
     {

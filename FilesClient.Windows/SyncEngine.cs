@@ -603,7 +603,7 @@ public class SyncEngine : IDisposable
         Log($"Catching up from state {cache.State}...");
         try
         {
-            newState = await PollChangesAsync(cache.State, ct);
+            (newState, _) = await PollChangesAsync(cache.State, ct);
         }
         catch (InvalidOperationException ex) when (ex.Message.Contains("cannotCalculateChanges"))
         {
@@ -802,16 +802,16 @@ public class SyncEngine : IDisposable
         return state;
     }
 
-    public async Task<string> PollChangesAsync(string sinceState, CancellationToken ct)
+    public async Task<(string State, Quota[]? Quotas)> PollChangesAsync(string sinceState, CancellationToken ct)
     {
-        var (changes, createdNodes, updatedNodes) = await _queue.EnqueueAsync(QueuePriority.Background,
+        var (changes, createdNodes, updatedNodes, quotas) = await _queue.EnqueueAsync(QueuePriority.Background,
             () => _jmapClient.GetChangesAndNodesAsync(sinceState, ct), ct);
 
         if (changes.Created.Length == 0 && changes.Updated.Length == 0 && changes.Destroyed.Length == 0)
         {
             SaveNodeCache(changes.NewState);
             ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_IDLE);
-            return changes.NewState;
+            return (changes.NewState, quotas);
         }
 
         ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_SYNC_INCREMENTAL);
@@ -1018,7 +1018,7 @@ public class SyncEngine : IDisposable
 
         SaveNodeCache(changes.NewState);
         ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_IDLE);
-        return changes.NewState;
+        return (changes.NewState, quotas);
     }
 
     private void OnLocalFileChanges(FileChangeWatcher.FileChange[] changes)

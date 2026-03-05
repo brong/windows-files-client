@@ -22,7 +22,7 @@ public interface IJmapClient : IDisposable
     Task<FileNode[]> GetFileNodesAsync(string[] ids, CancellationToken ct = default);
     Task<FileNode[]> GetChildrenAsync(string parentId, CancellationToken ct = default);
     Task<ChangesResponse> GetChangesAsync(string sinceState, CancellationToken ct = default);
-    Task<(ChangesResponse Changes, FileNode[] Created, FileNode[] Updated)>
+    Task<(ChangesResponse Changes, FileNode[] Created, FileNode[] Updated, Quota[]? Quotas)>
         GetChangesAndNodesAsync(string sinceState, CancellationToken ct = default);
     Task<string> GetStateAsync(string homeNodeId, CancellationToken ct = default);
     Task<string> GetCurrentStateAsync(CancellationToken ct = default);
@@ -43,4 +43,5 @@ public interface IJmapClient : IDisposable
     /// </summary>
     Task<BlobDataItem> GetBlobAsync(string blobId, string[] properties,
         long? offset = null, long? length = null, CancellationToken ct = default);
+    Task<Quota[]> GetQuotasAsync(CancellationToken ct = default);
 }

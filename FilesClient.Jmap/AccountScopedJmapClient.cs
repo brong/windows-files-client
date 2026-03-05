@@ -249,14 +249,15 @@ public class AccountScopedJmapClient : IJmapClient
             FileNodeUsing, "FileNode/changes", new { accountId = _accountId, sinceState }, ct);
     }
 
-    public async Task<(ChangesResponse Changes, FileNode[] Created, FileNode[] Updated)>
+    public async Task<(ChangesResponse Changes, FileNode[] Created, FileNode[] Updated, Quota[]? Quotas)>
         GetChangesAndNodesAsync(string sinceState, CancellationToken ct = default)
     {
         var changesCallId = NextCallId();
         var createdCallId = NextCallId();
         var updatedCallId = NextCallId();
 
-        var request = JmapRequest.Create(FileNodeUsing,
+        var calls = new List<(string method, object args, string callId)>
+        {
             ("FileNode/changes", new { accountId = _accountId, sinceState }, changesCallId),
             ("FileNode/get", new Dictionary<string, object>
             {
@@ -269,8 +270,19 @@ public class AccountScopedJmapClient : IJmapClient
                 ["accountId"] = _accountId,
                 ["#ids"] = new { resultOf = changesCallId, name = "FileNode/changes", path = "/updated" },
                 ["properties"] = JmapClient.FileNodeProperties,
-            }, updatedCallId));
+            }, updatedCallId),
+        };
 
+        string? quotaCallId = null;
+        string[] capabilities = FileNodeUsing;
+        if (Session.HasCapability(JmapClient.QuotaCapability))
+        {
+            quotaCallId = NextCallId();
+            capabilities = [JmapClient.CoreCapability, JmapClient.FileNodeCapability, JmapClient.QuotaCapability];
+            calls.Add(("Quota/get", new { accountId = _accountId, ids = (string[]?)null }, quotaCallId));
+        }
+
+        var request = JmapRequest.Create(capabilities, calls.ToArray());
         var json = JsonSerializer.Serialize(request, JmapSerializerOptions.Default);
         var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
         var httpResponse = await Http.PostAsync(Session.ApiUrl, content, ct);
@@ -291,7 +303,14 @@ public class AccountScopedJmapClient : IJmapClient
         var created = GetValidatedResult<GetResponse<FileNode>>(responseMap, createdCallId, "FileNode/get");
         var updated = GetValidatedResult<GetResponse<FileNode>>(responseMap, updatedCallId, "FileNode/get");
 
-        return (changes, created.List, updated.List);
+        Quota[]? quotas = null;
+        if (quotaCallId != null && responseMap.ContainsKey(quotaCallId))
+        {
+            var quotaResult = GetValidatedResult<GetResponse<Quota>>(responseMap, quotaCallId, "Quota/get");
+            quotas = quotaResult.List;
+        }
+
+        return (changes, created.List, updated.List, quotas);
     }
 
     public async Task<string> GetStateAsync(string homeNodeId, CancellationToken ct = default)
@@ -510,6 +529,17 @@ public class AccountScopedJmapClient : IJmapClient
             throw new InvalidOperationException($"Blob/get returned no results for {blobId}");
 
         return blobResponse.List[0];
+    }
+
+    public async Task<Quota[]> GetQuotasAsync(CancellationToken ct = default)
+    {
+        if (!Session.HasCapability(JmapClient.QuotaCapability))
+            return [];
+
+        var result = await CallAsync<GetResponse<Quota>>(
+            [JmapClient.CoreCapability, JmapClient.QuotaCapability],
+            "Quota/get", new { accountId = _accountId, ids = (string[]?)null }, ct);
+        return result.List;
     }
 
     /// <summary>
