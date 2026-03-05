@@ -3,7 +3,7 @@
      xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util"
      xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
 
-  <Package Name="Fastmail Files"
+  <Package Name="Fastmail Files $(var.PackageVersion)"
            Version="$(var.PackageVersion)"
            Manufacturer="Fastmail Pty Ltd"
            UpgradeCode="FF57AA76-1DFC-42D9-BFE9-F696DAEA2CDF"
