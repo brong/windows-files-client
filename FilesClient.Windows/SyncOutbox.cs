@@ -545,8 +545,13 @@ public class SyncOutbox : IDisposable
     /// <summary>Wait for work to be available, or until timeout/cancellation.</summary>
     public void WaitForWork(TimeSpan timeout, CancellationToken ct)
     {
-        _workSignal.Wait(timeout, ct);
-        _workSignal.Reset();
+        if (_disposed) return;
+        try
+        {
+            _workSignal.Wait(timeout, ct);
+            _workSignal.Reset();
+        }
+        catch (ObjectDisposedException) { }
     }
 
     /// <summary>Force a save of the outbox to disk.</summary>
