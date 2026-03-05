@@ -320,10 +320,12 @@ public class JmapClient : IJmapClient
         var updated = GetValidatedResult<GetResponse<FileNode>>(responseMap, updatedCallId, "FileNode/get");
 
         Quota[]? quotas = null;
-        if (quotaCallId != null && responseMap.ContainsKey(quotaCallId))
+        if (quotaCallId != null && responseMap.TryGetValue(quotaCallId, out var quotaResp)
+            && quotaResp.method == "Quota/get")
         {
-            var quotaResult = GetValidatedResult<GetResponse<Quota>>(responseMap, quotaCallId, "Quota/get");
-            quotas = quotaResult.List;
+            var quotaResult = quotaResp.args.Deserialize<GetResponse<Quota>>(JmapSerializerOptions.Default);
+            if (quotaResult != null)
+                quotas = quotaResult.List;
         }
 
         return (changes, created.List, updated.List, quotas);
