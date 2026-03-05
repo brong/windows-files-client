@@ -17,11 +17,13 @@
     <util:CloseApplication Id="CloseService"
                            Target="FilesClient.Service.exe"
                            CloseMessage="yes"
+                           TerminateProcess="1"
                            RebootPrompt="no"
                            Timeout="5" />
     <util:CloseApplication Id="CloseApp"
                            Target="FilesClient.App.exe"
                            CloseMessage="yes"
+                           TerminateProcess="1"
                            RebootPrompt="no"
                            Timeout="5" />
 
