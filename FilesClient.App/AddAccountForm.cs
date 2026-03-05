@@ -86,7 +86,7 @@ sealed class AddAccountForm : Form
         {
             Text = "Manual Connection",
             Location = new Point(pad, advancedY),
-            Size = new Size(inputWidth, (int)(em * 8.5)),
+            Size = new Size(inputWidth, (int)(em * 10.5)),
             Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top,
             Visible = false,
         };
