@@ -4,12 +4,13 @@
      xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
 
   <Package Name="Fastmail Files"
-           Version="1.0.0.0"
+           Version="$(var.PackageVersion)"
            Manufacturer="Fastmail Pty Ltd"
            UpgradeCode="FF57AA76-1DFC-42D9-BFE9-F696DAEA2CDF"
            Scope="perMachine">
 
-    <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed."
+                  Schedule="afterInstallInitialize" />
     <MediaTemplate EmbedCab="yes" />
 
     <!-- Close running processes before install/upgrade/uninstall -->

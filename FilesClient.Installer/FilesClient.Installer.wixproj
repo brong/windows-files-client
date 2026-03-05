@@ -6,8 +6,12 @@
   </PropertyGroup>
 
   <PropertyGroup>
+    <!-- Auto-generate a version from the current date/time so every build
+         gets a unique version and MajorUpgrade properly replaces old installs.
+         Format: 1.YYYY.MMdd.HHmm  (MSI requires major <= 255, so use 1.year.monthday.hourmin) -->
+    <PackageVersion Condition="'$(PackageVersion)' == ''">1.$([System.DateTime]::UtcNow.ToString('yyyy')).$([System.DateTime]::UtcNow.ToString('MMdd')).$([System.DateTime]::UtcNow.ToString('HHmm'))</PackageVersion>
     <PublishDir>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\publish\Shared'))</PublishDir>
-    <DefineConstants>PublishDir=$(PublishDir)</DefineConstants>
+    <DefineConstants>PublishDir=$(PublishDir);PackageVersion=$(PackageVersion)</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>
