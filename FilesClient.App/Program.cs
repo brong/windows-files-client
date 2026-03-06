@@ -13,6 +13,9 @@ class Program
         // Download Fastmail favicon for tray icon
         var iconPath = await DownloadIconAsync(cts.Token);
 
+        // Auto-start service if not already running
+        ServiceLauncher.TryStartService();
+
         using var serviceClient = new ServiceClient();
 
         using var trayIcon = new TrayIcon(cts, iconPath, serviceClient);

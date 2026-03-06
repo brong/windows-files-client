@@ -58,6 +58,9 @@ sealed class ManageAccountsForm : Form
     private bool _operationInProgress;
     private bool _outboxDirty = true;
     private bool _hasActiveUploads;
+    private readonly Button _startServiceButton;
+    private readonly Button _stopServiceButton;
+    private readonly Button _restartServiceButton;
 
     // Discovered accounts per login (populated async on form open)
     private readonly Dictionary<string, List<DiscoveredAccount>> _discoveredAccounts = new();
@@ -377,6 +380,36 @@ sealed class ManageAccountsForm : Form
         };
         addLoginButton.Click += OnAddLoginClicked;
 
+        _startServiceButton = new Button
+        {
+            Text = "Start Service",
+            AutoSize = true,
+            Height = 30,
+            Visible = !_serviceClient.IsConnected,
+        };
+        _startServiceButton.Location = new Point(addLoginButton.Right + 8, 9);
+        _startServiceButton.Click += OnStartServiceClicked;
+
+        _stopServiceButton = new Button
+        {
+            Text = "Stop Service",
+            AutoSize = true,
+            Height = 30,
+            Visible = _serviceClient.IsConnected,
+        };
+        _stopServiceButton.Location = new Point(addLoginButton.Right + 8, 9);
+        _stopServiceButton.Click += OnStopServiceClicked;
+
+        _restartServiceButton = new Button
+        {
+            Text = "Restart Service",
+            AutoSize = true,
+            Height = 30,
+            Visible = _serviceClient.IsConnected,
+        };
+        _restartServiceButton.Location = new Point(_stopServiceButton.Right + 4, 9);
+        _restartServiceButton.Click += OnRestartServiceClicked;
+
         var exitButton = new Button
         {
             Text = "Exit",
@@ -398,7 +431,7 @@ sealed class ManageAccountsForm : Form
         closeButton.Location = new Point(bottomPanel.Width - exitButton.Width - closeButton.Width - 22, 9);
         closeButton.Click += (_, _) => Hide();
 
-        bottomPanel.Controls.AddRange([addLoginButton, closeButton, exitButton]);
+        bottomPanel.Controls.AddRange([addLoginButton, _startServiceButton, _stopServiceButton, _restartServiceButton, closeButton, exitButton]);
 
         // --- Assemble ---
         Controls.Add(_detailPanel);
@@ -439,6 +472,14 @@ sealed class ManageAccountsForm : Form
                 _statusDebounceTimer.Start();
         };
 
+        _serviceClient.ConnectionChanged += connected =>
+        {
+            if (InvokeRequired)
+                BeginInvoke(() => UpdateServiceButtons());
+            else
+                UpdateServiceButtons();
+        };
+
         // Safety-net timer
         _refreshTimer = new System.Windows.Forms.Timer { Interval = 30000 };
         _refreshTimer.Tick += (_, _) => UpdateStatusText();
@@ -467,6 +508,92 @@ sealed class ManageAccountsForm : Form
             Application.ExitThread();
         }
         _operationInProgress = false;
+    }
+
+    private void UpdateServiceButtons()
+    {
+        var connected = _serviceClient.IsConnected;
+        _startServiceButton.Visible = !connected;
+        _startServiceButton.Enabled = true;
+        _startServiceButton.Text = "Start Service";
+        _stopServiceButton.Visible = connected;
+        _stopServiceButton.Enabled = true;
+        _stopServiceButton.Text = "Stop Service";
+        _restartServiceButton.Visible = connected;
+        _restartServiceButton.Enabled = true;
+        _restartServiceButton.Text = "Restart Service";
+    }
+
+    private async void OnStartServiceClicked(object? sender, EventArgs e)
+    {
+        _startServiceButton.Enabled = false;
+        _startServiceButton.Text = "Starting...";
+
+        var started = ServiceLauncher.TryStartService();
+        if (!started)
+        {
+            _startServiceButton.Text = "Start Service";
+            _startServiceButton.Enabled = true;
+            MessageBox.Show("Could not start the service.\nFilesClient.Service.exe was not found.",
+                "Fastmail Files", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        // Wait up to 10s for connection, then re-enable button
+        for (var i = 0; i < 20 && !_serviceClient.IsConnected; i++)
+            await Task.Delay(500);
+
+        if (!_serviceClient.IsConnected)
+        {
+            _startServiceButton.Text = "Start Service";
+            _startServiceButton.Enabled = true;
+        }
+    }
+
+    private async void OnStopServiceClicked(object? sender, EventArgs e)
+    {
+        _stopServiceButton.Enabled = false;
+        _restartServiceButton.Enabled = false;
+        _stopServiceButton.Text = "Stopping...";
+
+        ServiceLauncher.StopService();
+        await ServiceLauncher.WaitForExitAsync();
+
+        UpdateServiceButtons();
+    }
+
+    private async void OnRestartServiceClicked(object? sender, EventArgs e)
+    {
+        _stopServiceButton.Enabled = false;
+        _restartServiceButton.Enabled = false;
+        _restartServiceButton.Text = "Restarting...";
+
+        ServiceLauncher.StopService();
+        if (!await ServiceLauncher.WaitForExitAsync())
+        {
+            UpdateServiceButtons();
+            MessageBox.Show("Could not stop the service.", "Fastmail Files",
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        // Brief pause to let the pipe fully close before restarting
+        await Task.Delay(500);
+
+        var started = ServiceLauncher.TryStartService();
+        if (!started)
+        {
+            UpdateServiceButtons();
+            MessageBox.Show("Service stopped but could not restart.\nFilesClient.Service.exe was not found.",
+                "Fastmail Files", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        // Wait up to 10s for reconnection
+        for (var i = 0; i < 20 && !_serviceClient.IsConnected; i++)
+            await Task.Delay(500);
+
+        UpdateServiceButtons();
     }
 
     private void OnOpenFolderClicked(object? sender, EventArgs e)

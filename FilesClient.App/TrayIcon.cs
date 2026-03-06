@@ -203,9 +203,46 @@ sealed class TrayIcon : IDisposable
             Text = "Fastmail Files - Starting...",
         };
 
+        var contextMenu = new ContextMenuStrip();
+        var manageItem = new ToolStripMenuItem("Manage Accounts");
+        manageItem.Click += (_, _) => ToggleManageAccountsForm();
+        var startServiceItem = new ToolStripMenuItem("Start Service");
+        startServiceItem.Click += (_, _) => ServiceLauncher.TryStartService();
+        var stopServiceItem = new ToolStripMenuItem("Stop Service");
+        stopServiceItem.Click += (_, _) => ServiceLauncher.StopService();
+        var restartServiceItem = new ToolStripMenuItem("Restart Service");
+        restartServiceItem.Click += async (_, _) =>
+        {
+            ServiceLauncher.StopService();
+            await ServiceLauncher.WaitForExitAsync();
+            await Task.Delay(500);
+            ServiceLauncher.TryStartService();
+        };
+        var exitItem = new ToolStripMenuItem("Exit");
+        exitItem.Click += (_, _) =>
+        {
+            _cts.Cancel();
+            Application.ExitThread();
+        };
+        contextMenu.Items.Add(manageItem);
+        contextMenu.Items.Add(startServiceItem);
+        contextMenu.Items.Add(stopServiceItem);
+        contextMenu.Items.Add(restartServiceItem);
+        contextMenu.Items.Add(new ToolStripSeparator());
+        contextMenu.Items.Add(exitItem);
+        contextMenu.Opening += (_, _) =>
+        {
+            var connected = _serviceClient.IsConnected;
+            startServiceItem.Visible = !connected;
+            stopServiceItem.Visible = connected;
+            restartServiceItem.Visible = connected;
+        };
+        _notifyIcon.ContextMenuStrip = contextMenu;
+
         _notifyIcon.MouseClick += (_, e) =>
         {
-            ToggleManageAccountsForm();
+            if (e.Button == MouseButtons.Left)
+                ToggleManageAccountsForm();
         };
 
         SetIconWithDot(Color.Gray);
