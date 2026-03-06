@@ -15,14 +15,15 @@ if %errorlevel%==0 (
     robocopy "%SRCDIR%" "%BUILDDIR%" /MIR /XD .git .claude bin obj /XF *.user >nul
 )
 
-:: ---- Step 1: Publish both App and Service ----
-echo Publishing FileNodeClient.App...
-dotnet publish "%BUILDDIR%\FileNodeClient.App\FileNodeClient.App.csproj" -c Release -r win-x64 --self-contained -o "%BUILDDIR%\FileNodeClient.Package\publish\App"
+:: ---- Step 1: Publish both App and Service into shared directory ----
+:: Same directory so ServiceLauncher finds Service.exe via AppContext.BaseDirectory
+echo Publishing FileNodeClient.Service...
+dotnet publish "%BUILDDIR%\FileNodeClient.Service\FileNodeClient.Service.csproj" -c Release -r win-x64 --self-contained -o "%BUILDDIR%\FileNodeClient.Package\publish"
 if errorlevel 1 goto :error
 
 echo.
-echo Publishing FileNodeClient.Service...
-dotnet publish "%BUILDDIR%\FileNodeClient.Service\FileNodeClient.Service.csproj" -c Release -r win-x64 --self-contained -o "%BUILDDIR%\FileNodeClient.Package\publish\Service"
+echo Publishing FileNodeClient.App...
+dotnet publish "%BUILDDIR%\FileNodeClient.App\FileNodeClient.App.csproj" -c Release -r win-x64 --self-contained -o "%BUILDDIR%\FileNodeClient.Package\publish"
 if errorlevel 1 goto :error
 
 :: ---- Step 2: Create self-signed cert if needed ----
@@ -43,33 +44,27 @@ echo.
 echo Building MSIX package...
 pushd "%BUILDDIR%\FileNodeClient.Package"
 
-:: Use makeappx to pack the layout
 set "MSIX_OUTPUT=%BUILDDIR%\FileNodeClient.Package\bin\Release\FileNodeClient.msix"
 if not exist "bin\Release" mkdir "bin\Release"
 
-:: Create mapping file for makeappx
+:: Create mapping file for makeappx — flat layout
 (
 echo [Files]
-echo "publish\App\FileNodeClient.App.exe" "FileNodeClient.App.exe"
-echo "publish\Service\FileNodeClient.Service.exe" "FileNodeClient.Service.exe"
 echo "AppxManifest.xml" "AppxManifest.xml"
 echo "Assets\StoreLogo.png" "Assets\StoreLogo.png"
 echo "Assets\Square44x44Logo.png" "Assets\Square44x44Logo.png"
 echo "Assets\Square150x150Logo.png" "Assets\Square150x150Logo.png"
 ) > mapping.txt
 
-:: Include all DLLs and runtime files from both publish directories
-for %%f in (publish\App\*.dll) do (
+:: Include all files from the shared publish directory
+for %%f in (publish\*.exe) do (
     echo "%%f" "%%~nxf" >> mapping.txt
 )
-for %%f in (publish\App\*.json) do (
+for %%f in (publish\*.dll) do (
     echo "%%f" "%%~nxf" >> mapping.txt
 )
-for %%f in (publish\Service\*.dll) do (
-    echo "%%f" "Service\%%~nxf" >> mapping.txt
-)
-for %%f in (publish\Service\*.json) do (
-    echo "%%f" "Service\%%~nxf" >> mapping.txt
+for %%f in (publish\*.json) do (
+    echo "%%f" "%%~nxf" >> mapping.txt
 )
 
 makeappx pack /f mapping.txt /p "%MSIX_OUTPUT%" /o
