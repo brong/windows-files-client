@@ -376,7 +376,7 @@ sealed class ManageAccountsForm : Form
             Text = "Add Login...",
             AutoSize = true,
             Height = 30,
-            Location = new Point(10, 9),
+            Margin = new Padding(0, 0, 4, 0),
         };
         addLoginButton.Click += OnAddLoginClicked;
 
@@ -386,8 +386,8 @@ sealed class ManageAccountsForm : Form
             AutoSize = true,
             Height = 30,
             Visible = !_serviceClient.IsConnected,
+            Margin = new Padding(0, 0, 4, 0),
         };
-        _startServiceButton.Location = new Point(addLoginButton.Right + 8, 9);
         _startServiceButton.Click += OnStartServiceClicked;
 
         _stopServiceButton = new Button
@@ -396,8 +396,8 @@ sealed class ManageAccountsForm : Form
             AutoSize = true,
             Height = 30,
             Visible = _serviceClient.IsConnected,
+            Margin = new Padding(0, 0, 4, 0),
         };
-        _stopServiceButton.Location = new Point(addLoginButton.Right + 8, 9);
         _stopServiceButton.Click += OnStopServiceClicked;
 
         _restartServiceButton = new Button
@@ -406,9 +406,19 @@ sealed class ManageAccountsForm : Form
             AutoSize = true,
             Height = 30,
             Visible = _serviceClient.IsConnected,
+            Margin = new Padding(0, 0, 4, 0),
         };
-        _restartServiceButton.Location = new Point(_stopServiceButton.Right + 4, 9);
         _restartServiceButton.Click += OnRestartServiceClicked;
+
+        var leftButtons = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false,
+            Location = new Point(10, 9),
+        };
+        leftButtons.Controls.AddRange([addLoginButton, _startServiceButton, _stopServiceButton, _restartServiceButton]);
 
         var exitButton = new Button
         {
@@ -431,7 +441,7 @@ sealed class ManageAccountsForm : Form
         closeButton.Location = new Point(bottomPanel.Width - exitButton.Width - closeButton.Width - 22, 9);
         closeButton.Click += (_, _) => Hide();
 
-        bottomPanel.Controls.AddRange([addLoginButton, _startServiceButton, _stopServiceButton, _restartServiceButton, closeButton, exitButton]);
+        bottomPanel.Controls.AddRange([leftButtons, closeButton, exitButton]);
 
         // --- Assemble ---
         Controls.Add(_detailPanel);
