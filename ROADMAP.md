@@ -48,15 +48,17 @@ Implemented: blocking pre-rename callback with veto support and `TARGET_IN_SCOPE
 
 ### 9. Custom columns in Explorer
 
-`StorageProviderItemPropertyDefinitions` + `IStorageProviderItemPropertySource` COM interface to show per-file metadata columns: sharing status, sync state, etc.
+~~`StorageProviderItemPropertyDefinitions` + `IStorageProviderItemPropertySource` COM interface to show per-file metadata columns: sharing status, sync state, etc.~~
 
-### 10. Process info
+Partially implemented: `StatusColumnManager` push-based approach (no COM handler needed) with Status and Sharing columns. Code is complete but disabled — `StorageProviderItemPropertyDefinitions` registration and `SetAsync` calls crash Explorer without MSIX package identity. Will be re-enabled when MSIX is the primary install method.
 
-`CF_CONNECT_FLAG_REQUIRE_PROCESS_INFO` makes callbacks include which app triggered the hydration (name, PID, path). Better logging and could power "App X is downloading files" notifications.
+### ~~10. Process info~~ ✓ Done
 
-### 11. Block self-implicit hydration
+Implemented: `CF_CONNECT_FLAG_REQUIRE_PROCESS_INFO` included in `CfConnectSyncRoot` flags. Callbacks include process name, PID, and path for logging.
 
-`CF_CONNECT_FLAG_BLOCK_SELF_IMPLICIT_HYDRATION` prevents our own process from accidentally triggering hydration callbacks (e.g., when our FileChangeWatcher reads attributes).
+### ~~11. Block self-implicit hydration~~ ✓ Done
+
+Implemented: `CF_CONNECT_FLAG_BLOCK_SELF_IMPLICIT_HYDRATION` included in `CfConnectSyncRoot` flags.
 
 ### 12. Open/Close file notifications
 
