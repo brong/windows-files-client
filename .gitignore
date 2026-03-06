@@ -4,3 +4,6 @@ obj/
 *.user
 *.suo
 FileNodeClient.Installer/publish/
+FileNodeClient.Package/publish/
+FileNodeClient.Package/DevCert.pfx
+FileNodeClient.Package/mapping.txt
