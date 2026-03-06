@@ -178,7 +178,8 @@ internal class SyncCallbacks
         _inFlightFetches[transferKey] = (cts, null);
 
         var fileName = Path.GetFileName(callbackInfo->NormalizedPath.ToString());
-        OnDownloadStarted?.Invoke(transferKey, fileName);
+        try { OnDownloadStarted?.Invoke(transferKey, fileName); }
+        catch (Exception ex) { LogError($"OnDownloadStarted handler error: {ex.Message}"); }
 
         // Set to false when the async streaming path takes ownership of cleanup.
         bool cleanupHere = true;
@@ -268,7 +269,8 @@ internal class SyncCallbacks
             {
                 _inFlightFetches.TryRemove(transferKey, out _);
                 cts.Dispose();
-                OnDownloadCompleted?.Invoke(transferKey);
+                try { OnDownloadCompleted?.Invoke(transferKey); }
+                catch (Exception ex) { LogError($"OnDownloadCompleted handler error: {ex.Message}"); }
             }
         }
     }
@@ -291,7 +293,11 @@ internal class SyncCallbacks
             LogError($"NOTIFY_DELETE error: {ex.Message}");
             allowed = false;
         }
-        AckDelete(callbackInfo, allowed);
+        finally
+        {
+            try { AckDelete(callbackInfo, allowed); }
+            catch (Exception ex) { LogError($"AckDelete failed: {ex.Message}"); }
+        }
     }
 
     private unsafe void NotifyRenameCallback(CF_CALLBACK_INFO* callbackInfo, CF_CALLBACK_PARAMETERS* callbackParameters)
@@ -319,17 +325,28 @@ internal class SyncCallbacks
             LogError($"NOTIFY_RENAME error: {ex.Message}");
             allowed = false;
         }
-        AckRename(callbackInfo, allowed);
+        finally
+        {
+            try { AckRename(callbackInfo, allowed); }
+            catch (Exception ex) { LogError($"AckRename failed: {ex.Message}"); }
+        }
     }
 
     private unsafe void CancelFetchDataCallback(CF_CALLBACK_INFO* callbackInfo, CF_CALLBACK_PARAMETERS* callbackParameters)
     {
-        var transferKey = callbackInfo->TransferKey;
-        var nodeId = ExtractNodeId(callbackInfo);
-        Log($"CANCEL_FETCH_DATA: node={nodeId}, transferKey={transferKey}");
+        try
+        {
+            var transferKey = callbackInfo->TransferKey;
+            var nodeId = ExtractNodeId(callbackInfo);
+            Log($"CANCEL_FETCH_DATA: node={nodeId}, transferKey={transferKey}");
 
-        if (_inFlightFetches.TryGetValue(transferKey, out var entry))
-            entry.Cts.Cancel();
+            if (_inFlightFetches.TryGetValue(transferKey, out var entry))
+                entry.Cts.Cancel();
+        }
+        catch (Exception ex)
+        {
+            LogError($"CANCEL_FETCH_DATA error: {ex.Message}");
+        }
     }
 
     /// <summary>
@@ -368,7 +385,11 @@ internal class SyncCallbacks
             LogError($"NOTIFY_DEHYDRATE error: {ex.Message}");
             allowed = false;
         }
-        AckDehydrate(callbackInfo, allowed);
+        finally
+        {
+            try { AckDehydrate(callbackInfo, allowed); }
+            catch (Exception ex) { LogError($"AckDehydrate failed: {ex.Message}"); }
+        }
     }
 
     private unsafe void NotifyDehydrateCompletionCallback(CF_CALLBACK_INFO* callbackInfo, CF_CALLBACK_PARAMETERS* callbackParameters)
@@ -770,7 +791,8 @@ internal class SyncCallbacks
             {
                 _inFlightFetches.TryRemove(transferKey, out _);
                 cts.Dispose();
-                OnDownloadCompleted?.Invoke(transferKey);
+                try { OnDownloadCompleted?.Invoke(transferKey); }
+                catch (Exception ex) { LogError($"OnDownloadCompleted handler error: {ex.Message}"); }
             }
         });
     }

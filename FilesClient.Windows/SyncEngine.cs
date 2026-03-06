@@ -128,7 +128,7 @@ public class SyncEngine : IDisposable
         }
         else
         {
-            var first = _activeDownloads.First();
+            var first = _activeDownloads.FirstOrDefault();
             var count = _activeDownloads.Count;
             _downloadDetail = count > 1
                 ? $"Downloading {first.Value} (and {count - 1} more)"

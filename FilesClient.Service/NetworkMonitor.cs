@@ -68,7 +68,8 @@ sealed class NetworkMonitor : IDisposable
         IsMetered = metered;
 
         Console.WriteLine($"[NetworkMonitor] State changed: connected={connected} (was {wasConnected}), metered={metered} (was {wasMetered})");
-        NetworkStateChanged?.Invoke(connected, metered);
+        try { NetworkStateChanged?.Invoke(connected, metered); }
+        catch (Exception ex) { Console.Error.WriteLine($"[NetworkMonitor] NetworkStateChanged handler error: {ex.Message}"); }
     }
 
     public void Dispose()

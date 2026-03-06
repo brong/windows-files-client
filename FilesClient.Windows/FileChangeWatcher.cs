@@ -59,9 +59,17 @@ internal sealed class FileChangeWatcher : IDisposable
                 | NotifyFilters.Attributes,
         };
 
-        _watcher.Created += (_, e) => OnCreated(e.FullPath);
+        _watcher.Created += (_, e) =>
+        {
+            try { OnCreated(e.FullPath); }
+            catch (Exception ex) { Console.Error.WriteLine($"{_logPrefix} OnCreated handler error: {ex.Message}"); }
+        };
         _watcher.Changed += (_, e) => OnChanged(e.FullPath);
-        _watcher.Renamed += (_, e) => OnRenamed?.Invoke(e.OldFullPath, e.FullPath);
+        _watcher.Renamed += (_, e) =>
+        {
+            try { OnRenamed?.Invoke(e.OldFullPath, e.FullPath); }
+            catch (Exception ex) { Console.Error.WriteLine($"{_logPrefix} OnRenamed handler error: {ex.Message}"); }
+        };
         _watcher.Error += OnWatcherError;
 
         _watcher.EnableRaisingEvents = true;
@@ -185,7 +193,10 @@ internal sealed class FileChangeWatcher : IDisposable
         }
 
         if (changes.Count > 0)
-            OnChanges?.Invoke(changes.ToArray());
+        {
+            try { OnChanges?.Invoke(changes.ToArray()); }
+            catch (Exception ex) { Console.Error.WriteLine($"{_logPrefix} OnChanges handler error: {ex.Message}"); }
+        }
     }
 
     public void Dispose()

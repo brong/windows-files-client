@@ -82,12 +82,19 @@ sealed class SyncHostedService : BackgroundService
 
         Console.WriteLine("FastmailFiles service stopping...");
 
-        if (_loginManager != null)
-            await _loginManager.StopAllAsync();
-        if (_ipcServer != null)
-            await _ipcServer.StopAsync();
+        try
+        {
+            if (_loginManager != null)
+                await _loginManager.StopAllAsync();
+            if (_ipcServer != null)
+                await _ipcServer.StopAsync();
 
-        _loginManager?.Dispose();
+            _loginManager?.Dispose();
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Error during service cleanup: {ex.Message}");
+        }
 
         Console.WriteLine("FastmailFiles service stopped");
     }

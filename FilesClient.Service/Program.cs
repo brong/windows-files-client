@@ -39,6 +39,19 @@ for (int i = 0; i < args.Length; i++)
 options.Token ??= Environment.GetEnvironmentVariable("FASTMAIL_TOKEN");
 
 AppLogger.Initialize(options.Debug);
+
+// Global safety nets — log and swallow so a stray exception on any thread
+// doesn't terminate the whole service process.
+AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+{
+    Console.Error.WriteLine($"[FATAL] Unhandled exception: {e.ExceptionObject}");
+};
+TaskScheduler.UnobservedTaskException += (_, e) =>
+{
+    Console.Error.WriteLine($"[WARN] Unobserved task exception: {e.Exception}");
+    e.SetObserved();
+};
+
 Console.WriteLine($"FastmailFiles service process starting (debug={options.Debug})");
 
 var builder = new HostBuilder();
