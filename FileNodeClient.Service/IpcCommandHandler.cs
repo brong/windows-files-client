@@ -65,7 +65,7 @@ sealed class IpcCommandHandler
                 return await HandleEnableAccountAsync(cmd, ct);
 
             default:
-                Console.Error.WriteLine($"[IPC] Unknown command type: {command.GetType().Name}");
+                Log.Error($"[IPC] Unknown command type: {command.GetType().Name}");
                 return null;
         }
     }

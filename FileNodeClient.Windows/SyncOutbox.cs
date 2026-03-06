@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using FileNodeClient.Ipc;
 
 namespace FileNodeClient.Windows;
 
@@ -66,9 +67,6 @@ public class SyncOutbox : IDisposable
 
     private readonly string _logPrefix;
 
-    private void Log(string msg) => Console.WriteLine($"{_logPrefix} {msg}");
-    private void LogError(string msg) => Console.Error.WriteLine($"{_logPrefix} {msg}");
-
     public SyncOutbox(string scopeKey, string logPrefix)
     {
         _logPrefix = logPrefix;
@@ -102,7 +100,7 @@ public class SyncOutbox : IDisposable
         try { if (File.Exists(_persistPath)) File.Delete(_persistPath); }
         catch { }
 
-        Log("Outbox cleared");
+        Log.Info($"{_logPrefix} Outbox cleared");
     }
 
     /// <summary>Load persisted state from disk. Call once at startup.</summary>
@@ -136,14 +134,14 @@ public class SyncOutbox : IDisposable
 
             if (entries.Length > 0)
             {
-                Log($"Loaded {entries.Length} pending changes from outbox");
+                Log.Info($"{_logPrefix} Loaded {entries.Length} pending changes from outbox");
                 _workSignal.Set();
                 RaisePendingCountChanged();
             }
         }
         catch (Exception ex)
         {
-            LogError($"Failed to load outbox: {ex.Message}");
+            Log.Error($"{_logPrefix} Failed to load outbox: {ex.Message}");
         }
     }
 
@@ -477,7 +475,7 @@ public class SyncOutbox : IDisposable
             _processingIds.Remove(id);
             if (_entries.TryGetValue(id, out var entry))
             {
-                Log($"Outbox: rejected {entry.LocalPath ?? entry.NodeId}: {reason}");
+                Log.Info($"{_logPrefix} Outbox: rejected {entry.LocalPath ?? entry.NodeId}: {reason}");
                 RemoveEntryLocked(entry);
                 MarkDirtyAndSignal();
             }
@@ -579,7 +577,7 @@ public class SyncOutbox : IDisposable
         }
         catch (Exception ex)
         {
-            LogError($"Failed to save outbox: {ex.Message}");
+            Log.Error($"{_logPrefix} Failed to save outbox: {ex.Message}");
         }
     }
 

@@ -2,6 +2,7 @@ using System.Buffers;
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text.Json;
+using FileNodeClient.Ipc;
 using FileNodeClient.Jmap.Auth;
 using FileNodeClient.Jmap.Models;
 
@@ -75,7 +76,7 @@ public class JmapClient : IJmapClient
     {
         if (debug)
         {
-            Console.Error.WriteLine("[JMAP] Debug logging enabled");
+            Log.Debug("[JMAP] Debug logging enabled");
             handler = new DebugLoggingHandler(handler);
         }
         _http = new HttpClient(handler) { Timeout = Timeout.InfiniteTimeSpan };

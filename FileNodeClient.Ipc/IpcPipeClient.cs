@@ -140,7 +140,7 @@ public sealed class IpcPipeClient : IDisposable
                     }
                     catch (Exception ex)
                     {
-                        Console.Error.WriteLine($"[IPC Client] Event parse error: {ex.Message}");
+                        Log.Error($"[IPC Client] Event parse error: {ex.Message}");
                     }
                 }
             }
@@ -154,7 +154,7 @@ public sealed class IpcPipeClient : IDisposable
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"[IPC Client] Connection error: {ex.Message}");
+                Log.Error($"[IPC Client] Connection error: {ex.Message}");
                 // Brief delay to avoid tight spin on unexpected errors
                 try { await Task.Delay(1000, ct); }
                 catch (OperationCanceledException) { break; }

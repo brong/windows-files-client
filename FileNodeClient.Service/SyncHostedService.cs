@@ -31,14 +31,14 @@ sealed class SyncHostedService : BackgroundService
     {
         try
         {
-            Console.WriteLine("FileNodeClient service starting...");
+            Log.Info("FileNodeClient service starting...");
 
             // Start IPC server first so the tray app can connect immediately
             _loginManager = new LoginManager(_debug);
             _handler = new IpcCommandHandler(_loginManager, null);
             _ipcServer = new IpcPipeServer(_handler.HandleAsync);
             _ipcServer.Start(stoppingToken);
-            Console.WriteLine($"IPC server listening on pipe: {IpcConstants.PipeName}");
+            Log.Info($"IPC server listening on pipe: {IpcConstants.PipeName}");
 
             // Download icon for sync root (can be slow on first run)
             _iconPath = await DownloadIconAsync(stoppingToken);
@@ -61,14 +61,14 @@ sealed class SyncHostedService : BackgroundService
                 }
                 catch (Exception ex)
                 {
-                    Console.Error.WriteLine($"Failed to connect: {ex.Message}");
+                    Log.Error($"Failed to connect: {ex.Message}");
                 }
             }
 
             // Load stored credentials
             await _loginManager.StartAsync(_iconPath, _clean, stoppingToken);
 
-            Console.WriteLine("FileNodeClient service running");
+            Log.Info("FileNodeClient service running");
 
             // Wait until stopped
             try { await Task.Delay(Timeout.Infinite, stoppingToken); }
@@ -76,11 +76,11 @@ sealed class SyncHostedService : BackgroundService
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            Console.Error.WriteLine($"Fatal error in service: {ex}");
+            Log.Error($"Fatal error in service: {ex}");
             throw;
         }
 
-        Console.WriteLine("FileNodeClient service stopping...");
+        Log.Info("FileNodeClient service stopping...");
 
         try
         {
@@ -93,10 +93,10 @@ sealed class SyncHostedService : BackgroundService
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"Error during service cleanup: {ex.Message}");
+            Log.Error($"Error during service cleanup: {ex.Message}");
         }
 
-        Console.WriteLine("FileNodeClient service stopped");
+        Log.Info("FileNodeClient service stopped");
     }
 
     private HashSet<string> _subscribedAccountIds = new();
@@ -161,12 +161,12 @@ sealed class SyncHostedService : BackgroundService
             using var http = new HttpClient();
             var data = await http.GetByteArrayAsync(FaviconUrl, ct);
             await File.WriteAllBytesAsync(iconPath, data, ct);
-            Console.WriteLine($"Downloaded icon to {iconPath}");
+            Log.Info($"Downloaded icon to {iconPath}");
             return iconPath;
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"Could not download icon: {ex.Message}");
+            Log.Error($"Could not download icon: {ex.Message}");
             return null;
         }
     }

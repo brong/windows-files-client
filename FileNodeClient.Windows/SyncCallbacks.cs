@@ -5,6 +5,7 @@ using System.Text;
 using Windows.Win32;
 using Windows.Win32.Foundation;
 using Windows.Win32.Storage.CloudFilters;
+using FileNodeClient.Ipc;
 using FileNodeClient.Jmap;
 using FileNodeClient.Jmap.Models;
 
@@ -15,9 +16,6 @@ internal class SyncCallbacks
     private readonly IJmapClient _jmapClient;
     private readonly JmapQueue _queue;
     private readonly string _logPrefix;
-
-    private void Log(string msg) => Console.WriteLine($"{_logPrefix} {msg}");
-    private void LogError(string msg) => Console.Error.WriteLine($"{_logPrefix} {msg}");
 
     /// <summary>
     /// Node IDs that were recently hydrated by cfapi. SyncEngine checks this
@@ -140,7 +138,7 @@ internal class SyncCallbacks
             // in sync by PollChangesAsync.  Just acknowledge so cfapi marks the
             // directory as populated — enabling pin hydration of its children.
             var nodeId = ExtractNodeId(callbackInfo);
-            Log($"FETCH_PLACEHOLDERS: node={nodeId}, path={callbackInfo->NormalizedPath}");
+            Log.Info($"{_logPrefix} FETCH_PLACEHOLDERS: node={nodeId}, path={callbackInfo->NormalizedPath}");
 
             var opInfo = new CF_OPERATION_INFO
             {
@@ -167,7 +165,7 @@ internal class SyncCallbacks
         }
         catch (Exception ex)
         {
-            LogError($"FETCH_PLACEHOLDERS error: {ex.Message}");
+            Log.Error($"{_logPrefix} FETCH_PLACEHOLDERS error: {ex.Message}");
         }
     }
 
@@ -179,7 +177,7 @@ internal class SyncCallbacks
 
         var fileName = Path.GetFileName(callbackInfo->NormalizedPath.ToString());
         try { OnDownloadStarted?.Invoke(transferKey, fileName); }
-        catch (Exception ex) { LogError($"OnDownloadStarted handler error: {ex.Message}"); }
+        catch (Exception ex) { Log.Error($"{_logPrefix} OnDownloadStarted handler error: {ex.Message}"); }
 
         // Set to false when the async streaming path takes ownership of cleanup.
         bool cleanupHere = true;
@@ -195,7 +193,7 @@ internal class SyncCallbacks
 
             if (string.IsNullOrEmpty(nodeId))
             {
-                LogError($"FETCH_DATA: No identity for {fileName}");
+                Log.Error($"{_logPrefix} FETCH_DATA: No identity for {fileName}");
                 TransferError(*callbackInfo, new NTSTATUS(unchecked((int)0xC000000D))); // STATUS_INVALID_PARAMETER
                 return;
             }
@@ -217,14 +215,14 @@ internal class SyncCallbacks
                 }
                 catch { }
             }
-            Log($"FETCH_DATA: node={nodeId}, offset={requiredOffset}, len={requiredLength}, caller={processName}");
+            Log.Info($"{_logPrefix} FETCH_DATA: node={nodeId}, offset={requiredOffset}, len={requiredLength}, caller={processName}");
 
             // Fetch node metadata first (shared by both paths)
             var node = FetchNodeAsync(nodeId, cts.Token).GetAwaiter().GetResult();
             var nodeSize = node.Size ?? 0;
             bool isFullHydration = requiredOffset == 0 && requiredLength >= nodeSize;
 
-            Log($"FETCH_DATA: node={nodeId}, size={nodeSize}, isFullHydration={isFullHydration}, path={((isFullHydration && nodeSize > BlobGetMaxSize) ? "streaming" : "buffered")}");
+            Log.Info($"{_logPrefix} FETCH_DATA: node={nodeId}, size={nodeSize}, isFullHydration={isFullHydration}, path={((isFullHydration && nodeSize > BlobGetMaxSize) ? "streaming" : "buffered")}");
 
             if (isFullHydration && nodeSize > BlobGetMaxSize)
             {
@@ -242,12 +240,12 @@ internal class SyncCallbacks
             var (data, dataStartOffset, totalSize) = FetchBlobDataAsync(node, requiredOffset, requiredLength, cts.Token)
                 .GetAwaiter().GetResult();
 
-            Log($"FETCH_DATA: buffered {data.Length} bytes for node={nodeId}, dataStartOffset={dataStartOffset}, totalSize={totalSize}");
+            Log.Info($"{_logPrefix} FETCH_DATA: buffered {data.Length} bytes for node={nodeId}, dataStartOffset={dataStartOffset}, totalSize={totalSize}");
 
             int sourceOffset = (int)(requiredOffset - dataStartOffset);
             TransferData(*callbackInfo, data, sourceOffset, requiredOffset, requiredLength, totalSize, cts.Token);
 
-            Log($"FETCH_DATA: transfer complete for node={nodeId}");
+            Log.Info($"{_logPrefix} FETCH_DATA: transfer complete for node={nodeId}");
 
             // Record that we just hydrated this file so SyncEngine doesn't
             // re-upload it when FileSystemWatcher fires a Changed event.
@@ -256,11 +254,11 @@ internal class SyncCallbacks
         }
         catch (OperationCanceledException)
         {
-            Log($"FETCH_DATA cancelled: transferKey={transferKey}");
+            Log.Info($"{_logPrefix} FETCH_DATA cancelled: transferKey={transferKey}");
         }
         catch (Exception ex)
         {
-            LogError($"FETCH_DATA error: {ex.Message}");
+            Log.Error($"{_logPrefix} FETCH_DATA error: {ex.Message}");
             TransferError(*callbackInfo, new NTSTATUS(unchecked((int)0xC0000001))); // STATUS_UNSUCCESSFUL
         }
         finally
@@ -270,7 +268,7 @@ internal class SyncCallbacks
                 _inFlightFetches.TryRemove(transferKey, out _);
                 cts.Dispose();
                 try { OnDownloadCompleted?.Invoke(transferKey); }
-                catch (Exception ex) { LogError($"OnDownloadCompleted handler error: {ex.Message}"); }
+                catch (Exception ex) { Log.Error($"{_logPrefix} OnDownloadCompleted handler error: {ex.Message}"); }
             }
         }
     }
@@ -283,20 +281,20 @@ internal class SyncCallbacks
             var nodeId = ExtractNodeId(callbackInfo);
             var fullPath = ExtractFullPath(callbackInfo);
 
-            Log($"NOTIFY_DELETE: node={nodeId}, path={fullPath}");
+            Log.Info($"{_logPrefix} NOTIFY_DELETE: node={nodeId}, path={fullPath}");
 
             if (OnDeleteRequested != null)
                 allowed = OnDeleteRequested(nodeId, fullPath).GetAwaiter().GetResult();
         }
         catch (Exception ex)
         {
-            LogError($"NOTIFY_DELETE error: {ex.Message}");
+            Log.Error($"{_logPrefix} NOTIFY_DELETE error: {ex.Message}");
             allowed = false;
         }
         finally
         {
             try { AckDelete(callbackInfo, allowed); }
-            catch (Exception ex) { LogError($"AckDelete failed: {ex.Message}"); }
+            catch (Exception ex) { Log.Error($"{_logPrefix} AckDelete failed: {ex.Message}"); }
         }
     }
 
@@ -315,20 +313,20 @@ internal class SyncCallbacks
 
             bool targetInScope = ((uint)renameParams.Flags & 0x4) != 0; // CF_CALLBACK_RENAME_FLAG_TARGET_IN_SCOPE
 
-            Log($"NOTIFY_RENAME: node={nodeId}, {sourcePath} → {targetPath} (inScope={targetInScope})");
+            Log.Info($"{_logPrefix} NOTIFY_RENAME: node={nodeId}, {sourcePath} → {targetPath} (inScope={targetInScope})");
 
             if (OnRenameRequested != null)
                 allowed = OnRenameRequested(nodeId, sourcePath, targetPath, targetInScope).GetAwaiter().GetResult();
         }
         catch (Exception ex)
         {
-            LogError($"NOTIFY_RENAME error: {ex.Message}");
+            Log.Error($"{_logPrefix} NOTIFY_RENAME error: {ex.Message}");
             allowed = false;
         }
         finally
         {
             try { AckRename(callbackInfo, allowed); }
-            catch (Exception ex) { LogError($"AckRename failed: {ex.Message}"); }
+            catch (Exception ex) { Log.Error($"{_logPrefix} AckRename failed: {ex.Message}"); }
         }
     }
 
@@ -338,14 +336,14 @@ internal class SyncCallbacks
         {
             var transferKey = callbackInfo->TransferKey;
             var nodeId = ExtractNodeId(callbackInfo);
-            Log($"CANCEL_FETCH_DATA: node={nodeId}, transferKey={transferKey}");
+            Log.Info($"{_logPrefix} CANCEL_FETCH_DATA: node={nodeId}, transferKey={transferKey}");
 
             if (_inFlightFetches.TryGetValue(transferKey, out var entry))
                 entry.Cts.Cancel();
         }
         catch (Exception ex)
         {
-            LogError($"CANCEL_FETCH_DATA error: {ex.Message}");
+            Log.Error($"{_logPrefix} CANCEL_FETCH_DATA error: {ex.Message}");
         }
     }
 
@@ -361,7 +359,7 @@ internal class SyncCallbacks
             var (cts, nodeId) = kvp.Value;
             if (nodeId != null && shouldCancel(nodeId))
             {
-                Log($"Cancelling in-flight download for node {nodeId}");
+                Log.Info($"{_logPrefix} Cancelling in-flight download for node {nodeId}");
                 cts.Cancel();
             }
         }
@@ -375,20 +373,20 @@ internal class SyncCallbacks
             var nodeId = ExtractNodeId(callbackInfo);
             var fullPath = ExtractFullPath(callbackInfo);
 
-            Log($"NOTIFY_DEHYDRATE: node={nodeId}, path={fullPath}");
+            Log.Info($"{_logPrefix} NOTIFY_DEHYDRATE: node={nodeId}, path={fullPath}");
 
             if (OnDehydrateRequested != null)
                 allowed = OnDehydrateRequested(nodeId, fullPath).GetAwaiter().GetResult();
         }
         catch (Exception ex)
         {
-            LogError($"NOTIFY_DEHYDRATE error: {ex.Message}");
+            Log.Error($"{_logPrefix} NOTIFY_DEHYDRATE error: {ex.Message}");
             allowed = false;
         }
         finally
         {
             try { AckDehydrate(callbackInfo, allowed); }
-            catch (Exception ex) { LogError($"AckDehydrate failed: {ex.Message}"); }
+            catch (Exception ex) { Log.Error($"{_logPrefix} AckDehydrate failed: {ex.Message}"); }
         }
     }
 
@@ -398,11 +396,11 @@ internal class SyncCallbacks
         {
             var nodeId = ExtractNodeId(callbackInfo);
             var fullPath = ExtractFullPath(callbackInfo);
-            Log($"NOTIFY_DEHYDRATE_COMPLETION: node={nodeId}, path={fullPath}");
+            Log.Info($"{_logPrefix} NOTIFY_DEHYDRATE_COMPLETION: node={nodeId}, path={fullPath}");
         }
         catch (Exception ex)
         {
-            LogError($"NOTIFY_DEHYDRATE_COMPLETION error: {ex.Message}");
+            Log.Error($"{_logPrefix} NOTIFY_DEHYDRATE_COMPLETION error: {ex.Message}");
         }
     }
 
@@ -531,9 +529,9 @@ internal class SyncCallbacks
             return;
         var actual = ComputeDigest(algorithm, data);
         if (actual != expected)
-            Console.Error.WriteLine($"Digest mismatch ({context}): expected {expected}, got {actual}");
+            Log.Error($"Digest mismatch ({context}): expected {expected}, got {actual}");
         else
-            Console.WriteLine($"Digest OK ({context}): {algorithm}={actual}");
+            Log.Debug($"Digest OK ({context}): {algorithm}={actual}");
     }
 
     /// <summary>
@@ -573,14 +571,14 @@ internal class SyncCallbacks
                 {
                     var data = Convert.FromBase64String(item.DataAsBase64);
                     VerifyDigest(algo, data, item, $"Blob/get {node.BlobId}");
-                    Log($"FETCH_DATA: small file via Blob/get, {data.Length} bytes");
+                    Log.Info($"{_logPrefix} FETCH_DATA: small file via Blob/get, {data.Length} bytes");
                     return (data, 0, nodeSize);
                 }
             }
             catch (OperationCanceledException) { throw; }
             catch (Exception ex)
             {
-                LogError($"Blob/get failed for small file, falling back to HTTP: {ex.Message}");
+                Log.Error($"{_logPrefix} Blob/get failed for small file, falling back to HTTP: {ex.Message}");
             }
         }
 
@@ -616,7 +614,7 @@ internal class SyncCallbacks
                             }
                             catch (Exception ex) when (ex is not OperationCanceledException)
                             {
-                                LogError($"Digest fetch failed for range request: {ex.Message}");
+                                Log.Error($"{_logPrefix} Digest fetch failed for range request: {ex.Message}");
                             }
                         }
                         return (rangeBytes, requiredOffset, nodeSize);
@@ -624,7 +622,7 @@ internal class SyncCallbacks
 
                     // Server returned 200 (full content) — disable range requests
                     _rangeRequestsSupported = false;
-                    Log("Range requests not supported by server, falling back to full downloads");
+                    Log.Info($"{_logPrefix} Range requests not supported by server, falling back to full downloads");
 
                     if (algo != null)
                     {
@@ -637,7 +635,7 @@ internal class SyncCallbacks
                         }
                         catch (Exception ex) when (ex is not OperationCanceledException)
                         {
-                            LogError($"Digest fetch failed for full fallback: {ex.Message}");
+                            Log.Error($"{_logPrefix} Digest fetch failed for full fallback: {ex.Message}");
                         }
                     }
                     return (rangeBytes, 0, nodeSize);
@@ -647,7 +645,7 @@ internal class SyncCallbacks
             catch (Exception ex)
             {
                 _rangeRequestsSupported = false;
-                LogError($"Range request failed, falling back to full download: {ex.Message}");
+                Log.Error($"{_logPrefix} Range request failed, falling back to full download: {ex.Message}");
             }
         }
 
@@ -674,7 +672,7 @@ internal class SyncCallbacks
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
-                    LogError($"Digest fetch failed for full download: {ex.Message}");
+                    Log.Error($"{_logPrefix} Digest fetch failed for full download: {ex.Message}");
                 }
             }
 
@@ -703,7 +701,7 @@ internal class SyncCallbacks
                 var algo = GetDigestAlgorithm();
                 var ct = cts.Token;
 
-                Log($"FETCH_DATA: streaming {totalSize} bytes in {chunkSize} byte chunks for blob {blobId}");
+                Log.Info($"{_logPrefix} FETCH_DATA: streaming {totalSize} bytes in {chunkSize} byte chunks for blob {blobId}");
 
                 var stream = await _queue.EnqueueAsync(QueuePriority.Interactive,
                     () => _jmapClient.DownloadBlobAsync(blobId, node.Type, node.Name, ct), ct);
@@ -731,7 +729,7 @@ internal class SyncCallbacks
 
                         // Log progress every ~1MB to avoid spam
                         if (totalTransferred == bytesRead || totalTransferred % (1024 * 1024) < chunkSize)
-                            Log($"FETCH_DATA: stream progress node={nodeId}, {totalTransferred}/{totalSize} bytes ({totalTransferred * 100 / totalSize}%)");
+                            Log.Info($"{_logPrefix} FETCH_DATA: stream progress node={nodeId}, {totalTransferred}/{totalSize} bytes ({totalTransferred * 100 / totalSize}%)");
 
                         if (totalSize > 0)
                         {
@@ -747,7 +745,7 @@ internal class SyncCallbacks
                         }
                     }
 
-                    Log($"FETCH_DATA: streamed {totalTransferred} bytes total for blob {blobId}");
+                    Log.Info($"{_logPrefix} FETCH_DATA: streamed {totalTransferred} bytes total for blob {blobId}");
 
                     // Verify digest against server
                     if (hash != null && algo != null)
@@ -762,15 +760,15 @@ internal class SyncCallbacks
                                 if (expected != null)
                                 {
                                     if (actual != expected)
-                                        LogError($"Digest mismatch (stream {blobId}): expected {expected}, got {actual}");
+                                        Log.Error($"{_logPrefix} Digest mismatch (stream {blobId}): expected {expected}, got {actual}");
                                     else
-                                        Log($"Digest OK (stream {blobId}): {algo}={actual}");
+                                        Log.Info($"{_logPrefix} Digest OK (stream {blobId}): {algo}={actual}");
                                 }
                             }
                         }
                         catch (Exception ex) when (ex is not OperationCanceledException)
                         {
-                            LogError($"Digest fetch failed for streaming download: {ex.Message}");
+                            Log.Error($"{_logPrefix} Digest fetch failed for streaming download: {ex.Message}");
                         }
                     }
                 }
@@ -780,11 +778,11 @@ internal class SyncCallbacks
             }
             catch (OperationCanceledException)
             {
-                Log($"FETCH_DATA cancelled: transferKey={transferKey}");
+                Log.Info($"{_logPrefix} FETCH_DATA cancelled: transferKey={transferKey}");
             }
             catch (Exception ex)
             {
-                LogError($"FETCH_DATA streaming error: {ex.Message}");
+                Log.Error($"{_logPrefix} FETCH_DATA streaming error: {ex.Message}");
                 TransferError(callbackInfo, new NTSTATUS(unchecked((int)0xC0000001))); // STATUS_UNSUCCESSFUL
             }
             finally
@@ -792,7 +790,7 @@ internal class SyncCallbacks
                 _inFlightFetches.TryRemove(transferKey, out _);
                 cts.Dispose();
                 try { OnDownloadCompleted?.Invoke(transferKey); }
-                catch (Exception ex) { LogError($"OnDownloadCompleted handler error: {ex.Message}"); }
+                catch (Exception ex) { Log.Error($"{_logPrefix} OnDownloadCompleted handler error: {ex.Message}"); }
             }
         });
     }
@@ -877,7 +875,7 @@ internal class SyncCallbacks
 
     private unsafe void TransferError(CF_CALLBACK_INFO callbackInfo, NTSTATUS status)
     {
-        LogError($"TransferError: status=0x{(uint)status.Value:X8}, transferKey={callbackInfo.TransferKey} (marks placeholder NOT in-sync)");
+        Log.Error($"{_logPrefix} TransferError: status=0x{(uint)status.Value:X8}, transferKey={callbackInfo.TransferKey} (marks placeholder NOT in-sync)");
         var opInfo = new CF_OPERATION_INFO
         {
             StructSize = (uint)sizeof(CF_OPERATION_INFO),

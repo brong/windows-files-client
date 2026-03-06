@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Headers;
+using FileNodeClient.Ipc;
 
 namespace FileNodeClient.Jmap.Auth;
 
@@ -81,13 +82,13 @@ public class OAuthTokenHandler : DelegatingHandler
                 _refreshToken = tokenResponse.RefreshToken;
             _expiresAt = DateTimeOffset.UtcNow.AddSeconds(tokenResponse.ExpiresIn);
 
-            Console.WriteLine($"[OAuth] Token refreshed, expires at {_expiresAt:u}");
+            Log.Info($"[OAuth] Token refreshed, expires at {_expiresAt:u}");
             TokenRefreshed?.Invoke(this);
             return true;
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"[OAuth] Token refresh failed: {ex.Message}");
+            Log.Error($"[OAuth] Token refresh failed: {ex.Message}");
             return false;
         }
         finally

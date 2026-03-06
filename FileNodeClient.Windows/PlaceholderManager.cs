@@ -3,6 +3,7 @@ using System.Text;
 using Windows.Win32;
 using Windows.Win32.Storage.CloudFilters;
 using Windows.Win32.Storage.FileSystem;
+using FileNodeClient.Ipc;
 using FileNodeClient.Jmap.Models;
 
 namespace FileNodeClient.Windows;
@@ -13,9 +14,6 @@ internal class PlaceholderManager
 
     private readonly string _syncRootPath;
     private readonly string _logPrefix;
-
-    private void Log(string msg) => Console.WriteLine($"{_logPrefix} {msg}");
-    private void LogError(string msg) => Console.Error.WriteLine($"{_logPrefix} {msg}");
 
     public PlaceholderManager(string syncRootPath, string logPrefix)
     {
@@ -131,12 +129,12 @@ internal class PlaceholderManager
             {
                 // Report per-entry results before throwing
                 for (int i = 0; i < children.Length; i++)
-                    LogError($"  [{i}] {children[i].Name} (folder={children[i].IsFolder}): 0x{infos[i].Result:X8}");
-                LogError($"CfCreatePlaceholders failed in {parentPath}: 0x{hr.Value:X8} ({entriesProcessed} processed)");
+                    Log.Error($"{_logPrefix}   [{i}] {children[i].Name} (folder={children[i].IsFolder}): 0x{infos[i].Result:X8}");
+                Log.Error($"{_logPrefix} CfCreatePlaceholders failed in {parentPath}: 0x{hr.Value:X8} ({entriesProcessed} processed)");
                 hr.ThrowOnFailure();
             }
 
-            Log($"Created {entriesProcessed} placeholders in {parentPath}");
+            Log.Info($"{_logPrefix} Created {entriesProcessed} placeholders in {parentPath}");
         }
         finally
         {

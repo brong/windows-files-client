@@ -832,7 +832,7 @@ sealed class ManageAccountsForm : Form
             }
             else if (ex != null)
             {
-                Console.Error.WriteLine($"Failed to refresh accounts for {loginId}: {ex.Message}");
+                Log.Error($"Failed to refresh accounts for {loginId}: {ex.Message}");
             }
             _refreshedLogins.Add(loginId);
         }

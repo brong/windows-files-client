@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using FileNodeClient.Ipc;
 
 namespace FileNodeClient.Windows;
 
@@ -62,18 +63,18 @@ internal sealed class FileChangeWatcher : IDisposable
         _watcher.Created += (_, e) =>
         {
             try { OnCreated(e.FullPath); }
-            catch (Exception ex) { Console.Error.WriteLine($"{_logPrefix} OnCreated handler error: {ex.Message}"); }
+            catch (Exception ex) { Log.Error($"{_logPrefix} OnCreated handler error: {ex.Message}"); }
         };
         _watcher.Changed += (_, e) => OnChanged(e.FullPath);
         _watcher.Renamed += (_, e) =>
         {
             try { OnRenamed?.Invoke(e.OldFullPath, e.FullPath); }
-            catch (Exception ex) { Console.Error.WriteLine($"{_logPrefix} OnRenamed handler error: {ex.Message}"); }
+            catch (Exception ex) { Log.Error($"{_logPrefix} OnRenamed handler error: {ex.Message}"); }
         };
         _watcher.Error += OnWatcherError;
 
         _watcher.EnableRaisingEvents = true;
-        Console.WriteLine($"{_logPrefix} File change watcher started.");
+        Log.Info($"{_logPrefix} File change watcher started.");
     }
 
     public void Stop()
@@ -85,7 +86,7 @@ internal sealed class FileChangeWatcher : IDisposable
 
     private void OnWatcherError(object sender, ErrorEventArgs e)
     {
-        Console.Error.WriteLine($"{_logPrefix} FileSystemWatcher error: {e.GetException().Message}");
+        Log.Error($"{_logPrefix} FileSystemWatcher error: {e.GetException().Message}");
         // Restart the watcher — after a buffer overflow it stops delivering events
         try
         {
@@ -93,12 +94,12 @@ internal sealed class FileChangeWatcher : IDisposable
             {
                 _watcher.EnableRaisingEvents = false;
                 _watcher.EnableRaisingEvents = true;
-                Console.WriteLine($"{_logPrefix} FileSystemWatcher restarted after error.");
+                Log.Info($"{_logPrefix} FileSystemWatcher restarted after error.");
             }
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"{_logPrefix} Failed to restart FileSystemWatcher: {ex.Message}");
+            Log.Error($"{_logPrefix} Failed to restart FileSystemWatcher: {ex.Message}");
         }
     }
 
@@ -195,7 +196,7 @@ internal sealed class FileChangeWatcher : IDisposable
         if (changes.Count > 0)
         {
             try { OnChanges?.Invoke(changes.ToArray()); }
-            catch (Exception ex) { Console.Error.WriteLine($"{_logPrefix} OnChanges handler error: {ex.Message}"); }
+            catch (Exception ex) { Log.Error($"{_logPrefix} OnChanges handler error: {ex.Message}"); }
         }
     }
 

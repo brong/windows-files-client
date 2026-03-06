@@ -6,6 +6,7 @@ using Windows.Storage;
 using Windows.Storage.Provider;
 using Windows.Win32;
 using Windows.Win32.Storage.CloudFilters;
+using FileNodeClient.Ipc;
 
 namespace FileNodeClient.Windows;
 
@@ -29,9 +30,6 @@ internal class SyncRoot : IDisposable
     private CF_CALLBACK[]? _callbackDelegates;
 
     public string SyncRootPath => _syncRootPath;
-
-    private void Log(string msg) => Console.WriteLine($"{_logPrefix} {msg}");
-    private void LogError(string msg) => Console.Error.WriteLine($"{_logPrefix} {msg}");
 
     public SyncRoot(string syncRootPath, string logPrefix)
     {
@@ -60,7 +58,7 @@ internal class SyncRoot : IDisposable
             var existing = StorageProviderSyncRootManager.GetSyncRootInformationForFolder(folder);
             if (existing?.Id != null && existing.Id != _syncRootId)
             {
-                Log($"Unregistering stale sync root at same path: {existing.Id}");
+                Log.Info($"{_logPrefix} Unregistering stale sync root at same path: {existing.Id}");
                 StorageProviderSyncRootManager.Unregister(existing.Id);
             }
         }
@@ -90,7 +88,7 @@ internal class SyncRoot : IDisposable
 
         StorageProviderSyncRootManager.Register(info);
         _registered = true;
-        Log($"Sync root registered: {_syncRootPath} (id={_syncRootId})");
+        Log.Info($"{_logPrefix} Sync root registered: {_syncRootPath} (id={_syncRootId})");
     }
 
     internal unsafe void Connect(CF_CALLBACK_REGISTRATION[] callbacks, CF_CALLBACK[] delegates)
@@ -110,7 +108,7 @@ internal class SyncRoot : IDisposable
 
         _connectionKey = key;
         _connected = true;
-        Log("Sync root connected, ready for callbacks.");
+        Log.Info($"{_logPrefix} Sync root connected, ready for callbacks.");
     }
 
     internal CF_CONNECTION_KEY GetConnectionKey() => _connectionKey;
@@ -129,7 +127,7 @@ internal class SyncRoot : IDisposable
             _connected = false;
             _callbackRegistrations = null;
             _callbackDelegates = null;
-            Log("Sync root disconnected.");
+            Log.Info($"{_logPrefix} Sync root disconnected.");
         }
     }
 
@@ -139,7 +137,7 @@ internal class SyncRoot : IDisposable
         {
             StorageProviderSyncRootManager.Unregister(_syncRootId);
             _registered = false;
-            Log("Sync root unregistered.");
+            Log.Info($"{_logPrefix} Sync root unregistered.");
         }
     }
 
@@ -175,7 +173,7 @@ internal class SyncRoot : IDisposable
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"Failed to enumerate sync roots: {ex.Message}");
+            Log.Error($"Failed to enumerate sync roots: {ex.Message}");
         }
         return results;
     }
@@ -194,11 +192,11 @@ internal class SyncRoot : IDisposable
         try
         {
             StorageProviderSyncRootManager.Unregister(syncRootId);
-            Console.WriteLine($"Unregistered sync root: {syncRootId}");
+            Log.Info($"Unregistered sync root: {syncRootId}");
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Sync root not registered (or already cleaned): {ex.Message}");
+            Log.Info($"Sync root not registered (or already cleaned): {ex.Message}");
         }
 
         // 2. Clean up NavPane / shell registry entries
@@ -222,19 +220,19 @@ internal class SyncRoot : IDisposable
             // Verify deletion — if anything remains, retry after a longer delay
             if (Directory.Exists(syncRootPath))
             {
-                Console.WriteLine("  Some files remain, retrying after delay...");
+                Log.Info("  Some files remain, retrying after delay...");
                 Thread.Sleep(3000);
                 DeleteCloudFilesRecursive(syncRootPath);
             }
 
             if (Directory.Exists(syncRootPath))
-                Console.Error.WriteLine($"  WARNING: Could not fully delete {syncRootPath}");
+                Log.Error($"  WARNING: Could not fully delete {syncRootPath}");
             else
-                Console.WriteLine($"Deleted sync root directory: {syncRootPath}");
+                Log.Info($"Deleted sync root directory: {syncRootPath}");
         }
         else
         {
-            Console.WriteLine($"Sync root directory does not exist: {syncRootPath}");
+            Log.Info($"Sync root directory does not exist: {syncRootPath}");
         }
     }
 
@@ -252,11 +250,11 @@ internal class SyncRoot : IDisposable
         try
         {
             StorageProviderSyncRootManager.Unregister(syncRootId);
-            Console.WriteLine($"Unregistered sync root: {syncRootId}");
+            Log.Info($"Unregistered sync root: {syncRootId}");
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Sync root not registered (or already cleaned): {ex.Message}");
+            Log.Info($"Sync root not registered (or already cleaned): {ex.Message}");
         }
 
         NavPaneIntegration.CleanupStaleEntries(ProviderId);
@@ -269,7 +267,7 @@ internal class SyncRoot : IDisposable
 
         if (!Directory.Exists(syncRootPath))
         {
-            Console.WriteLine($"Sync root directory does not exist: {syncRootPath}");
+            Log.Info($"Sync root directory does not exist: {syncRootPath}");
             return;
         }
 
@@ -279,7 +277,7 @@ internal class SyncRoot : IDisposable
         // 3. Remove empty directories bottom-up
         RemoveEmptyDirectories(syncRootPath);
 
-        Console.WriteLine($"Detach complete for: {syncRootPath}");
+        Log.Info($"Detach complete for: {syncRootPath}");
     }
 
     private const uint FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS = 0x00400000;
@@ -300,7 +298,7 @@ internal class SyncRoot : IDisposable
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"  Failed to check/delete {Path.GetFileName(file)}: {ex.Message}");
+                Log.Error($"  Failed to check/delete {Path.GetFileName(file)}: {ex.Message}");
             }
         }
 
@@ -322,7 +320,7 @@ internal class SyncRoot : IDisposable
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"  Failed to remove empty dir {path}: {ex.Message}");
+                Log.Error($"  Failed to remove empty dir {path}: {ex.Message}");
             }
         }
     }
@@ -341,7 +339,7 @@ internal class SyncRoot : IDisposable
     {
         var files = Directory.EnumerateFiles(path).ToList();
         var dirs = Directory.EnumerateDirectories(path).ToList();
-        Console.WriteLine($"  Deleting {files.Count} files and {dirs.Count} dirs in {Path.GetFileName(path)}/");
+        Log.Info($"  Deleting {files.Count} files and {dirs.Count} dirs in {Path.GetFileName(path)}/");
 
         foreach (var file in files)
             DeleteWithReparseBypass(file, isDirectory: false);
@@ -352,7 +350,7 @@ internal class SyncRoot : IDisposable
         // Verify files are gone before trying to delete the directory
         var remaining = Directory.EnumerateFileSystemEntries(path).ToList();
         if (remaining.Count > 0)
-            Console.Error.WriteLine($"  {remaining.Count} items remain in {Path.GetFileName(path)}/: {string.Join(", ", remaining.Select(Path.GetFileName))}");
+            Log.Error($"  {remaining.Count} items remain in {Path.GetFileName(path)}/: {string.Join(", ", remaining.Select(Path.GetFileName))}");
 
         DeleteWithReparseBypass(path, isDirectory: true);
     }
@@ -379,7 +377,7 @@ internal class SyncRoot : IDisposable
             if (handle.IsInvalid)
             {
                 var err = Marshal.GetLastWin32Error();
-                Console.Error.WriteLine($"  Failed to open for delete (err={err}): {Path.GetFileName(path)}");
+                Log.Error($"  Failed to open for delete (err={err}): {Path.GetFileName(path)}");
             }
             // File/directory is deleted when handle is disposed (DELETE_ON_CLOSE)
             // Check if file still exists after handle disposal happens at end of using block
@@ -394,7 +392,7 @@ internal class SyncRoot : IDisposable
             }
             catch
             {
-                Console.Error.WriteLine($"  Failed to delete {(isDirectory ? "directory " : "")}{path}: {ex.Message}");
+                Log.Error($"  Failed to delete {(isDirectory ? "directory " : "")}{path}: {ex.Message}");
             }
         }
     }
@@ -425,11 +423,11 @@ internal class SyncRoot : IDisposable
                 acl.RemoveAccessRule(rule);
 
             dirInfo.SetAccessControl(acl);
-            Console.WriteLine($"  {(protect ? "Protected" : "Unprotected")} folder: {path}");
+            Log.Info($"  {(protect ? "Protected" : "Unprotected")} folder: {path}");
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"Failed to {(protect ? "set" : "remove")} write protection on {path}: {ex.Message}");
+            Log.Error($"Failed to {(protect ? "set" : "remove")} write protection on {path}: {ex.Message}");
         }
     }
 
@@ -453,7 +451,7 @@ internal class SyncRoot : IDisposable
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"Failed to remove write protections under {rootPath}: {ex.Message}");
+            Log.Error($"Failed to remove write protections under {rootPath}: {ex.Message}");
         }
     }
 }

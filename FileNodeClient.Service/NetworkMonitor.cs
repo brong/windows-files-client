@@ -1,3 +1,4 @@
+using FileNodeClient.Ipc;
 using Windows.Networking.Connectivity;
 
 namespace FileNodeClient.Service;
@@ -54,7 +55,7 @@ sealed class NetworkMonitor : IDisposable
         catch (Exception ex)
         {
             // WinRT API can throw if network subsystem is unavailable
-            Console.Error.WriteLine($"[NetworkMonitor] Error reading network state: {ex.Message}");
+            Log.Error($"[NetworkMonitor] Error reading network state: {ex.Message}");
             connected = true; // Assume connected if we can't tell
             metered = false;
         }
@@ -67,9 +68,9 @@ sealed class NetworkMonitor : IDisposable
         IsConnected = connected;
         IsMetered = metered;
 
-        Console.WriteLine($"[NetworkMonitor] State changed: connected={connected} (was {wasConnected}), metered={metered} (was {wasMetered})");
+        Log.Info($"[NetworkMonitor] State changed: connected={connected} (was {wasConnected}), metered={metered} (was {wasMetered})");
         try { NetworkStateChanged?.Invoke(connected, metered); }
-        catch (Exception ex) { Console.Error.WriteLine($"[NetworkMonitor] NetworkStateChanged handler error: {ex.Message}"); }
+        catch (Exception ex) { Log.Error($"[NetworkMonitor] NetworkStateChanged handler error: {ex.Message}"); }
     }
 
     public void Dispose()

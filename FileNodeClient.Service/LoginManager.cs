@@ -1,3 +1,4 @@
+using FileNodeClient.Ipc;
 using FileNodeClient.Jmap;
 using FileNodeClient.Windows;
 
@@ -67,7 +68,7 @@ sealed class LoginManager : IDisposable
 
         _networkMonitor = new NetworkMonitor();
         _networkMonitor.NetworkStateChanged += OnNetworkStateChanged;
-        Console.WriteLine($"[NetworkMonitor] Initial state: connected={_networkMonitor.IsConnected}, metered={_networkMonitor.IsMetered}");
+        Log.Info($"[NetworkMonitor] Initial state: connected={_networkMonitor.IsConnected}, metered={_networkMonitor.IsMetered}");
 
         var storedLogins = _credentialStore.LoadAll();
 
@@ -83,7 +84,7 @@ sealed class LoginManager : IDisposable
         {
             try
             {
-                Console.WriteLine($"Loading login: {login.LoginId}");
+                Log.Info($"Loading login: {login.LoginId}");
                 await ConnectAndStartAsync(login.SessionUrl, login.Token, login.LoginId,
                     enabledAccountIds: login.EnabledAccountIds,
                     persist: false, iconPath: iconPath, clean: clean, ct: ct,
@@ -92,7 +93,7 @@ sealed class LoginManager : IDisposable
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"Failed to load login {login.LoginId}: {ex.Message}");
+                Log.Error($"Failed to load login {login.LoginId}: {ex.Message}");
                 lock (_lock)
                     _failedLogins.Add(new FailedLoginInfo(login.LoginId, login.SessionUrl, login.Token,
                         login.EnabledAccountIds, ex.Message,
@@ -174,7 +175,7 @@ sealed class LoginManager : IDisposable
             try { await supervisor.StopAsync(); }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"Error stopping supervisor {supervisor.DisplayName}: {ex.Message}");
+                Log.Error($"Error stopping supervisor {supervisor.DisplayName}: {ex.Message}");
             }
 
             // Dispose first to disconnect cfapi, then clean up the sync root.
@@ -225,7 +226,7 @@ sealed class LoginManager : IDisposable
         try { await supervisor.StopAsync(); }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"Error stopping supervisor {supervisor.DisplayName}: {ex.Message}");
+            Log.Error($"Error stopping supervisor {supervisor.DisplayName}: {ex.Message}");
         }
 
         // Dispose first to disconnect from the cloud filter driver — otherwise
@@ -279,21 +280,21 @@ sealed class LoginManager : IDisposable
                 if (activeAccountIds.Contains(accountId))
                     continue;
 
-                Console.WriteLine($"Orphaned sync root detected: accountId={accountId}, path={path}");
+                Log.Info($"Orphaned sync root detected: accountId={accountId}, path={path}");
                 try
                 {
                     SyncEngine.Detach(path, accountId);
-                    Console.WriteLine($"Detached orphaned sync root: {accountId}");
+                    Log.Info($"Detached orphaned sync root: {accountId}");
                 }
                 catch (Exception ex)
                 {
-                    Console.Error.WriteLine($"Failed to detach orphaned sync root {accountId}: {ex.Message}");
+                    Log.Error($"Failed to detach orphaned sync root {accountId}: {ex.Message}");
                 }
             }
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"Orphaned sync root audit failed: {ex.Message}");
+            Log.Error($"Orphaned sync root audit failed: {ex.Message}");
         }
     }
 
@@ -301,12 +302,12 @@ sealed class LoginManager : IDisposable
     {
         try
         {
-            Console.WriteLine($"Cleaning sync root for {supervisor.DisplayName}...");
+            Log.Info($"Cleaning sync root for {supervisor.DisplayName}...");
             SyncEngine.Clean(supervisor.SyncRootPath, supervisor.AccountId);
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"Error cleaning sync root for {supervisor.DisplayName}: {ex.Message}");
+            Log.Error($"Error cleaning sync root for {supervisor.DisplayName}: {ex.Message}");
         }
     }
 
@@ -382,7 +383,7 @@ sealed class LoginManager : IDisposable
             try { await supervisor.StopAsync(); }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"Error stopping supervisor {supervisor.DisplayName}: {ex.Message}");
+                Log.Error($"Error stopping supervisor {supervisor.DisplayName}: {ex.Message}");
             }
         }
 
@@ -451,7 +452,7 @@ sealed class LoginManager : IDisposable
         // Detach accounts no longer on server
         foreach (var accountId in previouslyActive.Where(id => !newAccountIds.Contains(id)))
         {
-            Console.WriteLine($"Account {accountId} removed from server, detaching...");
+            Log.Info($"Account {accountId} removed from server, detaching...");
             var displayName = oldSupervisors.FirstOrDefault(s => s.AccountId == accountId)?.DisplayName ?? accountId;
             var syncRootPath = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
@@ -464,7 +465,7 @@ sealed class LoginManager : IDisposable
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"Failed to detach {accountId}: {ex.Message}");
+                Log.Error($"Failed to detach {accountId}: {ex.Message}");
             }
         }
 
@@ -508,7 +509,7 @@ sealed class LoginManager : IDisposable
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"Failed to restart supervisor for {displayName}: {ex.Message}");
+                Log.Error($"Failed to restart supervisor for {displayName}: {ex.Message}");
                 lock (_lock)
                     _supervisors.Remove(supervisor);
                 supervisor.Dispose();
@@ -554,18 +555,18 @@ sealed class LoginManager : IDisposable
         try { await supervisor.StopAsync(); }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"Error stopping supervisor {supervisor.DisplayName}: {ex.Message}");
+            Log.Error($"Error stopping supervisor {supervisor.DisplayName}: {ex.Message}");
         }
 
         // Detach: delete dehydrated files, empty dirs, unregister sync root
         try
         {
-            Console.WriteLine($"Detaching sync root for {supervisor.DisplayName}...");
+            Log.Info($"Detaching sync root for {supervisor.DisplayName}...");
             SyncEngine.Detach(supervisor.SyncRootPath, supervisor.AccountId);
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"Error detaching sync root for {supervisor.DisplayName}: {ex.Message}");
+            Log.Error($"Error detaching sync root for {supervisor.DisplayName}: {ex.Message}");
         }
 
         supervisor.Dispose();
@@ -613,7 +614,7 @@ sealed class LoginManager : IDisposable
         try { await supervisor.StopAsync(); }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"Error stopping supervisor {supervisor.DisplayName}: {ex.Message}");
+            Log.Error($"Error stopping supervisor {supervisor.DisplayName}: {ex.Message}");
         }
 
         // Delete node cache so next start does a full fetch
@@ -647,7 +648,7 @@ sealed class LoginManager : IDisposable
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"Failed to restart supervisor for {displayName}: {ex.Message}");
+            Log.Error($"Failed to restart supervisor for {displayName}: {ex.Message}");
             lock (_lock)
                 _supervisors.Remove(newSupervisor);
             newSupervisor.Dispose();
@@ -680,7 +681,7 @@ sealed class LoginManager : IDisposable
         try { await supervisor.StopAsync(); }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"Error stopping supervisor {supervisor.DisplayName}: {ex.Message}");
+            Log.Error($"Error stopping supervisor {supervisor.DisplayName}: {ex.Message}");
         }
 
         var displayName = supervisor.DisplayName;
@@ -721,7 +722,7 @@ sealed class LoginManager : IDisposable
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"Failed to restart supervisor for {displayName}: {ex.Message}");
+            Log.Error($"Failed to restart supervisor for {displayName}: {ex.Message}");
             lock (_lock)
                 _supervisors.Remove(newSupervisor);
             newSupervisor.Dispose();
@@ -777,7 +778,7 @@ sealed class LoginManager : IDisposable
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"Failed to start supervisor for {displayName}: {ex.Message}");
+            Log.Error($"Failed to start supervisor for {displayName}: {ex.Message}");
             lock (_lock)
                 _supervisors.Remove(supervisor);
             supervisor.Dispose();
@@ -817,7 +818,7 @@ sealed class LoginManager : IDisposable
         foreach (var supervisor in all)
         {
             try { await supervisor.StopAsync(); }
-            catch (Exception ex) { Console.Error.WriteLine($"Error stopping {supervisor.DisplayName}: {ex.Message}"); }
+            catch (Exception ex) { Log.Error($"Error stopping {supervisor.DisplayName}: {ex.Message}"); }
         }
     }
 
@@ -874,9 +875,9 @@ sealed class LoginManager : IDisposable
             sessionUrl = session.SessionUrl;
             token = session.Token;
         }
-        Console.WriteLine($"Refreshing accounts for login {loginId} from {sessionUrl}...");
+        Log.Info($"Refreshing accounts for login {loginId} from {sessionUrl}...");
         var accounts = await DiscoverAccountsAsync(sessionUrl, token, ct);
-        Console.WriteLine($"Refreshed login {loginId}: {accounts.Count} account(s) found");
+        Log.Info($"Refreshed login {loginId}: {accounts.Count} account(s) found");
         return accounts;
     }
 
@@ -906,7 +907,7 @@ sealed class LoginManager : IDisposable
         foreach (var supervisor in toStop)
         {
             try { await supervisor.StopAsync(); }
-            catch (Exception ex) { Console.Error.WriteLine($"Error stopping {supervisor.DisplayName}: {ex.Message}"); }
+            catch (Exception ex) { Log.Error($"Error stopping {supervisor.DisplayName}: {ex.Message}"); }
             supervisor.Dispose();
         }
 
@@ -946,7 +947,7 @@ sealed class LoginManager : IDisposable
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"Failed to start supervisor for {displayName}: {ex.Message}");
+                Log.Error($"Failed to start supervisor for {displayName}: {ex.Message}");
                 lock (_lock)
                     _supervisors.Remove(supervisor);
                 supervisor.Dispose();
@@ -1014,9 +1015,9 @@ sealed class LoginManager : IDisposable
             };
         }
 
-        Console.WriteLine("Connecting to JMAP...");
+        Log.Info("Connecting to JMAP...");
         await jmapClient.ConnectAsync(sessionUrl, ct);
-        Console.WriteLine($"Connected as {jmapClient.Session.Username}");
+        Log.Info($"Connected as {jmapClient.Session.Username}");
 
         loginId ??= CredentialStore.DeriveLoginId(jmapClient.Session.Username, sessionUrl);
 
@@ -1026,7 +1027,7 @@ sealed class LoginManager : IDisposable
             existing = _sessions.Any(s => s.LoginId == loginId);
         if (existing)
         {
-            Console.WriteLine($"Replacing existing login {loginId}");
+            Log.Info($"Replacing existing login {loginId}");
             await RemoveLoginAsync(loginId);
             clean = true; // Force clean start after removing old login
         }
@@ -1080,7 +1081,7 @@ sealed class LoginManager : IDisposable
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"Failed to start supervisor for {displayName}: {ex.Message}");
+                Log.Error($"Failed to start supervisor for {displayName}: {ex.Message}");
                 lock (_lock)
                     _supervisors.Remove(supervisor);
                 supervisor.Dispose();
@@ -1129,7 +1130,7 @@ sealed class LoginManager : IDisposable
     private async Task RunPushWatcherAsync(LoginSession session, CancellationToken ct)
     {
         var username = session.Client.Session.Username;
-        Console.WriteLine($"[Push:{username}] Starting shared push watcher");
+        Log.Info($"[Push:{username}] Starting shared push watcher");
 
         int backoffMs = 30000;
         const int maxBackoffMs = 60000;
@@ -1143,7 +1144,7 @@ sealed class LoginManager : IDisposable
                 {
                     if (wasDisconnected)
                     {
-                        Console.WriteLine($"[Push:{username}] Reconnected");
+                        Log.Info($"[Push:{username}] Reconnected");
                         NotifySupervisorsConnectivity(session, restored: true);
                         wasDisconnected = false;
                     }
@@ -1157,7 +1158,7 @@ sealed class LoginManager : IDisposable
                 }
 
                 // Stream ended normally — reconnect
-                Console.WriteLine($"[Push:{username}] SSE stream ended, reconnecting...");
+                Log.Info($"[Push:{username}] SSE stream ended, reconnecting...");
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -1165,7 +1166,7 @@ sealed class LoginManager : IDisposable
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"[Push:{username}] SSE error: {ex.Message}");
+                Log.Error($"[Push:{username}] SSE error: {ex.Message}");
                 wasDisconnected = true;
 
                 // SSE is just a notification channel — don't mark accounts
@@ -1179,7 +1180,7 @@ sealed class LoginManager : IDisposable
             }
         }
 
-        Console.WriteLine($"[Push:{username}] Push watcher stopped");
+        Log.Info($"[Push:{username}] Push watcher stopped");
     }
 
     private void NotifySupervisorsConnectivity(LoginSession session, bool restored)
@@ -1225,7 +1226,7 @@ sealed class LoginManager : IDisposable
         if (!isConnected)
         {
             // Network went offline: notify all supervisors, stop push watchers
-            Console.WriteLine("[NetworkMonitor] Network offline — marking accounts disconnected");
+            Log.Info("[NetworkMonitor] Network offline — marking accounts disconnected");
             foreach (var session in sessions)
                 StopPushWatcher(session);
             foreach (var session in sessions)
@@ -1234,7 +1235,7 @@ sealed class LoginManager : IDisposable
         else
         {
             // Network came online: restart push watchers, notify supervisors
-            Console.WriteLine("[NetworkMonitor] Network online — reconnecting");
+            Log.Info("[NetworkMonitor] Network online — reconnecting");
             foreach (var session in sessions)
             {
                 NotifySupervisorsConnectivity(session, restored: true);
@@ -1250,10 +1251,10 @@ sealed class LoginManager : IDisposable
             supervisor.BackgroundSyncEnabled = !isMetered;
 
         if (isMetered)
-            Console.WriteLine("[NetworkMonitor] Metered connection — background sync suppressed");
+            Log.Info("[NetworkMonitor] Metered connection — background sync suppressed");
         else if (isConnected)
         {
-            Console.WriteLine("[NetworkMonitor] Unmetered connection — background sync enabled");
+            Log.Info("[NetworkMonitor] Unmetered connection — background sync enabled");
             // Trigger catch-up poll on transition from metered to unmetered
             foreach (var supervisor in supervisors)
                 supervisor.PushState("");
@@ -1290,7 +1291,7 @@ sealed class LoginManager : IDisposable
             {
                 try
                 {
-                    Console.WriteLine($"[RetryLogin] Retrying failed login {f.LoginId}...");
+                    Log.Info($"[RetryLogin] Retrying failed login {f.LoginId}...");
                     await ConnectAndStartAsync(f.SessionUrl, f.Token, f.LoginId,
                         enabledAccountIds: f.EnabledAccountIds,
                         persist: false, iconPath: _iconPath, clean: false, ct: _parentCt,
@@ -1299,7 +1300,7 @@ sealed class LoginManager : IDisposable
                 }
                 catch (Exception ex)
                 {
-                    Console.Error.WriteLine($"[RetryLogin] Retry failed for {f.LoginId}: {ex.Message}");
+                    Log.Error($"[RetryLogin] Retry failed for {f.LoginId}: {ex.Message}");
                     lock (_lock)
                         _failedLogins.Add(f with { Error = ex.Message });
                 }

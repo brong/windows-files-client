@@ -2,6 +2,7 @@ using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using FileNodeClient.Ipc;
 
 namespace FileNodeClient.Jmap.Auth;
 
@@ -158,7 +159,7 @@ public static class OAuthClient
         var response = await http.PostAsync(revocationEndpoint, form, ct);
         // Revocation is best-effort; don't throw on failure
         if (!response.IsSuccessStatusCode)
-            Console.Error.WriteLine($"[OAuth] Token revocation returned {(int)response.StatusCode}");
+            Log.Warn($"[OAuth] Token revocation returned {(int)response.StatusCode}");
     }
 
     private static string Base64UrlEncode(byte[] data)

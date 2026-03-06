@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using FileNodeClient.Ipc;
 using FileNodeClient.Jmap.Models;
 
 namespace FileNodeClient.Windows;
@@ -72,7 +73,7 @@ public static class NodeCache
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"Failed to load node cache: {ex.Message}");
+            Log.Error($"Failed to load node cache: {ex.Message}");
             return null;
         }
     }
@@ -150,7 +151,7 @@ public static class NodeCache
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"Failed to save node cache: {ex.Message}");
+            Log.Error($"Failed to save node cache: {ex.Message}");
         }
     }
 
@@ -164,7 +165,7 @@ public static class NodeCache
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"Failed to delete node cache: {ex.Message}");
+            Log.Error($"Failed to delete node cache: {ex.Message}");
         }
     }
 }

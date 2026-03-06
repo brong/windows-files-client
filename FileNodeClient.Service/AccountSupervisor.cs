@@ -1,4 +1,5 @@
 using System.Threading.Channels;
+using FileNodeClient.Ipc;
 using FileNodeClient.Jmap;
 using FileNodeClient.Jmap.Models;
 using FileNodeClient.Windows;
@@ -58,12 +59,12 @@ sealed class AccountSupervisor : IDisposable
     public async Task StartAsync(string? iconPath, bool clean, CancellationToken ct)
     {
         _queue = new JmapQueue();
-        Console.WriteLine($"[{_displayName}] Account: {_jmapClient.AccountId}");
-        Console.WriteLine($"[{_displayName}] Sync root: {_syncRootPath}");
+        Log.Info($"[{_displayName}] Account: {_jmapClient.AccountId}");
+        Log.Info($"[{_displayName}] Sync root: {_syncRootPath}");
 
         if (clean)
         {
-            Console.WriteLine($"[{_displayName}] Cleaning previous sync state...");
+            Log.Info($"[{_displayName}] Cleaning previous sync state...");
             SyncEngine.Clean(_syncRootPath, _jmapClient.Context.AccountId);
         }
 
@@ -75,13 +76,13 @@ sealed class AccountSupervisor : IDisposable
         _engine.PendingCountChanged += OnEnginePendingCountChanged;
 
         // Register sync root
-        Console.WriteLine($"[{_displayName}] Registering sync root...");
+        Log.Info($"[{_displayName}] Registering sync root...");
         await _engine.RegisterAsync(_displayName, _jmapClient.Context.AccountId, iconPath);
 
         // Populate placeholders
-        Console.WriteLine($"[{_displayName}] Populating placeholders...");
+        Log.Info($"[{_displayName}] Populating placeholders...");
         var state = await _engine.PopulateAsync(ct);
-        Console.WriteLine($"[{_displayName}] Initial sync complete. State: {state}");
+        Log.Info($"[{_displayName}] Initial sync complete. State: {state}");
 
         // Fetch initial quota info if available
         try
@@ -91,7 +92,7 @@ sealed class AccountSupervisor : IDisposable
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            Console.Error.WriteLine($"[{_displayName}] Initial quota fetch failed: {ex.Message}");
+            Log.Error($"[{_displayName}] Initial quota fetch failed: {ex.Message}");
         }
 
         // Reconcile local changes made while offline
@@ -123,7 +124,7 @@ sealed class AccountSupervisor : IDisposable
             {
                 try { await _loopTask; }
                 catch (OperationCanceledException) { }
-                catch (Exception ex) { Console.Error.WriteLine($"[{_displayName}] Loop stop error: {ex.Message}"); }
+                catch (Exception ex) { Log.Error($"[{_displayName}] Loop stop error: {ex.Message}"); }
             }
             _loopCts.Dispose();
             _loopCts = null;
@@ -134,7 +135,7 @@ sealed class AccountSupervisor : IDisposable
     {
         string currentState = initialState;
 
-        Console.WriteLine($"[{_displayName}] Waiting for state changes...");
+        Log.Info($"[{_displayName}] Waiting for state changes...");
 
         while (!ct.IsCancellationRequested)
         {
@@ -145,14 +146,14 @@ sealed class AccountSupervisor : IDisposable
                 if (!BackgroundSyncEnabled)
                 {
                     if (_debug)
-                        Console.WriteLine($"[{_displayName}] Metered connection, skipping background sync");
+                        Log.Debug($"[{_displayName}] Metered connection, skipping background sync");
                     continue;
                 }
 
                 // Empty string = forced poll (e.g. after push reconnect)
                 if (newState.Length > 0 && string.Equals(newState, currentState, StringComparison.Ordinal))
                 {
-                    Console.WriteLine($"[{_displayName}] State unchanged ({currentState}), skipping poll");
+                    Log.Info($"[{_displayName}] State unchanged ({currentState}), skipping poll");
                     continue;
                 }
 
@@ -164,7 +165,7 @@ sealed class AccountSupervisor : IDisposable
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
-                    Console.Error.WriteLine($"[{_displayName}] Change poll error: {ex.Message}");
+                    Log.Error($"[{_displayName}] Change poll error: {ex.Message}");
                 }
             }
             catch (OperationCanceledException) { break; }

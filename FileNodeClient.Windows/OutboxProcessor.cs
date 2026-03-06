@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
+using FileNodeClient.Ipc;
 using FileNodeClient.Jmap;
 
 namespace FileNodeClient.Windows;
@@ -29,9 +30,6 @@ public class OutboxProcessor : IDisposable
     private readonly ConcurrentDictionary<string, string> _trashedPathByNodeId = new();
 
     private readonly string _logPrefix;
-
-    private void Log(string msg) => Console.WriteLine($"{_logPrefix} {msg}");
-    private void LogError(string msg) => Console.Error.WriteLine($"{_logPrefix} {msg}");
 
     public OutboxProcessor(SyncOutbox outbox, SyncEngine engine, IJmapClient jmapClient, JmapQueue queue, string logPrefix)
     {
@@ -101,7 +99,7 @@ public class OutboxProcessor : IDisposable
             catch (OperationCanceledException) { break; }
             catch (Exception ex)
             {
-                LogError($"Outbox dispatch error: {ex}");
+                Log.Error($"{_logPrefix} Outbox dispatch error: {ex}");
                 try { await Task.Delay(1000, ct); }
                 catch (OperationCanceledException) { break; }
             }
@@ -121,7 +119,7 @@ public class OutboxProcessor : IDisposable
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
             // HTTP timeout or other non-shutdown cancellation — treat as transient failure
-            LogError($"Outbox timeout for {change.LocalPath ?? change.NodeId}");
+            Log.Error($"{_logPrefix} Outbox timeout for {change.LocalPath ?? change.NodeId}");
             _outbox.MarkFailed(change.Id, "Operation timed out");
         }
         catch (OperationCanceledException)
@@ -132,27 +130,27 @@ public class OutboxProcessor : IDisposable
         catch (HttpRequestException ex) when (ex.InnerException is IOException && change.IsDirtyContent)
         {
             // File was still being written when we opened the stream — retry silently
-            Log($"Outbox: file not ready for {Path.GetFileName(change.LocalPath)}, will retry ({ex.InnerException.Message})");
+            Log.Info($"{_logPrefix} Outbox: file not ready for {Path.GetFileName(change.LocalPath)}, will retry ({ex.InnerException.Message})");
             _outbox.MarkRetry(change.Id);
         }
         catch (HttpRequestException ex) when (change.IsDirtyContent)
         {
             // Upload failed (server rejected, connection reset, etc.) — log details and back off
-            LogError($"Outbox: upload failed for {Path.GetFileName(change.LocalPath)}: {ex.Message}");
+            Log.Error($"{_logPrefix} Outbox: upload failed for {Path.GetFileName(change.LocalPath)}: {ex.Message}");
             if (ex.InnerException != null)
-                LogError($"  Inner: {ex.InnerException.GetType().Name}: {ex.InnerException.Message}");
+                Log.Error($"{_logPrefix}   Inner: {ex.InnerException.GetType().Name}: {ex.InnerException.Message}");
             _outbox.MarkFailed(change.Id, ex.InnerException?.Message ?? ex.Message);
         }
         catch (IOException ex) when (change.IsDirtyContent)
         {
             // File locked or still being copied — retry silently
-            Log($"Outbox: file not ready for {Path.GetFileName(change.LocalPath)}, will retry ({ex.Message})");
+            Log.Info($"{_logPrefix} Outbox: file not ready for {Path.GetFileName(change.LocalPath)}, will retry ({ex.Message})");
             _outbox.MarkRetry(change.Id);
         }
         catch (Exception ex) when (!ct.IsCancellationRequested
             && (ex.Message.Contains("forbidden") || ex.Message.Contains("Forbidden")))
         {
-            LogError($"Outbox: permission denied for {change.LocalPath ?? change.NodeId}: {ex.Message}");
+            Log.Error($"{_logPrefix} Outbox: permission denied for {change.LocalPath ?? change.NodeId}: {ex.Message}");
             _outbox.MarkRejected(change.Id, ex.Message);
 
             // Clean up local file that can't be synced (only new untracked files)
@@ -174,10 +172,10 @@ public class OutboxProcessor : IDisposable
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
-            LogError($"Outbox process error for {change.LocalPath ?? change.NodeId}: {ex.Message}");
+            Log.Error($"{_logPrefix} Outbox process error for {change.LocalPath ?? change.NodeId}: {ex.Message}");
             if (change.AttemptCount + 1 >= MaxAttempts)
             {
-                LogError($"Outbox: giving up after {change.AttemptCount + 1} attempts: {change.LocalPath ?? change.NodeId}");
+                Log.Error($"{_logPrefix} Outbox: giving up after {change.AttemptCount + 1} attempts: {change.LocalPath ?? change.NodeId}");
                 _outbox.MarkRejected(change.Id, $"Gave up after {change.AttemptCount + 1} attempts: {ex.Message}");
             }
             else
@@ -233,20 +231,20 @@ public class OutboxProcessor : IDisposable
         {
             if (_trashNodeId != null)
             {
-                Log($"Outbox: trashing node {change.NodeId}");
+                Log.Info($"{_logPrefix} Outbox: trashing node {change.NodeId}");
                 await _queue.EnqueueAsync(QueuePriority.Background,
                     () => _jmapClient.MoveFileNodeAsync(change.NodeId, _trashNodeId, name, "rename", ct), ct);
             }
             else
             {
-                Log($"Outbox: destroying node {change.NodeId}");
+                Log.Info($"{_logPrefix} Outbox: destroying node {change.NodeId}");
                 await _queue.EnqueueAsync(QueuePriority.Background,
                     () => _jmapClient.DestroyFileNodeAsync(change.NodeId, ct), ct);
             }
         }
         catch (Exception ex) when (ex.Message.Contains("notFound") || ex.Message.Contains("404"))
         {
-            Log($"Outbox: node {change.NodeId} already gone on server");
+            Log.Info($"{_logPrefix} Outbox: node {change.NodeId} already gone on server");
         }
 
         // Update _recentlyTrashed with the blobId we fetched
@@ -268,17 +266,17 @@ public class OutboxProcessor : IDisposable
         var parentId = _engine.ResolveParentNodeId(parentDir);
         if (parentId == null)
         {
-            Log($"Outbox: parent not yet available for {folderName}, will retry");
+            Log.Info($"{_logPrefix} Outbox: parent not yet available for {folderName}, will retry");
             return false;
         }
 
-        Log($"Outbox: creating folder {folderName}");
+        Log.Info($"{_logPrefix} Outbox: creating folder {folderName}");
         var node = await _queue.EnqueueAsync(QueuePriority.Background,
             () => _jmapClient.CreateFileNodeAsync(parentId, null, folderName, null, null, ct), ct);
 
         SyncEngine.EnsurePlaceholder(change.LocalPath, node.Id, isDirectory: true);
         _engine.UpdateMappings(change.LocalPath, null, node.Id);
-        Log($"Outbox: created folder {folderName} → node {node.Id}");
+        Log.Info($"{_logPrefix} Outbox: created folder {folderName} → node {node.Id}");
         return true;
     }
 
@@ -286,7 +284,7 @@ public class OutboxProcessor : IDisposable
     {
         if (change.LocalPath == null || !File.Exists(change.LocalPath))
         {
-            Log($"Outbox: skipping upload, file no longer exists: {change.LocalPath}");
+            Log.Info($"{_logPrefix} Outbox: skipping upload, file no longer exists: {change.LocalPath}");
             return true; // File gone — delete entry will handle server cleanup
         }
 
@@ -300,7 +298,7 @@ public class OutboxProcessor : IDisposable
             var parentId = _engine.ResolveParentNodeId(parentDir);
             if (parentId == null)
             {
-                Log($"Outbox: parent not yet available for {fileName}, will retry");
+                Log.Info($"{_logPrefix} Outbox: parent not yet available for {fileName}, will retry");
                 return false;
             }
 
@@ -315,7 +313,7 @@ public class OutboxProcessor : IDisposable
                 var localSha1Hex = Convert.ToHexString(hashBytes).ToLowerInvariant();
                 if (string.Equals(localSha1Hex, existingNodes[0].BlobId, StringComparison.OrdinalIgnoreCase))
                 {
-                    Log($"Outbox: content unchanged for {fileName} (digest:sha matches), skipping upload");
+                    Log.Info($"{_logPrefix} Outbox: content unchanged for {fileName} (digest:sha matches), skipping upload");
                     if (change.IsDirtyLocation)
                     {
                         await _queue.EnqueueAsync(QueuePriority.Background,
@@ -329,7 +327,7 @@ public class OutboxProcessor : IDisposable
                 }
             }
 
-            Log($"Outbox: uploading modified file {fileName}");
+            Log.Info($"{_logPrefix} Outbox: uploading modified file {fileName}");
             using var fileStream = new FileStream(change.LocalPath, FileMode.Open, FileAccess.Read,
                 FileShare.ReadWrite | FileShare.Delete);
             var blobId = await UploadFileContentAsync(change, fileStream, contentType, ct);
@@ -353,7 +351,7 @@ public class OutboxProcessor : IDisposable
 
             SyncEngine.StripZoneIdentifier(change.LocalPath);
             SyncEngine.SetInSync(change.LocalPath);
-            Log($"Outbox: updated {fileName} → node {newNode.Id}");
+            Log.Info($"{_logPrefix} Outbox: updated {fileName} → node {newNode.Id}");
         }
         else
         {
@@ -361,12 +359,12 @@ public class OutboxProcessor : IDisposable
             if (_recentlyTrashed.TryRemove(change.LocalPath, out var trashedInfo))
             {
                 _trashedPathByNodeId.TryRemove(trashedInfo.NodeId, out _);
-                Log($"Outbox: detected restore from Recycle Bin for {fileName} (node {trashedInfo.NodeId})");
+                Log.Info($"{_logPrefix} Outbox: detected restore from Recycle Bin for {fileName} (node {trashedInfo.NodeId})");
 
                 var restoreParentId = _engine.ResolveParentNodeId(parentDir);
                 if (restoreParentId == null)
                 {
-                    Log($"Outbox: parent not yet available for {fileName}, will retry");
+                    Log.Info($"{_logPrefix} Outbox: parent not yet available for {fileName}, will retry");
                     // Put the trashed info back so retry finds it
                     _recentlyTrashed[change.LocalPath] = trashedInfo;
                     _trashedPathByNodeId[trashedInfo.NodeId] = change.LocalPath;
@@ -376,7 +374,7 @@ public class OutboxProcessor : IDisposable
                 // Step 1: Quick undo — cancel pending delete if it hasn't started processing
                 if (_outbox.TryCancelDelete(trashedInfo.NodeId))
                 {
-                    Log($"Outbox: cancelled pending delete for {trashedInfo.NodeId}, restoring mappings");
+                    Log.Info($"{_logPrefix} Outbox: cancelled pending delete for {trashedInfo.NodeId}, restoring mappings");
                     SyncEngine.EnsurePlaceholder(change.LocalPath, trashedInfo.NodeId);
                     _engine.UpdateMappings(change.LocalPath, null, trashedInfo.NodeId);
                     SyncEngine.SetInSync(change.LocalPath);
@@ -388,7 +386,7 @@ public class OutboxProcessor : IDisposable
                 {
                     await _queue.EnqueueAsync(QueuePriority.Background,
                         () => _jmapClient.MoveFileNodeAsync(trashedInfo.NodeId, restoreParentId, fileName, ct: ct), ct);
-                    Log($"Outbox: restored {fileName} from server trash (node {trashedInfo.NodeId})");
+                    Log.Info($"{_logPrefix} Outbox: restored {fileName} from server trash (node {trashedInfo.NodeId})");
                     SyncEngine.EnsurePlaceholder(change.LocalPath, trashedInfo.NodeId);
                     _engine.UpdateMappings(change.LocalPath, null, trashedInfo.NodeId);
                     SyncEngine.SetInSync(change.LocalPath);
@@ -396,7 +394,7 @@ public class OutboxProcessor : IDisposable
                 }
                 catch (Exception ex) when (ex.Message.Contains("notFound") || ex.Message.Contains("404"))
                 {
-                    Log($"Outbox: node {trashedInfo.NodeId} not found in trash, trying blobId create");
+                    Log.Info($"{_logPrefix} Outbox: node {trashedInfo.NodeId} not found in trash, trying blobId create");
                 }
 
                 // Step 3: Create with existing blobId (node destroyed but blob may survive)
@@ -406,7 +404,7 @@ public class OutboxProcessor : IDisposable
                     {
                         var restoredNode = await _queue.EnqueueAsync(QueuePriority.Background,
                             () => _jmapClient.CreateFileNodeAsync(restoreParentId, trashedInfo.BlobId, fileName, contentType, "replace", ct), ct);
-                        Log($"Outbox: recreated {fileName} with existing blobId → node {restoredNode.Id}");
+                        Log.Info($"{_logPrefix} Outbox: recreated {fileName} with existing blobId → node {restoredNode.Id}");
                         SyncEngine.EnsurePlaceholder(change.LocalPath, restoredNode.Id);
                         _engine.UpdateMappings(change.LocalPath, null, restoredNode.Id);
                         _engine.RecordRecentUpload(change.LocalPath);
@@ -415,37 +413,37 @@ public class OutboxProcessor : IDisposable
                     }
                     catch (Exception ex)
                     {
-                        Log($"Outbox: blobId create failed ({ex.Message}), falling back to upload");
+                        Log.Info($"{_logPrefix} Outbox: blobId create failed ({ex.Message}), falling back to upload");
                     }
                 }
 
                 // Step 4: Fall through to normal upload
-                Log($"Outbox: falling back to full upload for {fileName}");
+                Log.Info($"{_logPrefix} Outbox: falling back to full upload for {fileName}");
             }
 
             // New file — normal upload path
             var parentId = _engine.ResolveParentNodeId(parentDir);
             if (parentId == null)
             {
-                Log($"Outbox: parent not yet available for {fileName}, will retry");
+                Log.Info($"{_logPrefix} Outbox: parent not yet available for {fileName}, will retry");
                 return false;
             }
 
-            Log($"Outbox: uploading new file {fileName}");
+            Log.Info($"{_logPrefix} Outbox: uploading new file {fileName}");
             using var fileStream = new FileStream(change.LocalPath, FileMode.Open, FileAccess.Read,
                 FileShare.ReadWrite | FileShare.Delete);
             var blobId = await UploadFileContentAsync(change, fileStream, contentType, ct);
             var node = await _queue.EnqueueAsync(QueuePriority.Background,
                 () => _jmapClient.CreateFileNodeAsync(parentId, blobId, fileName, contentType, "replace", ct), ct);
 
-            Log($"Outbox: EnsurePlaceholder {change.LocalPath} nodeId={node.Id}");
+            Log.Info($"{_logPrefix} Outbox: EnsurePlaceholder {change.LocalPath} nodeId={node.Id}");
             SyncEngine.EnsurePlaceholder(change.LocalPath, node.Id);
             _engine.UpdateMappings(change.LocalPath, null, node.Id);
             _engine.RecordRecentUpload(change.LocalPath);
             SyncEngine.StripZoneIdentifier(change.LocalPath);
-            Log($"Outbox: SetInSync {change.LocalPath}");
+            Log.Info($"{_logPrefix} Outbox: SetInSync {change.LocalPath}");
             SyncEngine.SetInSync(change.LocalPath);
-            Log($"Outbox: created {fileName} → node {node.Id}");
+            Log.Info($"{_logPrefix} Outbox: created {fileName} → node {node.Id}");
         }
 
         return true;
@@ -484,12 +482,12 @@ public class OutboxProcessor : IDisposable
         var parentId = _engine.ResolveParentNodeId(parentDir);
         if (parentId == null)
         {
-            Log($"Outbox: parent not yet available for {Path.GetFileName(change.LocalPath)}, will retry");
+            Log.Info($"{_logPrefix} Outbox: parent not yet available for {Path.GetFileName(change.LocalPath)}, will retry");
             return false;
         }
 
         var newName = Path.GetFileName(change.LocalPath);
-        Log($"Outbox: moving node {change.NodeId} → {parentId}/{newName}");
+        Log.Info($"{_logPrefix} Outbox: moving node {change.NodeId} → {parentId}/{newName}");
 
         try
         {
@@ -500,7 +498,7 @@ public class OutboxProcessor : IDisposable
         catch (Exception ex) when (ex.Message.Contains("notFound") || ex.Message.Contains("404"))
         {
             // Node no longer exists on server — treat as success
-            Log($"Outbox: node {change.NodeId} not found on server during move");
+            Log.Info($"{_logPrefix} Outbox: node {change.NodeId} not found on server during move");
         }
 
         return true;

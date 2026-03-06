@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using FileNodeClient.Ipc;
 using Windows.Security.Credentials;
 
 namespace FileNodeClient.Service;
@@ -94,7 +95,7 @@ sealed class CredentialStore
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"Failed to load credential for {cred.UserName}: {ex.Message}");
+                Log.Error($"Failed to load credential for {cred.UserName}: {ex.Message}");
             }
         }
 

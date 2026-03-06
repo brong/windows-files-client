@@ -1,4 +1,5 @@
 using System.Text.Json;
+using FileNodeClient.Ipc;
 
 namespace FileNodeClient.Jmap.Auth;
 
@@ -19,7 +20,7 @@ internal class DebugLoggingHandler : DelegatingHandler
     protected override async Task<HttpResponseMessage> SendAsync(
         HttpRequestMessage request, CancellationToken cancellationToken)
     {
-        Console.Error.WriteLine($">> {request.Method} {request.RequestUri}");
+        Log.Debug($">> {request.Method} {request.RequestUri}");
 
         if (request.Content is not null)
         {
@@ -32,13 +33,13 @@ internal class DebugLoggingHandler : DelegatingHandler
             else
             {
                 var length = request.Content.Headers.ContentLength;
-                Console.Error.WriteLine($"[JMAP Request body] {reqContentType}, {length} bytes");
+                Log.Debug($"[JMAP Request body] {reqContentType}, {length} bytes");
             }
         }
 
         var response = await base.SendAsync(request, cancellationToken);
 
-        Console.Error.WriteLine($"<< {(int)response.StatusCode} {response.ReasonPhrase}");
+        Log.Debug($"<< {(int)response.StatusCode} {response.ReasonPhrase}");
 
         // Dump response body for JSON content types and upload responses (skip binary blob downloads)
         var contentType = response.Content.Headers.ContentType?.MediaType;
@@ -58,11 +59,11 @@ internal class DebugLoggingHandler : DelegatingHandler
         {
             var doc = JsonDocument.Parse(json);
             var pretty = JsonSerializer.Serialize(doc, PrettyJson);
-            Console.Error.WriteLine($"[JMAP {label}]\n{pretty}");
+            Log.Debug($"[JMAP {label}]\n{pretty}");
         }
         catch
         {
-            Console.Error.WriteLine($"[JMAP {label}]\n{json}");
+            Log.Debug($"[JMAP {label}]\n{json}");
         }
     }
 }

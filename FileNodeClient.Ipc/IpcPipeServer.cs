@@ -106,14 +106,14 @@ public sealed class IpcPipeServer : IDisposable
                     IpcConstants.BufferSize,
                     IpcConstants.BufferSize);
 
-                Console.WriteLine($"[IPC] Pipe created, waiting for connection on: {_pipeName}");
+                Log.Info($"[IPC] Pipe created, waiting for connection on: {_pipeName}");
                 await pipe.WaitForConnectionAsync(ct);
 
                 var client = new ConnectedClient(pipe);
                 lock (_clientsLock)
                     _clients.Add(client);
 
-                Console.WriteLine("[IPC] Client connected");
+                Log.Info("[IPC] Client connected");
 
                 _ = Task.Run(() => HandleClientAsync(client, ct), ct);
             }
@@ -124,7 +124,7 @@ public sealed class IpcPipeServer : IDisposable
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"[IPC] Accept error: {ex.Message}");
+                Log.Error($"[IPC] Accept error: {ex.Message}");
                 pipe?.Dispose();
                 // Brief delay before retrying
                 try { await Task.Delay(500, ct); } catch { break; }
@@ -146,7 +146,7 @@ public sealed class IpcPipeServer : IDisposable
                     var command = IpcSerializer.DeserializeCommand(line);
                     if (command == null)
                     {
-                        Console.Error.WriteLine($"[IPC] Unknown command: {line}");
+                        Log.Error($"[IPC] Unknown command: {line}");
                         continue;
                     }
 
@@ -159,7 +159,7 @@ public sealed class IpcPipeServer : IDisposable
                 }
                 catch (Exception ex)
                 {
-                    Console.Error.WriteLine($"[IPC] Command handling error: {ex.Message}");
+                    Log.Error($"[IPC] Command handling error: {ex.Message}");
                 }
             }
         }
@@ -167,11 +167,11 @@ public sealed class IpcPipeServer : IDisposable
         catch (IOException) { }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"[IPC] Client error: {ex.Message}");
+            Log.Error($"[IPC] Client error: {ex.Message}");
         }
         finally
         {
-            Console.WriteLine("[IPC] Client disconnected");
+            Log.Info("[IPC] Client disconnected");
             lock (_clientsLock)
                 _clients.Remove(client);
             client.Dispose();

@@ -1,12 +1,9 @@
 using System.Diagnostics;
 using System.Text;
+using FileNodeClient.Ipc;
 
 namespace FileNodeClient.Service;
 
-/// <summary>
-/// Redirects Console.Out and Console.Error to Windows Event Log.
-/// In debug mode, also writes to the original console streams and a log file.
-/// </summary>
 static class AppLogger
 {
     private const string EventSourceName = "FileNodeClient";
@@ -15,6 +12,7 @@ static class AppLogger
     private static EventLog? _eventLog;
     private static StreamWriter? _fileWriter;
     private static readonly object _fileLock = new();
+    private static TextWriter? _originalConsole;
 
     public static string? LogFilePath { get; private set; }
 
@@ -28,7 +26,7 @@ static class AppLogger
         }
         catch (System.Security.SecurityException)
         {
-            // Non-admin — source may already exist or we'll use generic source
+            // Non-admin -- source may already exist or we'll use generic source
         }
 
         try
@@ -40,9 +38,11 @@ static class AppLogger
             // If we can't create the event log, logging is best-effort
         }
 
-        // In debug mode, also write to a log file
         if (debug)
         {
+            _originalConsole = Console.Out;
+            Log.MinLevel = LogLevel.Debug;
+
             try
             {
                 var logDir = Path.Combine(
@@ -62,14 +62,36 @@ static class AppLogger
             }
         }
 
-        var originalOut = Console.Out;
-        var originalErr = Console.Error;
+        Log.Sink = (level, msg) =>
+        {
+            var timestamp = DateTime.Now.ToString("HH:mm:ss.fff");
+            var prefix = level switch
+            {
+                LogLevel.Debug => "DBG",
+                LogLevel.Info => "INF",
+                LogLevel.Warning => "WRN",
+                LogLevel.Error => "ERR",
+                _ => "???",
+            };
 
-        Console.SetOut(new LogWriter(originalOut, EventLogEntryType.Information, debug, "OUT"));
-        Console.SetError(new LogWriter(originalErr, EventLogEntryType.Warning, debug, "ERR"));
+            if (debug)
+                _originalConsole?.WriteLine($"{timestamp} [{prefix}] {msg}");
+
+            WriteToFile(prefix, msg);
+
+            var entryType = level switch
+            {
+                LogLevel.Warning => EventLogEntryType.Warning,
+                LogLevel.Error => EventLogEntryType.Error,
+                _ => EventLogEntryType.Information,
+            };
+
+            try { _eventLog?.WriteEntry(msg, entryType); }
+            catch { /* best-effort */ }
+        };
     }
 
-    internal static void WriteToFile(string prefix, string line)
+    private static void WriteToFile(string prefix, string line)
     {
         if (_fileWriter == null) return;
         lock (_fileLock)
@@ -79,89 +101,6 @@ static class AppLogger
                 _fileWriter.WriteLine($"{DateTime.Now:HH:mm:ss.fff} [{prefix}] {line}");
             }
             catch { }
-        }
-    }
-
-    private sealed class LogWriter : TextWriter
-    {
-        private readonly TextWriter? _original;
-        private readonly EventLogEntryType _entryType;
-        private readonly bool _debug;
-        private readonly string _prefix;
-        private readonly StringBuilder _lineBuffer = new();
-
-        public override Encoding Encoding => Encoding.UTF8;
-
-        public LogWriter(TextWriter? original, EventLogEntryType entryType, bool debug, string prefix)
-        {
-            _original = debug ? original : null;
-            _entryType = entryType;
-            _debug = debug;
-            _prefix = prefix;
-        }
-
-        public override void Write(char value)
-        {
-            if (value == '\n')
-                FlushLine();
-            else if (value != '\r')
-                _lineBuffer.Append(value);
-        }
-
-        public override void Write(string? value)
-        {
-            if (value == null) return;
-
-            foreach (var ch in value)
-            {
-                if (ch == '\n')
-                    FlushLine();
-                else if (ch != '\r')
-                    _lineBuffer.Append(ch);
-            }
-        }
-
-        public override void WriteLine(string? value)
-        {
-            if (value != null)
-                _lineBuffer.Append(value);
-            FlushLine();
-        }
-
-        public override void WriteLine()
-        {
-            FlushLine();
-        }
-
-        private void FlushLine()
-        {
-            if (_lineBuffer.Length == 0)
-                return;
-
-            var line = _lineBuffer.ToString();
-            _lineBuffer.Clear();
-
-            var timestamp = DateTime.Now.ToString("HH:mm:ss.fff");
-
-            if (_debug)
-                _original?.WriteLine($"{timestamp} {line}");
-
-            AppLogger.WriteToFile(_prefix, line);
-
-            try
-            {
-                _eventLog?.WriteEntry(line, _entryType);
-            }
-            catch
-            {
-                // Best-effort logging
-            }
-        }
-
-        public override void Flush()
-        {
-            _original?.Flush();
-            FlushLine();
         }
     }
 }

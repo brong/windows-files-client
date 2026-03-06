@@ -1,3 +1,4 @@
+using FileNodeClient.Ipc;
 using FileNodeClient.Service;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -44,15 +45,15 @@ AppLogger.Initialize(options.Debug);
 // doesn't terminate the whole service process.
 AppDomain.CurrentDomain.UnhandledException += (_, e) =>
 {
-    Console.Error.WriteLine($"[FATAL] Unhandled exception: {e.ExceptionObject}");
+    Log.Error($"[FATAL] Unhandled exception: {e.ExceptionObject}");
 };
 TaskScheduler.UnobservedTaskException += (_, e) =>
 {
-    Console.Error.WriteLine($"[WARN] Unobserved task exception: {e.Exception}");
+    Log.Warn($"[WARN] Unobserved task exception: {e.Exception}");
     e.SetObserved();
 };
 
-Console.WriteLine($"FileNodeClient service process starting (debug={options.Debug})");
+Log.Info($"FileNodeClient service process starting (debug={options.Debug})");
 
 var builder = new HostBuilder();
 builder.ConfigureServices(services =>
@@ -72,8 +73,8 @@ if (WindowsServiceHelpers.IsWindowsService())
     });
 }
 
-Console.WriteLine("Building host...");
+Log.Info("Building host...");
 var host = builder.Build();
-Console.WriteLine("Starting host...");
+Log.Info("Starting host...");
 await host.RunAsync();
 return 0;

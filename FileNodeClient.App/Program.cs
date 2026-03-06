@@ -1,9 +1,12 @@
+using FileNodeClient.Ipc;
+
 namespace FileNodeClient.App;
 
 class Program
 {
     static async Task<int> Main(string[] args)
     {
+        AppLogger.Initialize(false);
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
@@ -60,12 +63,12 @@ class Program
             using var http = new HttpClient();
             var data = await http.GetByteArrayAsync(FaviconUrl, ct);
             await File.WriteAllBytesAsync(iconPath, data, ct);
-            Console.WriteLine($"Downloaded icon to {iconPath}");
+            Log.Debug($"Downloaded icon to {iconPath}");
             return iconPath;
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"Could not download icon: {ex.Message}");
+            Log.Warn($"Could not download icon: {ex.Message}");
             return null;
         }
     }
