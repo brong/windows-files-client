@@ -58,46 +58,46 @@ Implemented: blocking pre-rename callback with veto support and `TARGET_IN_SCOPE
 
 `CF_CONNECT_FLAG_BLOCK_SELF_IMPLICIT_HYDRATION` prevents our own process from accidentally triggering hydration callbacks (e.g., when our FileChangeWatcher reads attributes).
 
-## Tier 3 — Nice to Have
-
 ### 12. Open/Close file notifications
 
-`NOTIFY_FILE_OPEN_COMPLETION` / `NOTIFY_FILE_CLOSE_COMPLETION` — more reliable change detection than FileSystemWatcher. Close notification tells us exactly when a file is done being edited.
+`NOTIFY_FILE_OPEN_COMPLETION` / `NOTIFY_FILE_CLOSE_COMPLETION` — more reliable change detection than FileSystemWatcher. Close notification tells us exactly when a file is done being edited, eliminating the need for debouncing, echo suppression, and `_recentlyUploaded` workarounds.
 
-### 13. Share handler (Windows 11+)
+### 13. CfOpenFileWithOplock
+
+Opens files with proper opportunistic locks, preventing conflicts during sync operations. More robust than `File.OpenHandle` — avoids races where another process modifies a file mid-sync.
+
+### 14. Per-operation sync status
+
+The `CF_OPERATION_INFO.SyncStatus` field (currently null in all our CfExecute calls) can provide specific error messages per failed operation, shown to the user in Explorer.
+
+## Tier 3 — Nice to Have
+
+### 15. Share handler (Windows 11+)
 
 Native "Share" button in Explorer creates a Fastmail sharing link.
 
-### 14. URI Source / "View online"
+### 16. URI Source / "View online"
 
 COM handler that provides a URL for "View in browser" on cloud files.
 
 **Requires spec support:** see [Spec Dependencies](#spec-dependencies) below.
 
-### 15. CfOpenFileWithOplock
-
-Opens files with proper opportunistic locks, preventing conflicts during sync operations. More robust than `File.OpenHandle`.
-
-### 16. CfGetPlatformInfo
+### 17. CfGetPlatformInfo
 
 Feature detection for version-specific capabilities (integration number check).
 
-### ~~17. Progressive hydration policy~~ ✓ Done
+### ~~18. Progressive hydration policy~~ ✓ Done
 
 Implemented: switched from `Full` to `Progressive` hydration policy with HTTP Range request support. `FetchDataCallback` now attempts byte-range downloads via `DownloadBlobRangeAsync` and falls back to full downloads if the server returns 200 instead of 206 or on error (session-level fallback).
 
-### ~~18. Blob/get for small files + digest verification~~ ✓ Done
+### ~~19. Blob/get for small files + digest verification~~ ✓ Done
 
 Implemented: files ≤16KB are fetched inline via RFC 9404 `Blob/get` (base64 data + digest in a single JMAP call), avoiding a separate HTTP round-trip. All download paths (Blob/get, HTTP Range, full HTTP) now verify content integrity using the server's preferred digest algorithm (`sha` or `sha-256`) fetched concurrently via `Blob/get`. Digest mismatches log warnings but don't block downloads. Gracefully degrades when the server lacks the `urn:ietf:params:jmap:blob` capability.
-
-### 19. Per-operation sync status
-
-The `CF_OPERATION_INFO.SyncStatus` field (currently null in all our CfExecute calls) can provide specific error messages per failed operation. (Renumbered from #18 after Blob/get was added.)
 
 ## Tier 4 — Future/Niche
 
 - **Search integration** (`IStorageProviderSearchHandler`) — cloud search results in Explorer, but requires Windows 11 24H2 Copilot+ PCs
-- **Data validation** (`VALIDATE_DATA` callback + `VALIDATION_REQUIRED` modifier) — cfapi-level integrity checks (application-level digest verification already done via Blob/get, see #18)
+- **Data validation** (`VALIDATE_DATA` callback + `VALIDATION_REQUIRED` modifier) — cfapi-level integrity checks (application-level digest verification already done via Blob/get, see #19)
 - **Streaming mode** (`STREAMING_ALLOWED`) — for video/media playback without disk persistence
 - **CfSetPinState** — programmatically pin/unpin files (we only *detect* pins currently)
 - **Correlation vectors** — telemetry/request tracing
@@ -144,7 +144,7 @@ Client-side range request support is implemented with automatic fallback. The sp
 
 A `blobHash` or `contentHash` property on FileNode would let the client compare local vs. server content without re-downloading the blob. Currently the client has no way to detect whether a local edit matches what's already on the server, so it re-uploads unconditionally. Not strictly blocking any cfapi feature, but important for robust sync.
 
-**Note:** Download integrity verification is already implemented using `Blob/get` digests (see #18), but a persistent content hash on the node would enable pre-upload deduplication.
+**Note:** Download integrity verification is already implemented using `Blob/get` digests (see #19), but a persistent content hash on the node would enable pre-upload deduplication.
 
 ### Quota (improves: Explorer storage display)
 
@@ -155,9 +155,9 @@ Explorer can display storage quota in the nav pane and folder properties. The sp
 | Spec need | Priority | Blocks |
 |-----------|----------|--------|
 | Thumbnail downloads | High | Thumbnail provider (#5) |
-| Web URL per node | High | URI Source (#14), Context menus (#6) |
+| Web URL per node | High | URI Source (#16), Context menus (#6) |
 | RecycleBin URL | Medium | RecycleBinUri (#8) |
-| ~~Range downloads~~ | ~~Medium~~ | ~~Progressive hydration (#17)~~ ✓ |
+| ~~Range downloads~~ | ~~Medium~~ | ~~Progressive hydration (#18)~~ ✓ |
 | Content hash | Medium | — (improves conflict detection) |
 | Quota | Low | — (improves Explorer display) |
 
