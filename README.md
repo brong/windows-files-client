@@ -1,4 +1,4 @@
-# Fastmail Files Client
+# FileNodeClient
 
 A proof-of-concept Windows filesystem adaptor that exposes [Fastmail](https://www.fastmail.com/) Files as a native cloud storage provider using the Windows Cloud Files API (cfapi). Files appear in Explorer with cloud status icons (blue cloud / green checkmark) and a dedicated nav pane entry, just like OneDrive or Dropbox.
 
@@ -15,8 +15,8 @@ A proof-of-concept Windows filesystem adaptor that exposes [Fastmail](https://ww
 The solution is split into three projects:
 
 ```
-FilesClient.sln
-├── FilesClient.Jmap/          # Platform-agnostic JMAP client
+FileNodeClient.sln
+├── FileNodeClient.Jmap/          # Platform-agnostic JMAP client
 │   ├── IJmapClient.cs         # Client interface
 │   ├── JmapClient.cs          # Fastmail FileNode API implementation
 │   ├── JmapSession.cs         # JMAP session/capability discovery
@@ -28,7 +28,7 @@ FilesClient.sln
 │       ├── JmapRequest.cs     # JMAP request envelope
 │       └── JmapResponse.cs    # JMAP response models (get, set, changes, upload)
 │
-├── FilesClient.Windows/       # Windows Cloud Files API integration
+├── FileNodeClient.Windows/       # Windows Cloud Files API integration
 │   ├── SyncEngine.cs          # Main orchestrator (populate, poll, upload)
 │   ├── SyncRoot.cs            # WinRT sync root registration + cfapi connection
 │   ├── SyncCallbacks.cs       # FETCH_DATA callback for on-demand hydration
@@ -36,7 +36,7 @@ FilesClient.sln
 │   ├── FileChangeWatcher.cs   # FileSystemWatcher with debouncing for uploads
 │   └── NavPaneIntegration.cs  # Cleanup for stale registry entries
 │
-└── FilesClient.App/           # Console application entry point
+└── FileNodeClient.App/           # Console application entry point
     └── Program.cs             # CLI argument parsing, JMAP connection, sync loop
 ```
 
@@ -73,18 +73,18 @@ dotnet build
 To build a self-contained MSI installer (bundles .NET 9 runtime, no prerequisites):
 
 ```
-cd FilesClient.Installer
+cd FileNodeClient.Installer
 build.cmd
 ```
 
-This publishes both `FilesClient.Service` and `FilesClient.App` as self-contained win-x64 binaries, then packages them into `bin\Release\FastmailFiles.msi`.
+This publishes both `FileNodeClient.Service` and `FileNodeClient.App` as self-contained win-x64 binaries, then packages them into `bin\Release\FileNodeClient.msi`.
 
-The MSI installs to `C:\Program Files\Fastmail\Fastmail Files\` with separate `Service\` and `App\` subdirectories, registers HKCU Run keys for auto-start on login, and launches both processes after install. Major upgrades cleanly replace the previous version.
+The MSI installs to `C:\Program Files\Fastmail\FileNodeClient\` with separate `Service\` and `App\` subdirectories, registers HKCU Run keys for auto-start on login, and launches both processes after install. Major upgrades cleanly replace the previous version.
 
 ## Usage
 
 ```
-FilesClient.App --token <fastmail-app-password>
+FileNodeClient.App --token <fastmail-app-password>
 ```
 
 ### Options
@@ -99,7 +99,7 @@ FilesClient.App --token <fastmail-app-password>
 ### Example
 
 ```
-FilesClient.App --token fmu1-xxxxxxxxxxxxxxxx
+FileNodeClient.App --token fmu1-xxxxxxxxxxxxxxxx
 ```
 
 The sync root folder appears in your user profile directory (e.g. `C:\Users\you\you@fastmail.com Files`) and in the Explorer navigation pane.

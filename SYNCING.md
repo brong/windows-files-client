@@ -40,7 +40,7 @@ and race condition handling in the files-client sync engine.
 │  └──────────────┘   └───────────────┘                                  │
 │                                                                        │
 │  Persistent storage:                                                   │
-│    %LocalAppData%\FastmailFiles\<user>\<accountId>\                    │
+│    %LocalAppData%\FileNodeClient\<user>\<accountId>\                    │
 │      nodecache.json   — node mappings + JMAP state token               │
 │      outbox.json      — pending local changes                          │
 └────────────────────────────────────────────────────────────────────────┘
@@ -227,7 +227,7 @@ vice versa.
 
 ### Node cache (`nodecache.json`)
 
-Location: `%LocalAppData%\FastmailFiles\<username>\<accountId>\nodecache.json`
+Location: `%LocalAppData%\FileNodeClient\<username>\<accountId>\nodecache.json`
 
 Written atomically (temp file + rename) after population and each change poll.
 
@@ -274,7 +274,7 @@ restored (the `FileChangeWatcher` will detect the difference after `Connect()`).
 
 ### Sync outbox (`outbox.json`)
 
-Location: `%LocalAppData%\FastmailFiles\<username>\<accountId>\outbox.json`
+Location: `%LocalAppData%\FileNodeClient\<username>\<accountId>\outbox.json`
 
 Written with 1-second debounce after any mutation. Also written atomically.
 
@@ -282,7 +282,7 @@ Written with 1-second debounce after any mutation. Also written atomically.
 [
   {
     "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-    "localPath": "C:\\Users\\brong\\Fastmail Files\\photo.jpg",
+    "localPath": "C:\\Users\\brong\\FileNodeClient\\photo.jpg",
     "nodeId": null,
     "contentType": "image/jpeg",
     "isFolder": false,

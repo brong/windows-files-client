@@ -3,4 +3,4 @@ obj/
 .vs/
 *.user
 *.suo
-FilesClient.Installer/publish/
+FileNodeClient.Installer/publish/

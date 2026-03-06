@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+
+  <Package Name="FileNodeClient $(var.PackageVersion)"
+           Version="$(var.PackageVersion)"
+           Manufacturer="Fastmail Pty Ltd"
+           UpgradeCode="FF57AA76-1DFC-42D9-BFE9-F696DAEA2CDF"
+           Scope="perMachine">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed."
+                  Schedule="afterInstallInitialize" />
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- Close running processes before install/upgrade/uninstall -->
+    <util:CloseApplication Id="CloseService"
+                           Target="FileNodeClient.Service.exe"
+                           CloseMessage="yes"
+                           TerminateProcess="1"
+                           RebootPrompt="no"
+                           Timeout="5" />
+    <util:CloseApplication Id="CloseApp"
+                           Target="FileNodeClient.App.exe"
+                           CloseMessage="yes"
+                           TerminateProcess="1"
+                           RebootPrompt="no"
+                           Timeout="5" />
+
+    <!-- Directory structure under Program Files -->
+    <StandardDirectory Id="ProgramFiles6432Folder">
+      <Directory Id="FASTMAILDIR" Name="Fastmail">
+        <Directory Id="INSTALLDIR" Name="FileNodeClient">
+
+          <Files Include="$(var.PublishDir)\**" />
+
+          <!-- HKCU Run keys for auto-start on login -->
+          <Component Id="ServiceRunKey" Guid="DAC96A4E-F83A-44E7-884F-6343D75AE7B0">
+            <RegistryValue Root="HKCU"
+                           Key="Software\Microsoft\Windows\CurrentVersion\Run"
+                           Name="FileNodeClient Service"
+                           Type="string"
+                           Value="&quot;[INSTALLDIR]FileNodeClient.Service.exe&quot;"
+                           KeyPath="yes" />
+          </Component>
+
+          <Component Id="AppRunKey" Guid="FF23D205-4DF7-42C4-9E96-67420FC2D719">
+            <RegistryValue Root="HKCU"
+                           Key="Software\Microsoft\Windows\CurrentVersion\Run"
+                           Name="FileNodeClient"
+                           Type="string"
+                           Value="&quot;[INSTALLDIR]FileNodeClient.App.exe&quot;"
+                           KeyPath="yes" />
+          </Component>
+
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+
+    <!-- Start Menu shortcut -->
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="STARTMENUDIR" Name="FileNodeClient">
+        <Component Id="StartMenuShortcut" Guid="A1B2C3D4-E5F6-4A7B-8C9D-0E1F2A3B4C5D">
+          <Shortcut Id="AppShortcut"
+                    Name="FileNodeClient"
+                    Target="[INSTALLDIR]FileNodeClient.App.exe"
+                    WorkingDirectory="INSTALLDIR" />
+          <RemoveFolder Id="RemoveStartMenuDir" On="uninstall" />
+          <RegistryValue Root="HKCU"
+                         Key="Software\Fastmail\FileNodeClient"
+                         Name="StartMenuShortcut"
+                         Type="integer"
+                         Value="1"
+                         KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <!-- UI properties -->
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLDIR" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch FileNodeClient" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+
+    <!-- Standard install-dir wizard: Welcome → Install Dir → Ready → Progress → Finish -->
+    <UI>
+      <ui:WixUI Id="WixUI_InstallDir" />
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchService"
+               Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed" />
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchApp"
+               Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed" />
+    </UI>
+
+    <!-- Launch both processes from finish page checkbox.
+         Service starts first (sync engine), then App (tray UI).
+         Both auto-start on next login via the HKCU Run keys above. -->
+    <CustomAction Id="LaunchService"
+                  Directory="INSTALLDIR"
+                  ExeCommand="&quot;[INSTALLDIR]FileNodeClient.Service.exe&quot;"
+                  Impersonate="yes"
+                  Return="asyncNoWait" />
+
+    <CustomAction Id="LaunchApp"
+                  Directory="INSTALLDIR"
+                  ExeCommand="&quot;[INSTALLDIR]FileNodeClient.App.exe&quot;"
+                  Impersonate="yes"
+                  Return="asyncNoWait" />
+
+  </Package>
+</Wix>

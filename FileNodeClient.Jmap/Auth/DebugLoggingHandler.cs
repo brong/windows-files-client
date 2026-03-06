@@ -1,0 +1,68 @@
+using System.Text.Json;
+
+namespace FileNodeClient.Jmap.Auth;
+
+/// <summary>
+/// HTTP handler that logs all requests and responses when DEBUGJMAP is enabled.
+/// Sits in the handler pipeline so it captures everything: session lookups,
+/// redirects, API calls, blob downloads, and error responses.
+/// </summary>
+internal class DebugLoggingHandler : DelegatingHandler
+{
+    private static readonly JsonSerializerOptions PrettyJson = new()
+    {
+        WriteIndented = true,
+    };
+
+    public DebugLoggingHandler(HttpMessageHandler inner) : base(inner) { }
+
+    protected override async Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        Console.Error.WriteLine($">> {request.Method} {request.RequestUri}");
+
+        if (request.Content is not null)
+        {
+            var reqContentType = request.Content.Headers.ContentType?.MediaType;
+            if (reqContentType is "application/json")
+            {
+                var body = await request.Content.ReadAsStringAsync(cancellationToken);
+                DumpJson("Request body", body);
+            }
+            else
+            {
+                var length = request.Content.Headers.ContentLength;
+                Console.Error.WriteLine($"[JMAP Request body] {reqContentType}, {length} bytes");
+            }
+        }
+
+        var response = await base.SendAsync(request, cancellationToken);
+
+        Console.Error.WriteLine($"<< {(int)response.StatusCode} {response.ReasonPhrase}");
+
+        // Dump response body for JSON content types and upload responses (skip binary blob downloads)
+        var contentType = response.Content.Headers.ContentType?.MediaType;
+        var isUpload = request.RequestUri?.AbsolutePath.Contains("/upload/") == true;
+        if (contentType is "application/json" or "application/problem+json" or "text/json" || isUpload)
+        {
+            var responseBody = await response.Content.ReadAsStringAsync(cancellationToken);
+            DumpJson("Response body", responseBody);
+        }
+
+        return response;
+    }
+
+    private static void DumpJson(string label, string json)
+    {
+        try
+        {
+            var doc = JsonDocument.Parse(json);
+            var pretty = JsonSerializer.Serialize(doc, PrettyJson);
+            Console.Error.WriteLine($"[JMAP {label}]\n{pretty}");
+        }
+        catch
+        {
+            Console.Error.WriteLine($"[JMAP {label}]\n{json}");
+        }
+    }
+}
