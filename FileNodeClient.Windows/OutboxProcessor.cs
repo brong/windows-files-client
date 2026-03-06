@@ -110,20 +110,11 @@ public class OutboxProcessor : IDisposable
     {
         try
         {
-            if (change.LocalPath != null)
-                SyncEngine.FireAndForgetStatus(change.LocalPath, "Syncing...", change.IsFolder);
-
             var completed = await ProcessChangeAsync(change, ct);
             if (completed)
-            {
                 _outbox.MarkCompleted(change.Id);
-                if (change.LocalPath != null && !change.IsDeleted)
-                    SyncEngine.FireAndForgetStatus(change.LocalPath, "Synced", change.IsFolder);
-            }
             else
-            {
                 _outbox.MarkRetry(change.Id);
-            }
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
@@ -149,8 +140,6 @@ public class OutboxProcessor : IDisposable
             if (ex.InnerException != null)
                 Log.Error($"{_logPrefix}   Inner: {ex.InnerException.GetType().Name}: {ex.InnerException.Message}");
             _outbox.MarkFailed(change.Id, ex.InnerException?.Message ?? ex.Message);
-            if (change.LocalPath != null)
-                SyncEngine.FireAndForgetStatus(change.LocalPath, $"Error: {ex.Message}", change.IsFolder);
         }
         catch (IOException ex) when (change.IsDirtyContent)
         {
@@ -163,8 +152,6 @@ public class OutboxProcessor : IDisposable
         {
             Log.Error($"{_logPrefix} Outbox: permission denied for {change.LocalPath ?? change.NodeId}: {ex.Message}");
             _outbox.MarkRejected(change.Id, ex.Message);
-            if (change.LocalPath != null)
-                SyncEngine.FireAndForgetStatus(change.LocalPath, "Error: Permission denied", change.IsFolder);
 
             // Clean up local file that can't be synced (only new untracked files)
             if (change.LocalPath != null && change.NodeId == null)
@@ -190,8 +177,6 @@ public class OutboxProcessor : IDisposable
             {
                 Log.Error($"{_logPrefix} Outbox: giving up after {change.AttemptCount + 1} attempts: {change.LocalPath ?? change.NodeId}");
                 _outbox.MarkRejected(change.Id, $"Gave up after {change.AttemptCount + 1} attempts: {ex.Message}");
-                if (change.LocalPath != null)
-                    SyncEngine.FireAndForgetStatus(change.LocalPath, $"Error: {ex.Message}", change.IsFolder);
             }
             else
             {

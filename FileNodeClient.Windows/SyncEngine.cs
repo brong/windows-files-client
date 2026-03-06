@@ -343,8 +343,8 @@ public class SyncEngine : IDisposable
             ApplyWriteProtection(_syncRootPath);
         }
 
-        // Push Explorer column values for all synced files (fire-and-forget)
-        _ = PushStatusColumnsAsync(allNodes);
+        // TODO: Push Explorer column values once MSIX package identity is active
+        // _ = PushStatusColumnsAsync(allNodes);
 
         SaveNodeCache(state);
         ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_IDLE);
@@ -934,8 +934,8 @@ public class SyncEngine : IDisposable
             }
         }
 
-        // Push status columns for updated nodes
-        _ = PushStatusColumnsAsync(sortedUpdatedNodes.ToArray());
+        // TODO: Push status columns once MSIX package identity is active
+        // _ = PushStatusColumnsAsync(sortedUpdatedNodes.ToArray());
 
         // Process created nodes — create placeholders for new items
         foreach (var node in createdNodes)
@@ -986,8 +986,8 @@ public class SyncEngine : IDisposable
             ApplyWriteProtection(childPath);
         }
 
-        // Push status columns for created nodes
-        _ = PushStatusColumnsAsync(createdNodes);
+        // TODO: Push status columns once MSIX package identity is active
+        // _ = PushStatusColumnsAsync(createdNodes);
 
         foreach (var destroyedId in changes.Destroyed)
         {
@@ -1085,7 +1085,7 @@ public class SyncEngine : IDisposable
             var contentType = ResolveContentType(change.FullPath);
 
             _outbox.EnqueueContentChange(change.FullPath, nodeId, contentType, isDirectory);
-            FireAndForgetStatus(change.FullPath, "Pending", isDirectory);
+            // TODO: FireAndForgetStatus(change.FullPath, "Pending", isDirectory);
         }
     }
 
