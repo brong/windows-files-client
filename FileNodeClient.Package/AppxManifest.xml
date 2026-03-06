@@ -4,8 +4,7 @@
   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
   xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
-  xmlns:cloudfiles="http://schemas.microsoft.com/appx/manifest/desktopcloud/windows10"
-  IgnorableNamespaces="uap desktop rescap cloudfiles">
+  IgnorableNamespaces="uap desktop rescap">
 
   <Identity
     Name="Fastmail.FileNodeClient"
@@ -43,12 +42,6 @@
           <desktop:StartupTask TaskId="FileNodeClientStartup" Enabled="true" DisplayName="FileNodeClient" />
         </desktop:Extension>
 
-        <!-- Cloud Files sync provider identity -->
-        <cloudfiles:Extension Category="windows.cloudFiles">
-          <cloudfiles:CloudFiles>
-            <cloudfiles:CustomStateHandler Clsid="00000000-0000-0000-0000-000000000000" />
-          </cloudfiles:CloudFiles>
-        </cloudfiles:Extension>
       </Extensions>
     </Application>
 
