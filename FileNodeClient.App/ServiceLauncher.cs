@@ -5,6 +5,7 @@ namespace FileNodeClient.App;
 static class ServiceLauncher
 {
     private const string ServiceExeName = "FileNodeClient.Service";
+    private static bool _debug;
 
     public static bool IsServiceProcessRunning()
     {
@@ -18,8 +19,10 @@ static class ServiceLauncher
         }
     }
 
-    public static bool TryStartService()
+    public static bool TryStartService(bool debug = false)
     {
+        if (debug) _debug = true; // sticky — once set, always forward
+
         if (IsServiceProcessRunning())
             return true;
 
@@ -34,6 +37,7 @@ static class ServiceLauncher
             Process.Start(new ProcessStartInfo
             {
                 FileName = serviceExePath,
+                Arguments = _debug ? "--debug" : "",
                 CreateNoWindow = true,
                 UseShellExecute = false,
             });

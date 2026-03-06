@@ -6,7 +6,8 @@ class Program
 {
     static async Task<int> Main(string[] args)
     {
-        AppLogger.Initialize(false);
+        var debug = args.Contains("--debug");
+        AppLogger.Initialize(debug);
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
@@ -16,8 +17,8 @@ class Program
         // Download Fastmail favicon for tray icon
         var iconPath = await DownloadIconAsync(cts.Token);
 
-        // Auto-start service if not already running
-        ServiceLauncher.TryStartService();
+        // Auto-start service if not already running, forwarding --debug
+        ServiceLauncher.TryStartService(debug);
 
         using var serviceClient = new ServiceClient();
 
