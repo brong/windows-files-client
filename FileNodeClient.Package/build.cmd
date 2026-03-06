@@ -1,0 +1,108 @@
+@echo off
+setlocal
+pushd %~dp0
+
+set "SRCDIR=%~dp0.."
+set "BUILDDIR=%SRCDIR%"
+
+:: MSIX tools need a local drive. Detect UNC paths (e.g. WSL2) and redirect.
+echo %SRCDIR% | findstr /i "^\\\\" >nul 2>&1
+if %errorlevel%==0 (
+    set "BUILDDIR=%TEMP%\files-client-build"
+    echo Detected UNC path, building in %BUILDDIR%...
+    if exist "%BUILDDIR%" rmdir /s /q "%BUILDDIR%"
+    mkdir "%BUILDDIR%"
+    robocopy "%SRCDIR%" "%BUILDDIR%" /MIR /XD .git .claude bin obj /XF *.user >nul
+)
+
+:: ---- Step 1: Publish both App and Service ----
+echo Publishing FileNodeClient.App...
+dotnet publish "%BUILDDIR%\FileNodeClient.App\FileNodeClient.App.csproj" -c Release -r win-x64 --self-contained -o "%BUILDDIR%\FileNodeClient.Package\publish\App"
+if errorlevel 1 goto :error
+
+echo.
+echo Publishing FileNodeClient.Service...
+dotnet publish "%BUILDDIR%\FileNodeClient.Service\FileNodeClient.Service.csproj" -c Release -r win-x64 --self-contained -o "%BUILDDIR%\FileNodeClient.Package\publish\Service"
+if errorlevel 1 goto :error
+
+:: ---- Step 2: Create self-signed cert if needed ----
+set "CERT_SUBJECT=CN=Fastmail Pty Ltd"
+set "CERT_PFX=%BUILDDIR%\FileNodeClient.Package\DevCert.pfx"
+if not exist "%CERT_PFX%" (
+    echo.
+    echo Creating self-signed dev certificate...
+    powershell -NoProfile -Command ^
+        "$cert = New-SelfSignedCertificate -Type Custom -Subject '%CERT_SUBJECT%' -KeyUsage DigitalSignature -FriendlyName 'FileNodeClient Dev' -CertStoreLocation 'Cert:\CurrentUser\My' -TextExtension @('2.5.29.37={text}1.3.6.1.5.5.7.3.3','2.5.29.19={text}'); Export-PfxCertificate -Cert $cert -FilePath '%CERT_PFX%' -Password (ConvertTo-SecureString -String 'devpass' -Force -AsPlainText)"
+    if errorlevel 1 (
+        echo WARNING: Certificate creation failed. You may need to create one manually.
+    )
+)
+
+:: ---- Step 3: Build MSIX ----
+echo.
+echo Building MSIX package...
+pushd "%BUILDDIR%\FileNodeClient.Package"
+
+:: Use makeappx to pack the layout
+set "MSIX_OUTPUT=%BUILDDIR%\FileNodeClient.Package\bin\Release\FileNodeClient.msix"
+if not exist "bin\Release" mkdir "bin\Release"
+
+:: Create mapping file for makeappx
+(
+echo [Files]
+echo "publish\App\FileNodeClient.App.exe" "FileNodeClient.App.exe"
+echo "publish\Service\FileNodeClient.Service.exe" "FileNodeClient.Service.exe"
+echo "AppxManifest.xml" "AppxManifest.xml"
+echo "Assets\StoreLogo.png" "Assets\StoreLogo.png"
+echo "Assets\Square44x44Logo.png" "Assets\Square44x44Logo.png"
+echo "Assets\Square150x150Logo.png" "Assets\Square150x150Logo.png"
+) > mapping.txt
+
+:: Include all DLLs and runtime files from both publish directories
+for %%f in (publish\App\*.dll) do (
+    echo "%%f" "%%~nxf" >> mapping.txt
+)
+for %%f in (publish\App\*.json) do (
+    echo "%%f" "%%~nxf" >> mapping.txt
+)
+for %%f in (publish\Service\*.dll) do (
+    echo "%%f" "Service\%%~nxf" >> mapping.txt
+)
+for %%f in (publish\Service\*.json) do (
+    echo "%%f" "Service\%%~nxf" >> mapping.txt
+)
+
+makeappx pack /f mapping.txt /p "%MSIX_OUTPUT%" /o
+if errorlevel 1 (
+    popd
+    goto :error
+)
+popd
+
+:: ---- Step 4: Sign the MSIX ----
+if exist "%CERT_PFX%" (
+    echo.
+    echo Signing MSIX...
+    signtool sign /fd SHA256 /a /f "%CERT_PFX%" /p devpass "%MSIX_OUTPUT%"
+    if errorlevel 1 (
+        echo WARNING: Signing failed. Package will need manual signing.
+    )
+)
+
+:: Copy MSIX back if using temp build dir
+if not "%BUILDDIR%"=="%SRCDIR%" (
+    if not exist "%~dp0bin\Release" mkdir "%~dp0bin\Release"
+    copy /y "%MSIX_OUTPUT%" "%~dp0bin\Release\" >nul
+    echo Copied MSIX to %~dp0bin\Release\FileNodeClient.msix
+)
+
+echo.
+echo Success: bin\Release\FileNodeClient.msix
+popd
+goto :eof
+
+:error
+echo.
+echo Build failed!
+popd
+exit /b 1

@@ -86,6 +86,20 @@ internal class SyncRoot : IDisposable
         info.Context = CryptographicBuffer.ConvertStringToBinary(
             _syncRootId, BinaryStringEncoding.Utf8);
 
+        // Custom Explorer columns (visible in Details view)
+        info.StorageProviderItemPropertyDefinitions.Add(
+            new StorageProviderItemPropertyDefinition
+            {
+                Id = StatusColumnManager.StatusPropertyId,
+                DisplayNameResource = "Status"
+            });
+        info.StorageProviderItemPropertyDefinitions.Add(
+            new StorageProviderItemPropertyDefinition
+            {
+                Id = StatusColumnManager.SharingPropertyId,
+                DisplayNameResource = "Sharing"
+            });
+
         StorageProviderSyncRootManager.Register(info);
         _registered = true;
         Log.Info($"{_logPrefix} Sync root registered: {_syncRootPath} (id={_syncRootId})");

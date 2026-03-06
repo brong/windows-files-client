@@ -26,7 +26,7 @@ public class JmapClient : IJmapClient
     private static readonly string[] QuotaUsing = [CoreCapability, QuotaCapability];
     /// <summary>Properties to request in FileNode/get calls — includes myRights for permission enforcement.</summary>
     internal static readonly string[] FileNodeProperties =
-        ["id", "parentId", "blobId", "name", "type", "size", "created", "modified", "role", "myRights"];
+        ["id", "parentId", "blobId", "name", "type", "size", "created", "modified", "role", "myRights", "shareWith"];
     private static readonly HashSet<string> SupportedDigests = ["sha", "sha-256"];
     private string? _preferredDigestAlgorithm;
     private bool _preferredDigestResolved;

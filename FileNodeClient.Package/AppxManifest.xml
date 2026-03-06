@@ -4,7 +4,8 @@
   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
   xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
-  IgnorableNamespaces="uap desktop rescap">
+  xmlns:cloudfiles="http://schemas.microsoft.com/appx/manifest/desktopcloud/windows10"
+  IgnorableNamespaces="uap desktop rescap cloudfiles">
 
   <Identity
     Name="Fastmail.FileNodeClient"
@@ -37,8 +38,34 @@
         Square150x150Logo="Assets\Square150x150Logo.png"
         Square44x44Logo="Assets\Square44x44Logo.png" />
       <Extensions>
+        <!-- Auto-start App at login -->
         <desktop:Extension Category="windows.startupTask" Executable="FileNodeClient.App.exe" EntryPoint="Windows.FullTrustApplication">
           <desktop:StartupTask TaskId="FileNodeClientStartup" Enabled="true" DisplayName="FileNodeClient" />
+        </desktop:Extension>
+
+        <!-- Cloud Files sync provider identity -->
+        <cloudfiles:Extension Category="windows.cloudFiles">
+          <cloudfiles:CloudFiles>
+            <cloudfiles:CustomStateHandler Clsid="00000000-0000-0000-0000-000000000000" />
+          </cloudfiles:CloudFiles>
+        </cloudfiles:Extension>
+      </Extensions>
+    </Application>
+
+    <Application Id="Service"
+      Executable="FileNodeClient.Service.exe"
+      EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        DisplayName="FileNodeClient Service"
+        Description="Fastmail file sync background service"
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png"
+        AppListEntry="none" />
+      <Extensions>
+        <!-- Auto-start Service at login -->
+        <desktop:Extension Category="windows.startupTask" Executable="FileNodeClient.Service.exe" EntryPoint="Windows.FullTrustApplication">
+          <desktop:StartupTask TaskId="FileNodeClientServiceStartup" Enabled="true" DisplayName="FileNodeClient Service" />
         </desktop:Extension>
       </Extensions>
     </Application>
