@@ -60,13 +60,13 @@ Implemented: `CF_CONNECT_FLAG_REQUIRE_PROCESS_INFO` included in `CfConnectSyncRo
 
 Implemented: `CF_CONNECT_FLAG_BLOCK_SELF_IMPLICIT_HYDRATION` included in `CfConnectSyncRoot` flags.
 
-### 12. Open/Close file notifications
+### ~~12. Open/Close file notifications~~ ✓ Done
 
-`NOTIFY_FILE_OPEN_COMPLETION` / `NOTIFY_FILE_CLOSE_COMPLETION` — more reliable change detection than FileSystemWatcher. Close notification tells us exactly when a file is done being edited, eliminating the need for debouncing, echo suppression, and `_recentlyUploaded` workarounds.
+Implemented: `NOTIFY_FILE_OPEN_COMPLETION` / `NOTIFY_FILE_CLOSE_COMPLETION` callbacks with per-path open count tracking. Close notification triggers immediate upload enqueue for modified tracked files, bypassing FileChangeWatcher's 1-second debounce. FileChangeWatcher remains as fallback for new files, directory copies, pin/unpin, and edge cases.
 
-### 13. CfOpenFileWithOplock
+### ~~13. CfOpenFileWithOplock~~ ✓ Done
 
-Opens files with proper opportunistic locks, preventing conflicts during sync operations. More robust than `File.OpenHandle` — avoids races where another process modifies a file mid-sync.
+Implemented: `CfOpenFileWithOplock` used in all OutboxProcessor upload paths (SHA1 check + upload streams) with graceful fallback to regular `FileStream` when oplock open fails (e.g. file open for writing, not a placeholder).
 
 ### 14. Per-operation sync status
 
