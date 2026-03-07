@@ -145,7 +145,8 @@ public class SyncEngine : IDisposable
 
     private void OnFileCloseCompleted(string? nodeId, string fullPath)
     {
-        // Skip files we just uploaded or just hydrated — not user edits
+        // SyncCallbacks already filters to only fire when LastWriteTimeUtc changed.
+        // Skip files we just uploaded or just hydrated — not user edits.
         if (nodeId != null && _syncCallbacks.RecentlyHydrated.ContainsKey(nodeId))
             return;
 
@@ -156,25 +157,9 @@ public class SyncEngine : IDisposable
         if (!_pathToNodeId.TryGetValue(fullPath, out var existingNodeId))
             return;
 
-        // Check if the file was actually modified
-        try
-        {
-            if (!File.Exists(fullPath))
-                return;
-
-            var info = new FileInfo(fullPath);
-            // If the file is dehydrated (sparse/offline), no local edit happened
-            if ((info.Attributes & FileAttributes.Offline) != 0)
-                return;
-
-            var contentType = ResolveContentType(fullPath);
-            Log.Info($"{_logPrefix} File close detected edit: {fullPath} (node={existingNodeId})");
-            _outbox.EnqueueContentChange(fullPath, existingNodeId, contentType, isFolder: false);
-        }
-        catch (Exception ex)
-        {
-            Log.Error($"{_logPrefix} OnFileCloseCompleted error for {fullPath}: {ex.Message}");
-        }
+        var contentType = ResolveContentType(fullPath);
+        Log.Info($"{_logPrefix} File close detected edit: {fullPath} (node={existingNodeId})");
+        _outbox.EnqueueContentChange(fullPath, existingNodeId, contentType, isFolder: false);
     }
 
     /// <summary>

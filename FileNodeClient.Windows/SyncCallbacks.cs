@@ -61,9 +61,11 @@ internal class SyncCallbacks
     public event Action<long>? OnDownloadCompleted;          // transferKey
 
     /// <summary>
-    /// Tracks how many external processes have each file open, keyed by full path.
+    /// Tracks open file state: open count and LastWriteTimeUtc at first open.
+    /// Used to detect whether the file was actually modified between open and close.
     /// </summary>
-    private readonly ConcurrentDictionary<string, int> _openFileCount = new(StringComparer.OrdinalIgnoreCase);
+    private record OpenFileState(int Count, DateTime LastWriteTimeAtOpen);
+    private readonly ConcurrentDictionary<string, OpenFileState> _openFiles = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// Fired when an external process closes a placeholder file.
@@ -447,8 +449,10 @@ internal class SyncCallbacks
                 catch { }
             }
 
-            _openFileCount.AddOrUpdate(fullPath, 1, (_, count) => count + 1);
-            Log.Info($"{_logPrefix} NOTIFY_FILE_OPEN_COMPLETION: node={nodeId}, path={fullPath}, caller={processName}, openCount={_openFileCount.GetValueOrDefault(fullPath)}");
+            var state = _openFiles.AddOrUpdate(fullPath,
+                _ => new OpenFileState(1, GetLastWriteTimeSafe(fullPath)),
+                (_, old) => old with { Count = old.Count + 1 });
+            Log.Info($"{_logPrefix} NOTIFY_FILE_OPEN_COMPLETION: node={nodeId}, path={fullPath}, caller={processName}, openCount={state.Count}");
         }
         catch (Exception ex)
         {
@@ -463,18 +467,38 @@ internal class SyncCallbacks
             var nodeId = ExtractNodeId(callbackInfo);
             var fullPath = ExtractFullPath(callbackInfo);
 
-            var newCount = _openFileCount.AddOrUpdate(fullPath, 0, (_, count) => Math.Max(0, count - 1));
+            DateTime openTime = DateTime.MinValue;
+            int newCount = 0;
+            _openFiles.AddOrUpdate(fullPath,
+                _ => new OpenFileState(0, DateTime.MinValue),
+                (_, old) =>
+                {
+                    openTime = old.LastWriteTimeAtOpen;
+                    newCount = Math.Max(0, old.Count - 1);
+                    return old with { Count = newCount };
+                });
             if (newCount == 0)
-                _openFileCount.TryRemove(fullPath, out _);
+                _openFiles.TryRemove(fullPath, out _);
 
-            Log.Info($"{_logPrefix} NOTIFY_FILE_CLOSE_COMPLETION: node={nodeId}, path={fullPath}, openCount={newCount}");
+            // Only fire the event if the file was modified while open
+            var currentWriteTime = GetLastWriteTimeSafe(fullPath);
+            bool wasModified = currentWriteTime != openTime;
 
-            OnFileCloseCompleted?.Invoke(nodeId, fullPath);
+            Log.Info($"{_logPrefix} NOTIFY_FILE_CLOSE_COMPLETION: node={nodeId}, path={fullPath}, openCount={newCount}, modified={wasModified}");
+
+            if (wasModified)
+                OnFileCloseCompleted?.Invoke(nodeId, fullPath);
         }
         catch (Exception ex)
         {
             Log.Error($"{_logPrefix} NOTIFY_FILE_CLOSE_COMPLETION error: {ex.Message}");
         }
+    }
+
+    private static DateTime GetLastWriteTimeSafe(string path)
+    {
+        try { return File.GetLastWriteTimeUtc(path); }
+        catch { return DateTime.MinValue; }
     }
 
     private static unsafe void AckDehydrate(CF_CALLBACK_INFO* callbackInfo, bool allow)
