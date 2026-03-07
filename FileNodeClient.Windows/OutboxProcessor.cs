@@ -338,7 +338,7 @@ public class OutboxProcessor : IDisposable
 
             SyncEngine.UpdatePlaceholderIdentity(change.LocalPath, newNode.Id);
             _engine.RecordRecentUpload(change.LocalPath);
-            _engine.UpdateMappings(change.LocalPath, change.NodeId, newNode.Id);
+            _engine.UpdateMappings(change.LocalPath, change.NodeId, newNode.Id, newNode.BlobId);
 
             // Also process move if location is dirty
             if (change.IsDirtyLocation)

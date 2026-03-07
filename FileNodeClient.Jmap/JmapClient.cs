@@ -774,6 +774,34 @@ public class JmapClient : IJmapClient
         return result.List;
     }
 
+    public async Task<string> ConvertImageAsync(string blobId, uint width, uint height,
+        string mimeType = "image/png", CancellationToken ct = default)
+    {
+        var createId = "t0";
+        var result = await CallAsync(BlobExtUsing, "Blob/convert", new
+        {
+            accountId = AccountId,
+            create = new Dictionary<string, object>
+            {
+                [createId] = new
+                {
+                    imageResize = new { blobId, width, height, type = mimeType },
+                },
+            },
+        }, ct);
+
+        var response = result.Deserialize<BlobUploadResponse>(JmapSerializerOptions.Default)
+            ?? throw new InvalidOperationException("Failed to parse Blob/convert response");
+
+        if (response.NotCreated != null && response.NotCreated.TryGetValue(createId, out var err))
+            throw new InvalidOperationException($"Blob/convert failed: {err.Type} — {err.Description}");
+
+        if (response.Created == null || !response.Created.TryGetValue(createId, out var created))
+            throw new InvalidOperationException("Blob/convert returned no result");
+
+        return created.Id;
+    }
+
     /// <summary>
     /// Returns all accounts in this session that have the FileNode capability.
     /// Each entry contains the accountId, display name, and whether it's the

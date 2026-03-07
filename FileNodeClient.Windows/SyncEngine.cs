@@ -29,6 +29,8 @@ public class SyncEngine : IDisposable
     private readonly ConcurrentDictionary<string, string> _pathToNodeId = new(StringComparer.OrdinalIgnoreCase);
     // Reverse mapping: FileNode ID → local file path (needed for delete handling)
     private readonly ConcurrentDictionary<string, string> _nodeIdToPath = new();
+    // Maps FileNode ID → blobId (for thumbnail lookups without hydrating)
+    private readonly ConcurrentDictionary<string, string> _nodeIdToBlobId = new();
     // Home node ID discovered during PopulateAsync
     private string _homeNodeId = null!;
     // Trash node ID for server-side recycle bin (null if not available)
@@ -51,6 +53,9 @@ public class SyncEngine : IDisposable
 
     public string SyncRootPath => _syncRootPath;
     public SyncOutbox Outbox => _outbox;
+
+    public string? GetBlobIdForNodeId(string nodeId)
+        => _nodeIdToBlobId.TryGetValue(nodeId, out var blobId) ? blobId : null;
 
     public event Action<SyncStatus>? StatusChanged;
     public event Action<string?>? StatusDetailChanged;
@@ -328,6 +333,7 @@ public class SyncEngine : IDisposable
                 Log.Error($"{_logPrefix} Warm start failed, falling back to full fetch: {ex.Message}");
                 _pathToNodeId.Clear();
                 _nodeIdToPath.Clear();
+                _nodeIdToBlobId.Clear();
                 _pinnedDirectories.Clear();
                 _readOnlyPaths.Clear();
             }
@@ -438,6 +444,8 @@ public class SyncEngine : IDisposable
                 var childPath = Path.Combine(localParentPath, PlaceholderManager.SanitizeName(child.Name));
                 if (!TryMapNode(childPath, child.Id))
                     continue;
+                if (child.BlobId != null)
+                    _nodeIdToBlobId[child.Id] = child.BlobId;
                 TrackFolderPermissions(child, childPath);
 
                 // Ensure pre-existing items are proper placeholders and in-sync
@@ -597,6 +605,8 @@ public class SyncEngine : IDisposable
 
             _nodeIdToPath[nodeId] = fullPath;
             _pathToNodeId[fullPath] = nodeId;
+            if (entry.BlobId != null)
+                _nodeIdToBlobId[nodeId] = entry.BlobId;
         }
         int fileCount = cache.Entries.Values.Count(e => !e.IsFolder) - missingCount;
         Log.Info($"{_logPrefix}  {matchCount} matched, {mismatchCount} changed, {missingCount} missing");
@@ -918,6 +928,8 @@ public class SyncEngine : IDisposable
                 _pathToNodeId.TryRemove(oldPath, out _);
                 _pathToNodeId[newPath] = node.Id;
                 _nodeIdToPath[node.Id] = newPath;
+                if (node.BlobId != null)
+                    _nodeIdToBlobId[node.Id] = node.BlobId;
 
                 // Clean up old read-only tracking on rename
                 _readOnlyPaths.TryRemove(oldPath, out _);
@@ -959,6 +971,8 @@ public class SyncEngine : IDisposable
                 }
                 if (TryMapNode(newPath, node.Id))
                 {
+                    if (node.BlobId != null)
+                        _nodeIdToBlobId[node.Id] = node.BlobId;
                     TrackFolderPermissions(node, newPath);
                     try { SetInSync(newPath); }
                     catch { /* not a placeholder or just created — ignore */ }
@@ -999,6 +1013,8 @@ public class SyncEngine : IDisposable
                 Log.Info($"{_logPrefix}  Created node {node.Id}: not on disk or path conflict, skipping");
                 continue;
             }
+            if (node.BlobId != null)
+                _nodeIdToBlobId[node.Id] = node.BlobId;
             TrackFolderPermissions(node, childPath);
 
             if (existed)
@@ -1028,6 +1044,7 @@ public class SyncEngine : IDisposable
                 continue;
             }
 
+            _nodeIdToBlobId.TryRemove(destroyedId, out _);
             if (_nodeIdToPath.TryRemove(destroyedId, out var localPath))
             {
                 // Don't delete the local file if the outbox has a pending
@@ -1734,18 +1751,26 @@ public class SyncEngine : IDisposable
     /// <summary>
     /// Update path↔nodeId mappings. Called by OutboxProcessor after server operations.
     /// </summary>
-    internal void UpdateMappings(string localPath, string? oldNodeId, string newNodeId)
+    internal void UpdateMappings(string localPath, string? oldNodeId, string newNodeId, string? blobId = null)
     {
         if (oldNodeId != null)
+        {
             _nodeIdToPath.TryRemove(oldNodeId, out _);
+            _nodeIdToBlobId.TryRemove(oldNodeId, out _);
+        }
         // Clean up any intermediate mapping — e.g. a remote replace arrived via
         // PollChanges while the outbox entry was pending, remapping the path to
         // a different nodeId that we're now replacing with onExists:"replace".
         if (_pathToNodeId.TryGetValue(localPath, out var currentNodeId)
             && currentNodeId != oldNodeId && currentNodeId != newNodeId)
+        {
             _nodeIdToPath.TryRemove(currentNodeId, out _);
+            _nodeIdToBlobId.TryRemove(currentNodeId, out _);
+        }
         _pathToNodeId[localPath] = newNodeId;
         _nodeIdToPath[newNodeId] = localPath;
+        if (blobId != null)
+            _nodeIdToBlobId[newNodeId] = blobId;
     }
 
     /// <summary>
@@ -2181,7 +2206,7 @@ public class SyncEngine : IDisposable
     private void SaveNodeCache(string state)
     {
         NodeCache.Save(_scopeKey, _homeNodeId, state, _nodeIdToPath, _syncRootPath,
-            _readOnlyPaths, _trashNodeId);
+            _readOnlyPaths, _trashNodeId, _nodeIdToBlobId);
     }
 
     /// <summary>

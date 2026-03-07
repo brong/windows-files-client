@@ -52,4 +52,6 @@ public interface IJmapClient : IDisposable
     Task<BlobDataItem> GetBlobAsync(string blobId, string[] properties,
         long? offset = null, long? length = null, CancellationToken ct = default);
     Task<Quota[]> GetQuotasAsync(CancellationToken ct = default);
+    Task<string> ConvertImageAsync(string blobId, uint width, uint height,
+        string mimeType = "image/png", CancellationToken ct = default);
 }

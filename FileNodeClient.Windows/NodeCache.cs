@@ -22,12 +22,16 @@ public record CacheEntry
     [JsonPropertyName("myRights")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public FilesRights? MyRights { get; init; }
+
+    [JsonPropertyName("blobId")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? BlobId { get; init; }
 }
 
 public record CacheSnapshot
 {
     [JsonPropertyName("v")]
-    public int Version { get; init; } = 4;
+    public int Version { get; init; } = 5;
 
     [JsonPropertyName("homeNodeId")]
     public string HomeNodeId { get; init; } = "";
@@ -64,7 +68,7 @@ public static class NodeCache
         {
             var json = File.ReadAllText(path);
             var snapshot = JsonSerializer.Deserialize<CacheSnapshot>(json);
-            if (snapshot == null || snapshot.Version != 4
+            if (snapshot == null || snapshot.Version != 5
                 || string.IsNullOrEmpty(snapshot.HomeNodeId)
                 || string.IsNullOrEmpty(snapshot.State))
                 return null;
@@ -81,7 +85,8 @@ public static class NodeCache
     public static void Save(string scopeKey, string homeNodeId, string state,
         IReadOnlyDictionary<string, string> nodeIdToPath, string syncRootPath,
         IReadOnlyDictionary<string, FilesRights>? folderRights = null,
-        string? trashNodeId = null)
+        string? trashNodeId = null,
+        IReadOnlyDictionary<string, string>? nodeIdToBlobId = null)
     {
         var path = GetCachePath(scopeKey);
         var dir = System.IO.Path.GetDirectoryName(path)!;
@@ -97,6 +102,9 @@ public static class NodeCache
             var relativePath = fullPath.Substring(prefix.Length);
             try
             {
+                string? blobId = null;
+                nodeIdToBlobId?.TryGetValue(nodeId, out blobId);
+
                 if (Directory.Exists(fullPath))
                 {
                     FilesRights? rights = null;
@@ -116,6 +124,7 @@ public static class NodeCache
                         Path = relativePath,
                         Size = info.Length,
                         Modified = info.LastWriteTimeUtc,
+                        BlobId = blobId,
                     };
                 }
                 else

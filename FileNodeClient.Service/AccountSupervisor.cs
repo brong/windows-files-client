@@ -102,6 +102,9 @@ sealed class AccountSupervisor : IDisposable
         // Reconcile local changes made while offline
         _engine.ReconcileLocalChanges();
 
+        // Register thumbnail service for this sync root
+        ThumbnailService.Register(_syncRootPath, _jmapClient, _engine.GetBlobIdForNodeId);
+
         // Connect callbacks
         _engine.Connect();
 
@@ -222,6 +225,8 @@ sealed class AccountSupervisor : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+
+        ThumbnailService.Unregister(_syncRootPath);
 
         _loopCts?.Cancel();
         try { _loopTask?.Wait(3000); } catch { }

@@ -24,11 +24,9 @@ Implemented: blocking pre-delete callback propagates deletes to the server befor
 
 ## Tier 2 — Important UX Polish
 
-### 5. Thumbnail provider
+### 5. Thumbnail provider ✅
 
-A COM `IThumbnailProvider` that returns image thumbnails for *dehydrated* placeholders without hydrating them. Essential now that dehydration is enabled — otherwise image folders show generic icons.
-
-**Requires spec support:** see [Spec Dependencies](#spec-dependencies) below.
+~~A COM `IThumbnailProvider` that returns image thumbnails for *dehydrated* placeholders without hydrating them. Essential now that dehydration is enabled — otherwise image folders show generic icons.~~ ✓ Done — `ThumbnailHandler` COM class uses `Blob/convert` (resizeImage action) to fetch server-generated thumbnails at the requested size. Registered via MSIX manifest as an ExeServer on FileNodeClient.Service.exe. `ThumbnailService` static registry bridges the COM handler to running SyncEngine instances with an in-memory LRU cache.
 
 ### 6. Context menu extensions
 
@@ -110,14 +108,9 @@ Implemented: files ≤16KB are fetched inline via RFC 9404 `Blob/get` (base64 da
 
 Several cfapi features require capabilities beyond what the current JMAP FileNode spec provides. These are things the spec itself would need to support — the Windows client can't implement them with StorageNode as it stands today.
 
-### Thumbnail downloads (blocks: Thumbnail provider)
+### ~~Thumbnail downloads~~ ✓ Resolved (Blob/convert implemented)
 
-The `IThumbnailProvider` COM handler needs to return image data for dehydrated files without hydrating them. The server must be able to serve a scaled-down version of a file's content. Two options:
-
-- **Preferred:** size parameters on the download URL template (e.g. `{blobId}?maxWidth=256&maxHeight=256`), so the client can request thumbnails at the size Explorer asks for without downloading the full blob.
-- **Alternative:** a `thumbnailBlobId` property on FileNode pointing to a pre-rendered thumbnail.
-
-The StorageNode model already has `Width`/`Height`/`Orientation`, which indicates the server understands image dimensions — it just needs to serve resized versions.
+~~The `IThumbnailProvider` COM handler needs to return image data for dehydrated files without hydrating them.~~ Implemented via `Blob/convert` with `resizeImage` action from the blobext capability. The client calls `ConvertImageAsync(blobId, width, height)` to get a server-generated thumbnail at the requested size, then downloads the resulting blob as PNG.
 
 ### ~~Web URL per node~~ ✓ Resolved (URI Source implemented)
 
@@ -131,11 +124,9 @@ Implemented via `webTrashUrl` in the FileNode account capability. Set on `Storag
 
 Client-side range request support is implemented with automatic fallback. The spec should still mandate Range header support on the download URL for optimal performance, but it's no longer blocking.
 
-### Content hash (improves: conflict detection)
+### ~~Content hash~~ ✓ Not needed (can use Blob/get)
 
-A `blobHash` or `contentHash` property on FileNode would let the client compare local vs. server content without re-downloading the blob. Currently the client has no way to detect whether a local edit matches what's already on the server, so it re-uploads unconditionally. Not strictly blocking any cfapi feature, but important for robust sync.
-
-**Note:** Download integrity verification is already implemented using `Blob/get` digests (see #19), but a persistent content hash on the node would enable pre-upload deduplication.
+~~A `blobHash` or `contentHash` property on FileNode would let the client compare local vs. server content without re-downloading the blob.~~ The client can already fetch `digest:sha` via `Blob/get` on the node's `blobId` and compare against a local SHA before uploading. This is a client-side optimization to wire up, not a spec dependency.
 
 ### Quota (improves: Explorer storage display)
 
@@ -145,11 +136,11 @@ Explorer can display storage quota in the nav pane and folder properties. The sp
 
 | Spec need | Priority | Blocks |
 |-----------|----------|--------|
-| Thumbnail downloads | High | Thumbnail provider (#5) |
+| ~~Thumbnail downloads~~ | ~~High~~ | ~~Thumbnail provider (#5)~~ ✓ |
 | ~~Web URL per node~~ | ~~High~~ | ~~URI Source (#16), Context menus (#6)~~ ✓ |
 | ~~RecycleBin URL~~ | ~~Medium~~ | ~~RecycleBinUri (#8)~~ ✓ |
 | ~~Range downloads~~ | ~~Medium~~ | ~~Progressive hydration (#18)~~ ✓ |
-| Content hash | Medium | — (improves conflict detection) |
+| ~~Content hash~~ | ~~Medium~~ | ~~— (improves conflict detection)~~ ✓ Not needed |
 | Quota | Low | — (improves Explorer display) |
 
 Sharing is already modeled in StorageNode (`ShareWith`, `SharedLinkUrl`, `IsSharedLinkEnabled`, `MyRights`) — the client just needs to wire up Set operations and the context menu/share handler UI. No spec changes needed for sharing features.

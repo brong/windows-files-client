@@ -94,6 +94,7 @@ public class AccountScopedJmapClient : IJmapClient
 
     private static readonly string[] FileNodeUsing = [JmapClient.CoreCapability, JmapClient.FileNodeCapability];
     private static readonly string[] BlobUsing = [JmapClient.CoreCapability, JmapClient.BlobCapability];
+    private static readonly string[] BlobExtUsing = [JmapClient.CoreCapability, JmapClient.BlobCapability, JmapClient.BlobExtCapability];
 
     private string NextCallId() => "c" + Interlocked.Increment(ref _parent.NextCallIdRef);
 
@@ -580,6 +581,34 @@ public class AccountScopedJmapClient : IJmapClient
                 ["ids"] = JsonSerializer.SerializeToElement<string[]?>(null),
             }, ct);
         return result.List;
+    }
+
+    public async Task<string> ConvertImageAsync(string blobId, uint width, uint height,
+        string mimeType = "image/png", CancellationToken ct = default)
+    {
+        var createId = "t0";
+        var result = await CallAsync(BlobExtUsing, "Blob/convert", new
+        {
+            accountId = _accountId,
+            create = new Dictionary<string, object>
+            {
+                [createId] = new
+                {
+                    imageResize = new { blobId, width, height, type = mimeType },
+                },
+            },
+        }, ct);
+
+        var response = result.Deserialize<BlobUploadResponse>(JmapSerializerOptions.Default)
+            ?? throw new InvalidOperationException("Failed to parse Blob/convert response");
+
+        if (response.NotCreated != null && response.NotCreated.TryGetValue(createId, out var err))
+            throw new InvalidOperationException($"Blob/convert failed: {err.Type} — {err.Description}");
+
+        if (response.Created == null || !response.Created.TryGetValue(createId, out var created))
+            throw new InvalidOperationException("Blob/convert returned no result");
+
+        return created.Id;
     }
 
     /// <summary>
