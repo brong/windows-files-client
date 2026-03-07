@@ -46,11 +46,11 @@ Implemented: blocking pre-rename callback with veto support and `TARGET_IN_SCOPE
 
 `StorageProviderSyncRootInfo.RecycleBinUri` — point to Fastmail's web trash so Explorer can show "Recover from cloud" after deletes. **Requires spec support:** see [Spec Dependencies](#spec-dependencies) below.
 
-### 9. Custom columns in Explorer
+### 9. Custom columns in Explorer ✅
 
 ~~`StorageProviderItemPropertyDefinitions` + `IStorageProviderItemPropertySource` COM interface to show per-file metadata columns: sharing status, sync state, etc.~~
 
-Partially implemented: `StatusColumnManager` push-based approach (no COM handler needed) with Status and Sharing columns. Code is complete but disabled — `StorageProviderItemPropertyDefinitions` registration and `SetAsync` calls crash Explorer without MSIX package identity. Will be re-enabled when MSIX is the primary install method.
+Implemented: `StatusColumnManager` push-based approach (no COM handler needed) with Status and Sharing columns. Column definitions registered in `SyncRoot.Register`, values pushed after initial populate, incremental sync (updates + creates), and on local file changes ("Pending" status while uploading).
 
 ### ~~10. Process info~~ ✓ Done
 

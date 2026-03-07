@@ -86,23 +86,18 @@ internal class SyncRoot : IDisposable
         info.Context = CryptographicBuffer.ConvertStringToBinary(
             _syncRootId, BinaryStringEncoding.Utf8);
 
-        // TODO: Custom Explorer columns require MSIX package identity.
-        // StorageProviderItemPropertyDefinitions are registered here but
-        // values are only pushed when package identity is present.
-        // Uncomment when MSIX is the primary install method.
-        //
-        // info.StorageProviderItemPropertyDefinitions.Add(
-        //     new StorageProviderItemPropertyDefinition
-        //     {
-        //         Id = StatusColumnManager.StatusPropertyId,
-        //         DisplayNameResource = "Status"
-        //     });
-        // info.StorageProviderItemPropertyDefinitions.Add(
-        //     new StorageProviderItemPropertyDefinition
-        //     {
-        //         Id = StatusColumnManager.SharingPropertyId,
-        //         DisplayNameResource = "Sharing"
-        //     });
+        info.StorageProviderItemPropertyDefinitions.Add(
+            new StorageProviderItemPropertyDefinition
+            {
+                Id = StatusColumnManager.StatusPropertyId,
+                DisplayNameResource = "Status"
+            });
+        info.StorageProviderItemPropertyDefinitions.Add(
+            new StorageProviderItemPropertyDefinition
+            {
+                Id = StatusColumnManager.SharingPropertyId,
+                DisplayNameResource = "Sharing"
+            });
 
         StorageProviderSyncRootManager.Register(info);
         _registered = true;
