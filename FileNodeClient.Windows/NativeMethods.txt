@@ -49,6 +49,7 @@ CF_REVERT_FLAGS
 CfSetPinState
 CF_PIN_STATE
 CF_SET_PIN_FLAGS
+CfOpenFileWithOplock
 CreateFile
 FILE_FLAGS_AND_ATTRIBUTES
 SetFileInformationByHandle

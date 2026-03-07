@@ -143,6 +143,40 @@ public class SyncEngine : IDisposable
         StatusDetailChanged?.Invoke(_downloadDetail);
     }
 
+    private void OnFileCloseCompleted(string? nodeId, string fullPath)
+    {
+        // Skip files we just uploaded or just hydrated — not user edits
+        if (nodeId != null && _syncCallbacks.RecentlyHydrated.ContainsKey(nodeId))
+            return;
+
+        if (_recentlyUploaded.ContainsKey(fullPath))
+            return;
+
+        // Only act on tracked files (existing placeholders)
+        if (!_pathToNodeId.TryGetValue(fullPath, out var existingNodeId))
+            return;
+
+        // Check if the file was actually modified
+        try
+        {
+            if (!File.Exists(fullPath))
+                return;
+
+            var info = new FileInfo(fullPath);
+            // If the file is dehydrated (sparse/offline), no local edit happened
+            if ((info.Attributes & FileAttributes.Offline) != 0)
+                return;
+
+            var contentType = ResolveContentType(fullPath);
+            Log.Info($"{_logPrefix} File close detected edit: {fullPath} (node={existingNodeId})");
+            _outbox.EnqueueContentChange(fullPath, existingNodeId, contentType, isFolder: false);
+        }
+        catch (Exception ex)
+        {
+            Log.Error($"{_logPrefix} OnFileCloseCompleted error for {fullPath}: {ex.Message}");
+        }
+    }
+
     /// <summary>
     /// Map a server node to a local path, but only if the path exists on disk
     /// and isn't already mapped to a different node.
@@ -182,6 +216,7 @@ public class SyncEngine : IDisposable
         _syncCallbacks.OnDownloadStarted += OnDownloadStarted;
         _syncCallbacks.OnDownloadCompleted += OnDownloadCompleted;
         _syncCallbacks.OnDirectoryPopulated += OnDirectoryPopulated;
+        _syncCallbacks.OnFileCloseCompleted += OnFileCloseCompleted;
         _fileChangeWatcher = new FileChangeWatcher(syncRootPath, _logPrefix);
         _fileChangeWatcher.OnChanges += OnLocalFileChanges;
         _fileChangeWatcher.OnRenamed += OnLocalRenamed;

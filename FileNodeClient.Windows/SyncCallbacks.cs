@@ -60,6 +60,17 @@ internal class SyncCallbacks
     public event Action<long, string>? OnDownloadStarted;   // transferKey, fileName
     public event Action<long>? OnDownloadCompleted;          // transferKey
 
+    /// <summary>
+    /// Tracks how many external processes have each file open, keyed by full path.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, int> _openFileCount = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Fired when an external process closes a placeholder file.
+    /// Parameters: (nodeId, fullPath)
+    /// </summary>
+    public event Action<string?, string>? OnFileCloseCompleted;
+
     public record DirectoryPopulatedInfo(string DirectoryPath);
     public event Action<DirectoryPopulatedInfo>? OnDirectoryPopulated;
 
@@ -80,8 +91,10 @@ internal class SyncCallbacks
         CF_CALLBACK cancelFetchDataDelegate = new(CancelFetchDataCallback);
         CF_CALLBACK notifyDehydrateDelegate = new(NotifyDehydrateCallback);
         CF_CALLBACK notifyDehydrateCompletionDelegate = new(NotifyDehydrateCompletionCallback);
+        CF_CALLBACK notifyFileOpenCompletionDelegate = new(NotifyFileOpenCompletionCallback);
+        CF_CALLBACK notifyFileCloseCompletionDelegate = new(NotifyFileCloseCompletionCallback);
 
-        var delegates = new CF_CALLBACK[] { fetchPlaceholdersDelegate, fetchDataDelegate, notifyDeleteDelegate, notifyRenameDelegate, cancelFetchDataDelegate, notifyDehydrateDelegate, notifyDehydrateCompletionDelegate };
+        var delegates = new CF_CALLBACK[] { fetchPlaceholdersDelegate, fetchDataDelegate, notifyDeleteDelegate, notifyRenameDelegate, cancelFetchDataDelegate, notifyDehydrateDelegate, notifyDehydrateCompletionDelegate, notifyFileOpenCompletionDelegate, notifyFileCloseCompletionDelegate };
 
         var registrations = new CF_CALLBACK_REGISTRATION[]
         {
@@ -119,6 +132,16 @@ internal class SyncCallbacks
             {
                 Type = CF_CALLBACK_TYPE.CF_CALLBACK_TYPE_NOTIFY_DEHYDRATE_COMPLETION,
                 Callback = notifyDehydrateCompletionDelegate,
+            },
+            new()
+            {
+                Type = CF_CALLBACK_TYPE.CF_CALLBACK_TYPE_NOTIFY_FILE_OPEN_COMPLETION,
+                Callback = notifyFileOpenCompletionDelegate,
+            },
+            new()
+            {
+                Type = CF_CALLBACK_TYPE.CF_CALLBACK_TYPE_NOTIFY_FILE_CLOSE_COMPLETION,
+                Callback = notifyFileCloseCompletionDelegate,
             },
             // Sentinel entry to mark end of array
             new()
@@ -401,6 +424,56 @@ internal class SyncCallbacks
         catch (Exception ex)
         {
             Log.Error($"{_logPrefix} NOTIFY_DEHYDRATE_COMPLETION error: {ex.Message}");
+        }
+    }
+
+    private unsafe void NotifyFileOpenCompletionCallback(CF_CALLBACK_INFO* callbackInfo, CF_CALLBACK_PARAMETERS* callbackParameters)
+    {
+        try
+        {
+            var nodeId = ExtractNodeId(callbackInfo);
+            var fullPath = ExtractFullPath(callbackInfo);
+
+            var processName = "(unknown)";
+            if (callbackInfo->ProcessInfo != null)
+            {
+                try
+                {
+                    var processId = callbackInfo->ProcessInfo->ProcessId;
+                    processName = $"PID={processId}";
+                    if (callbackInfo->ProcessInfo->ImagePath.Length > 0)
+                        processName = Path.GetFileName(callbackInfo->ProcessInfo->ImagePath.ToString());
+                }
+                catch { }
+            }
+
+            _openFileCount.AddOrUpdate(fullPath, 1, (_, count) => count + 1);
+            Log.Info($"{_logPrefix} NOTIFY_FILE_OPEN_COMPLETION: node={nodeId}, path={fullPath}, caller={processName}, openCount={_openFileCount.GetValueOrDefault(fullPath)}");
+        }
+        catch (Exception ex)
+        {
+            Log.Error($"{_logPrefix} NOTIFY_FILE_OPEN_COMPLETION error: {ex.Message}");
+        }
+    }
+
+    private unsafe void NotifyFileCloseCompletionCallback(CF_CALLBACK_INFO* callbackInfo, CF_CALLBACK_PARAMETERS* callbackParameters)
+    {
+        try
+        {
+            var nodeId = ExtractNodeId(callbackInfo);
+            var fullPath = ExtractFullPath(callbackInfo);
+
+            var newCount = _openFileCount.AddOrUpdate(fullPath, 0, (_, count) => Math.Max(0, count - 1));
+            if (newCount == 0)
+                _openFileCount.TryRemove(fullPath, out _);
+
+            Log.Info($"{_logPrefix} NOTIFY_FILE_CLOSE_COMPLETION: node={nodeId}, path={fullPath}, openCount={newCount}");
+
+            OnFileCloseCompleted?.Invoke(nodeId, fullPath);
+        }
+        catch (Exception ex)
+        {
+            Log.Error($"{_logPrefix} NOTIFY_FILE_CLOSE_COMPLETION error: {ex.Message}");
         }
     }
 

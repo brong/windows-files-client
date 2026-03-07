@@ -1,7 +1,11 @@
 using System.Collections.Concurrent;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using Microsoft.Win32.SafeHandles;
 using FileNodeClient.Ipc;
 using FileNodeClient.Jmap;
+using Windows.Win32;
+using Windows.Win32.Storage.CloudFilters;
 
 namespace FileNodeClient.Windows;
 
@@ -307,8 +311,7 @@ public class OutboxProcessor : IDisposable
                 () => _jmapClient.GetFileNodesAsync([change.NodeId], ct), ct);
             if (existingNodes.Length > 0 && existingNodes[0].BlobId != null)
             {
-                using var sha1Stream = new FileStream(change.LocalPath, FileMode.Open, FileAccess.Read,
-                    FileShare.ReadWrite | FileShare.Delete);
+                using var sha1Stream = OpenFileForUpload(change.LocalPath);
                 var hashBytes = await SHA1.HashDataAsync(sha1Stream, ct);
                 var localSha1Hex = Convert.ToHexString(hashBytes).ToLowerInvariant();
                 if (string.Equals(localSha1Hex, existingNodes[0].BlobId, StringComparison.OrdinalIgnoreCase))
@@ -328,8 +331,7 @@ public class OutboxProcessor : IDisposable
             }
 
             Log.Info($"{_logPrefix} Outbox: uploading modified file {fileName}");
-            using var fileStream = new FileStream(change.LocalPath, FileMode.Open, FileAccess.Read,
-                FileShare.ReadWrite | FileShare.Delete);
+            using var fileStream = OpenFileForUpload(change.LocalPath);
             var blobId = await UploadFileContentAsync(change, fileStream, contentType, ct);
             var newNode = await _queue.EnqueueAsync(QueuePriority.Background,
                 () => _jmapClient.ReplaceFileNodeBlobAsync(change.NodeId, parentId, fileName, blobId, contentType, ct), ct);
@@ -430,8 +432,7 @@ public class OutboxProcessor : IDisposable
             }
 
             Log.Info($"{_logPrefix} Outbox: uploading new file {fileName}");
-            using var fileStream = new FileStream(change.LocalPath, FileMode.Open, FileAccess.Read,
-                FileShare.ReadWrite | FileShare.Delete);
+            using var fileStream = OpenFileForUpload(change.LocalPath);
             var blobId = await UploadFileContentAsync(change, fileStream, contentType, ct);
             var node = await _queue.EnqueueAsync(QueuePriority.Background,
                 () => _jmapClient.CreateFileNodeAsync(parentId, blobId, fileName, contentType, "replace", ct), ct);
@@ -502,6 +503,56 @@ public class OutboxProcessor : IDisposable
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// Open a file for reading using CfOpenFileWithOplock when available.
+    /// Falls back to a regular FileStream if the oplock open fails (e.g. file
+    /// is open for writing by another process, or not a placeholder).
+    /// The caller must dispose the returned stream.
+    /// </summary>
+    private FileStream OpenFileForUpload(string path)
+    {
+        try
+        {
+            PInvoke.CfOpenFileWithOplock(
+                path,
+                CF_OPEN_FILE_FLAGS.CF_OPEN_FILE_FLAG_NONE,
+                out var handle).ThrowOnFailure();
+
+            // CsWin32 returns CfCloseHandleSafeHandle — wrap in FileStream for reading.
+            // Transfer ownership: create a non-owning SafeFileHandle so FileStream
+            // disposes it, then dispose the CfCloseHandleSafeHandle separately.
+            var safeHandle = new SafeFileHandle(handle.DangerousGetHandle(), ownsHandle: false);
+            return new CfOplockFileStream(safeHandle, handle);
+        }
+        catch (Exception ex)
+        {
+            Log.Info($"{_logPrefix} CfOpenFileWithOplock failed for {Path.GetFileName(path)}, using FileStream: {ex.Message}");
+            return new FileStream(path, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+        }
+    }
+
+    /// <summary>
+    /// FileStream wrapper that also disposes the CfCloseHandleSafeHandle from CfOpenFileWithOplock.
+    /// </summary>
+    private sealed class CfOplockFileStream : FileStream
+    {
+        private readonly SafeHandle _cfHandle;
+
+        public CfOplockFileStream(SafeFileHandle fileHandle, SafeHandle cfHandle)
+            : base(fileHandle, FileAccess.Read)
+        {
+            _cfHandle = cfHandle;
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            base.Dispose(disposing);
+            if (disposing)
+                _cfHandle.Dispose();
+        }
     }
 
     public void Dispose()
