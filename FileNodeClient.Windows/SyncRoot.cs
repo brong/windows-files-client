@@ -138,6 +138,56 @@ internal class SyncRoot : IDisposable
             PInvoke.CfUpdateSyncProviderStatus(_connectionKey, status);
     }
 
+    [DllImport("cldapi.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
+    private static extern int CfReportSyncStatus(string SyncRootPath, IntPtr SyncStatus);
+
+    /// <summary>
+    /// Report a human-readable sync status message to Explorer.
+    /// Pass null message to clear any previous status.
+    /// Code high bit (0x80000000) = error; 0 = info/clear.
+    /// </summary>
+    internal unsafe void ReportSyncStatus(uint code, string? message)
+    {
+        try
+        {
+            if (message == null)
+            {
+                Marshal.ThrowExceptionForHR(CfReportSyncStatus(_syncRootPath, IntPtr.Zero));
+                return;
+            }
+
+            // CF_SYNC_STATUS is a variable-length struct: 4 uint fields (16 bytes)
+            // followed by a UTF-16 description string.
+            const int headerSize = 16; // StructSize + Code + DescriptionOffset + DescriptionLength
+            int stringBytes = message.Length * sizeof(char);
+            int totalSize = headerSize + stringBytes;
+
+            Span<byte> buffer = stackalloc byte[totalSize];
+            buffer.Clear();
+
+            // StructSize (uint)
+            BitConverter.TryWriteBytes(buffer, (uint)totalSize);
+            // Code (uint)
+            BitConverter.TryWriteBytes(buffer.Slice(4), code);
+            // DescriptionOffset (uint) — offset from start of struct
+            BitConverter.TryWriteBytes(buffer.Slice(8), (uint)headerSize);
+            // DescriptionLength (uint) — byte length of description
+            BitConverter.TryWriteBytes(buffer.Slice(12), (uint)stringBytes);
+
+            // Copy UTF-16 string bytes after the header
+            MemoryMarshal.AsBytes(message.AsSpan()).CopyTo(buffer.Slice(headerSize));
+
+            fixed (byte* ptr = buffer)
+            {
+                Marshal.ThrowExceptionForHR(CfReportSyncStatus(_syncRootPath, (IntPtr)ptr));
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Error($"CfReportSyncStatus failed: {ex.Message}");
+        }
+    }
+
     public void Disconnect()
     {
         if (_connected)

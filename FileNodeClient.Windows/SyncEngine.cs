@@ -80,8 +80,20 @@ public class SyncEngine : IDisposable
     public static List<(string AccountId, string Path)> GetRegisteredSyncRoots()
         => SyncRoot.GetRegisteredSyncRoots();
 
+    private const uint SyncStatusError = 0x80000000;
+
     private void ReportStatus(CF_SYNC_PROVIDER_STATUS status)
     {
+        // Clear any stale error message when transitioning to a healthy state
+        if (status == CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_IDLE
+            || status == CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_SYNC_INCREMENTAL
+            || status == CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_SYNC_FULL
+            || status == CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_POPULATE_NAMESPACE
+            || status == CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_POPULATE_CONTENT)
+        {
+            _syncRoot.ReportSyncStatus(0, null);
+        }
+
         _syncRoot.UpdateProviderStatus(status);
 
         var syncStatus = status switch
@@ -101,6 +113,7 @@ public class SyncEngine : IDisposable
     public void ReportConnectivityLost()
     {
         _outboxProcessor.SetOnline(false);
+        _syncRoot.ReportSyncStatus(SyncStatusError, "Connection to server lost. Waiting to reconnect...");
         ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_CONNECTIVITY_LOST);
     }
 
@@ -2225,6 +2238,7 @@ public class SyncEngine : IDisposable
         }
         _readOnlyPaths.Clear();
 
+        _syncRoot.ReportSyncStatus(0, null);
         ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_DISCONNECTED);
 
         // Cancel all in-progress hydrations
