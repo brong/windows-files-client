@@ -146,6 +146,29 @@ internal class SyncRoot : IDisposable
     /// Pass null message to clear any previous status.
     /// Code high bit (0x80000000) = error; 0 = info/clear.
     /// </summary>
+    /// <summary>
+    /// Compute the total byte size needed for a CF_SYNC_STATUS with the given message.
+    /// </summary>
+    internal static int SyncStatusSize(string message) => 16 + message.Length * sizeof(char);
+
+    /// <summary>
+    /// Fill a caller-provided buffer with a CF_SYNC_STATUS struct.
+    /// Buffer must be at least <see cref="SyncStatusSize"/> bytes.
+    /// </summary>
+    internal static void FillSyncStatus(Span<byte> buffer, uint code, string message)
+    {
+        const int headerSize = 16; // StructSize + Code + DescriptionOffset + DescriptionLength
+        int stringBytes = message.Length * sizeof(char);
+        int totalSize = headerSize + stringBytes;
+
+        buffer.Slice(0, totalSize).Clear();
+        BitConverter.TryWriteBytes(buffer, (uint)totalSize);
+        BitConverter.TryWriteBytes(buffer.Slice(4), code);
+        BitConverter.TryWriteBytes(buffer.Slice(8), (uint)headerSize);
+        BitConverter.TryWriteBytes(buffer.Slice(12), (uint)stringBytes);
+        MemoryMarshal.AsBytes(message.AsSpan()).CopyTo(buffer.Slice(headerSize));
+    }
+
     internal unsafe void ReportSyncStatus(uint code, string? message)
     {
         try
@@ -156,26 +179,8 @@ internal class SyncRoot : IDisposable
                 return;
             }
 
-            // CF_SYNC_STATUS is a variable-length struct: 4 uint fields (16 bytes)
-            // followed by a UTF-16 description string.
-            const int headerSize = 16; // StructSize + Code + DescriptionOffset + DescriptionLength
-            int stringBytes = message.Length * sizeof(char);
-            int totalSize = headerSize + stringBytes;
-
-            Span<byte> buffer = stackalloc byte[totalSize];
-            buffer.Clear();
-
-            // StructSize (uint)
-            BitConverter.TryWriteBytes(buffer, (uint)totalSize);
-            // Code (uint)
-            BitConverter.TryWriteBytes(buffer.Slice(4), code);
-            // DescriptionOffset (uint) — offset from start of struct
-            BitConverter.TryWriteBytes(buffer.Slice(8), (uint)headerSize);
-            // DescriptionLength (uint) — byte length of description
-            BitConverter.TryWriteBytes(buffer.Slice(12), (uint)stringBytes);
-
-            // Copy UTF-16 string bytes after the header
-            MemoryMarshal.AsBytes(message.AsSpan()).CopyTo(buffer.Slice(headerSize));
+            Span<byte> buffer = stackalloc byte[SyncStatusSize(message)];
+            FillSyncStatus(buffer, code, message);
 
             fixed (byte* ptr = buffer)
             {

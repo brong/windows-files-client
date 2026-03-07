@@ -219,7 +219,7 @@ internal class SyncCallbacks
             if (string.IsNullOrEmpty(nodeId))
             {
                 Log.Error($"{_logPrefix} FETCH_DATA: No identity for {fileName}");
-                TransferError(*callbackInfo, new NTSTATUS(unchecked((int)0xC000000D))); // STATUS_INVALID_PARAMETER
+                TransferError(*callbackInfo, new NTSTATUS(unchecked((int)0xC000000D)), "File not recognized by sync engine"); // STATUS_INVALID_PARAMETER
                 return;
             }
 
@@ -284,7 +284,7 @@ internal class SyncCallbacks
         catch (Exception ex)
         {
             Log.Error($"{_logPrefix} FETCH_DATA error: {ex.Message}");
-            TransferError(*callbackInfo, new NTSTATUS(unchecked((int)0xC0000001))); // STATUS_UNSUCCESSFUL
+            TransferError(*callbackInfo, new NTSTATUS(unchecked((int)0xC0000001)), $"Download failed: {ex.Message}"); // STATUS_UNSUCCESSFUL
         }
         finally
         {
@@ -880,7 +880,7 @@ internal class SyncCallbacks
             catch (Exception ex)
             {
                 Log.Error($"{_logPrefix} FETCH_DATA streaming error: {ex.Message}");
-                TransferError(callbackInfo, new NTSTATUS(unchecked((int)0xC0000001))); // STATUS_UNSUCCESSFUL
+                TransferError(callbackInfo, new NTSTATUS(unchecked((int)0xC0000001)), $"Download failed: {ex.Message}"); // STATUS_UNSUCCESSFUL
             }
             finally
             {
@@ -970,7 +970,7 @@ internal class SyncCallbacks
         }
     }
 
-    private unsafe void TransferError(CF_CALLBACK_INFO callbackInfo, NTSTATUS status)
+    private unsafe void TransferError(CF_CALLBACK_INFO callbackInfo, NTSTATUS status, string? message = null)
     {
         Log.Error($"{_logPrefix} TransferError: status=0x{(uint)status.Value:X8}, transferKey={callbackInfo.TransferKey} (marks placeholder NOT in-sync)");
         var opInfo = new CF_OPERATION_INFO
@@ -989,6 +989,23 @@ internal class SyncCallbacks
         opParams.Anonymous.TransferData.Offset = 0;
         opParams.Anonymous.TransferData.Length = 0;
 
-        PInvoke.CfExecute(in opInfo, ref opParams);
+        if (message != null)
+        {
+            if (message.Length > 200)
+                message = message[..200];
+
+            Span<byte> syncBuf = stackalloc byte[SyncRoot.SyncStatusSize(message)];
+            SyncRoot.FillSyncStatus(syncBuf, 0x80000000u, message);
+
+            fixed (byte* pSync = syncBuf)
+            {
+                opInfo.SyncStatus = (CF_SYNC_STATUS*)pSync;
+                PInvoke.CfExecute(in opInfo, ref opParams);
+            }
+        }
+        else
+        {
+            PInvoke.CfExecute(in opInfo, ref opParams);
+        }
     }
 }

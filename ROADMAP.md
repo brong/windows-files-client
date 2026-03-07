@@ -68,9 +68,11 @@ Implemented: `NOTIFY_FILE_OPEN_COMPLETION` / `NOTIFY_FILE_CLOSE_COMPLETION` call
 
 Implemented: `CfOpenFileWithOplock` used in all OutboxProcessor upload paths (SHA1 check + upload streams) with graceful fallback to regular `FileStream` when oplock open fails (e.g. file open for writing, not a placeholder).
 
-### 14. Per-operation sync status
+### 14. Per-operation sync status ✅
 
 The `CF_OPERATION_INFO.SyncStatus` field (currently null in all our CfExecute calls) can provide specific error messages per failed operation, shown to the user in Explorer.
+
+Implemented: `TransferError` accepts an optional message that populates `CF_OPERATION_INFO.SyncStatus` with a `CF_SYNC_STATUS` struct. Error paths in `FetchDataCallback` (no identity, download failure) and `StreamBlobAsync` (streaming failure) now pass human-readable messages shown in Explorer.
 
 ## Tier 3 — Nice to Have
 
