@@ -1,5 +1,6 @@
 using FileNodeClient.Ipc;
 using FileNodeClient.Service;
+using FileNodeClient.Windows;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Hosting.WindowsServices;
@@ -54,6 +55,9 @@ TaskScheduler.UnobservedTaskException += (_, e) =>
 };
 
 Log.Info($"FileNodeClient service process starting (debug={options.Debug})");
+
+// Register COM class factories so Explorer can activate our handlers
+ComServerHost.Register();
 
 var builder = new HostBuilder();
 builder.ConfigureServices(services =>

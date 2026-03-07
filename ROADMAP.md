@@ -40,11 +40,11 @@ COM `IExplorerCommand` handlers for custom right-click entries: "Share link", "V
 
 Implemented: blocking pre-rename callback with veto support and `TARGET_IN_SCOPE` detection.
 
-### 8. RecycleBinUri
+### 8. RecycleBinUri ✅
 
 ~~Server-side trash: local deletes move nodes to the JMAP `role:"trash"` folder with `onExists:"rename"` instead of permanently destroying them. Remote trash moves (from web UI or other clients) are detected in PollChanges and cleaned up locally.~~ ✓ Done
 
-`StorageProviderSyncRootInfo.RecycleBinUri` — point to Fastmail's web trash so Explorer can show "Recover from cloud" after deletes. **Requires spec support:** see [Spec Dependencies](#spec-dependencies) below.
+~~`StorageProviderSyncRootInfo.RecycleBinUri` — point to Fastmail's web trash so Explorer can show "Recover from cloud" after deletes.~~ ✓ Done — reads `trashUrl` from the FileNode account capability and sets `RecycleBinUri` during sync root registration.
 
 ### 9. Custom columns in Explorer ✅
 
@@ -80,11 +80,9 @@ Implemented: `TransferError` accepts an optional message that populates `CF_OPER
 
 Native "Share" button in Explorer creates a Fastmail sharing link.
 
-### 16. URI Source / "View online"
+### 16. URI Source / "View online" ✅
 
-COM handler that provides a URL for "View in browser" on cloud files.
-
-**Requires spec support:** see [Spec Dependencies](#spec-dependencies) below.
+~~COM handler that provides a URL for "View in browser" on cloud files.~~ ✓ Done — `IStorageProviderUriSource` COM handler reads `webUrlTemplate` from the FileNode account capability, replaces `{nodeId}` with the placeholder's FileIdentity. Registered via MSIX manifest as an ExeServer on FileNodeClient.Service.exe.
 
 ### 17. CfGetPlatformInfo
 
@@ -121,24 +119,13 @@ The `IThumbnailProvider` COM handler needs to return image data for dehydrated f
 
 The StorageNode model already has `Width`/`Height`/`Orientation`, which indicates the server understands image dimensions — it just needs to serve resized versions.
 
-### Web URL per node (blocks: URI Source, Context menus)
+### ~~Web URL per node~~ ✓ Resolved (URI Source implemented)
 
-The "View online" URI handler (`IStorageProviderUriSource`) and "Open in browser" context menu both need a web URL for each file/folder. Options:
+Implemented via `webUrlTemplate` in the FileNode account capability. The client reads the template (e.g. `https://www.fastmail.com/files/{nodeId}`) and the `IStorageProviderUriSource` COM handler substitutes the placeholder's FileIdentity at runtime.
 
-- A **`webUrl`** property on FileNode, or
-- A **URL template** in the session capabilities (e.g. `https://www.fastmail.com/files/{nodeId}`) the client can construct from.
+### ~~RecycleBin URL~~ ✓ Resolved (RecycleBinUri implemented)
 
-`SharedLinkUrl` already exists but is for public sharing, not the authenticated owner's view.
-
-### RecycleBin URL (blocks: RecycleBinUri)
-
-`StorageProviderSyncRootInfo.RecycleBinUri` needs a single URL pointing to the provider's trash view on the web. This belongs in the session capabilities rather than on individual nodes:
-
-```json
-"https://www.fastmail.com/dev/files": {
-  "trashUrl": "https://www.fastmail.com/files/trash"
-}
-```
+Implemented via `webTrashUrl` in the FileNode account capability. Set on `StorageProviderSyncRootInfo.RecycleBinUri` during sync root registration.
 
 ### ~~Range downloads~~ ✓ Resolved (Progressive hydration implemented)
 
@@ -159,8 +146,8 @@ Explorer can display storage quota in the nav pane and folder properties. The sp
 | Spec need | Priority | Blocks |
 |-----------|----------|--------|
 | Thumbnail downloads | High | Thumbnail provider (#5) |
-| Web URL per node | High | URI Source (#16), Context menus (#6) |
-| RecycleBin URL | Medium | RecycleBinUri (#8) |
+| ~~Web URL per node~~ | ~~High~~ | ~~URI Source (#16), Context menus (#6)~~ ✓ |
+| ~~RecycleBin URL~~ | ~~Medium~~ | ~~RecycleBinUri (#8)~~ ✓ |
 | ~~Range downloads~~ | ~~Medium~~ | ~~Progressive hydration (#18)~~ ✓ |
 | Content hash | Medium | — (improves conflict detection) |
 | Quota | Low | — (improves Explorer display) |

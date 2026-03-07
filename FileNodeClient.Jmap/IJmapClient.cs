@@ -17,6 +17,14 @@ public interface IJmapClient : IDisposable
     /// Files larger than this should be uploaded in chunks.
     /// </summary>
     long? ChunkSize { get; }
+    /// <summary>
+    /// URL to the provider's trash view on the web, or null if not available.
+    /// </summary>
+    string? TrashUrl { get; }
+    /// <summary>
+    /// URL template for viewing a file online, with {nodeId} placeholder.
+    /// </summary>
+    string? WebUrlTemplate { get; }
     Task<string> FindHomeNodeIdAsync(CancellationToken ct = default);
     Task<string?> FindTrashNodeIdAsync(CancellationToken ct = default);
     Task<FileNode[]> GetFileNodesAsync(string[] ids, CancellationToken ct = default);

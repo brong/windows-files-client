@@ -90,6 +90,32 @@ public class JmapSession
             return chunkSize.GetInt64();
         return null;
     }
+
+    public string? GetTrashUrl(string accountId)
+    {
+        if (!Accounts.TryGetValue(accountId, out var account))
+            return null;
+        if (!account.AccountCapabilities.TryGetValue(
+            "https://www.fastmail.com/dev/filenode", out var fileNodeCap))
+            return null;
+        if (fileNodeCap.TryGetProperty("webTrashUrl", out var trashUrl)
+            && trashUrl.ValueKind == JsonValueKind.String)
+            return trashUrl.GetString();
+        return null;
+    }
+
+    public string? GetWebUrlTemplate(string accountId)
+    {
+        if (!Accounts.TryGetValue(accountId, out var account))
+            return null;
+        if (!account.AccountCapabilities.TryGetValue(
+            "https://www.fastmail.com/dev/filenode", out var fileNodeCap))
+            return null;
+        if (fileNodeCap.TryGetProperty("webUrlTemplate", out var webUrlTemplate)
+            && webUrlTemplate.ValueKind == JsonValueKind.String)
+            return webUrlTemplate.GetString();
+        return null;
+    }
 }
 
 public class JmapAccount

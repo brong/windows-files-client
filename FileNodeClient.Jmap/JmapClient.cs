@@ -32,6 +32,10 @@ public class JmapClient : IJmapClient
     private bool _preferredDigestResolved;
     private long? _chunkSize;
     private bool _chunkSizeResolved;
+    private string? _trashUrl;
+    private bool _trashUrlResolved;
+    private string? _webUrlTemplate;
+    private bool _webUrlTemplateResolved;
 
     public JmapSession Session => _session
         ?? throw new InvalidOperationException("Session not initialised — call ConnectAsync first");
@@ -66,6 +70,32 @@ public class JmapClient : IJmapClient
                 _chunkSizeResolved = true;
             }
             return _chunkSize;
+        }
+    }
+
+    public string? TrashUrl
+    {
+        get
+        {
+            if (!_trashUrlResolved)
+            {
+                _trashUrl = Session.GetTrashUrl(AccountId);
+                _trashUrlResolved = true;
+            }
+            return _trashUrl;
+        }
+    }
+
+    public string? WebUrlTemplate
+    {
+        get
+        {
+            if (!_webUrlTemplateResolved)
+            {
+                _webUrlTemplate = Session.GetWebUrlTemplate(AccountId);
+                _webUrlTemplateResolved = true;
+            }
+            return _webUrlTemplate;
         }
     }
 

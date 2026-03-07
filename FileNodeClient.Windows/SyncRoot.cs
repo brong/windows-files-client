@@ -37,7 +37,8 @@ internal class SyncRoot : IDisposable
         _logPrefix = logPrefix;
     }
 
-    public async Task RegisterAsync(string displayName, string providerVersion, string accountId, string? iconPath = null)
+    public async Task RegisterAsync(string displayName, string providerVersion, string accountId,
+        string? iconPath = null, Uri? recycleBinUri = null, string? webUrlTemplate = null)
     {
         Directory.CreateDirectory(_syncRootPath);
 
@@ -86,6 +87,9 @@ internal class SyncRoot : IDisposable
         info.Context = CryptographicBuffer.ConvertStringToBinary(
             _syncRootId, BinaryStringEncoding.Utf8);
 
+        if (recycleBinUri != null)
+            info.RecycleBinUri = recycleBinUri;
+
         info.StorageProviderItemPropertyDefinitions.Add(
             new StorageProviderItemPropertyDefinition
             {
@@ -102,6 +106,9 @@ internal class SyncRoot : IDisposable
         StorageProviderSyncRootManager.Register(info);
         _registered = true;
         Log.Info($"{_logPrefix} Sync root registered: {_syncRootPath} (id={_syncRootId})");
+
+        // Write webUrlTemplate to config so the URI source COM handler can read it
+        WriteWebUrlTemplate(_syncRootId, webUrlTemplate);
     }
 
     internal unsafe void Connect(CF_CALLBACK_REGISTRATION[] callbacks, CF_CALLBACK[] delegates)
@@ -218,6 +225,39 @@ internal class SyncRoot : IDisposable
         // causes File.Exists() to return false for cloud file placeholders
         // (ERROR_CLOUD_FILE_PROVIDER_NOT_RUNNING), which breaks cache warm start.
         // Unregister is only called explicitly via Clean() or account removal.
+    }
+
+    /// <summary>
+    /// Config directory for storing per-sync-root settings (e.g. webUrlTemplate)
+    /// that COM handlers can read at runtime.
+    /// </summary>
+    private static string GetConfigDir(string syncRootId) =>
+        Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "FileNodeClient", syncRootId);
+
+    private static void WriteWebUrlTemplate(string syncRootId, string? template)
+    {
+        var dir = GetConfigDir(syncRootId);
+        var path = Path.Combine(dir, "webUrlTemplate");
+        if (template != null)
+        {
+            Directory.CreateDirectory(dir);
+            File.WriteAllText(path, template);
+        }
+        else if (File.Exists(path))
+        {
+            File.Delete(path);
+        }
+    }
+
+    /// <summary>
+    /// Read the webUrlTemplate for a sync root. Used by the URI source COM handler.
+    /// </summary>
+    internal static string? ReadWebUrlTemplate(string syncRootId)
+    {
+        var path = Path.Combine(GetConfigDir(syncRootId), "webUrlTemplate");
+        return File.Exists(path) ? File.ReadAllText(path).Trim() : null;
     }
 
     /// <summary>

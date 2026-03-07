@@ -231,9 +231,10 @@ public class SyncEngine : IDisposable
     /// <summary>Clear persisted outbox state (e.g. after --clean). Call before PopulateAsync.</summary>
     public void ClearOutbox() => _outbox.Clear();
 
-    public async Task RegisterAsync(string displayName, string accountId, string? iconPath = null)
+    public async Task RegisterAsync(string displayName, string accountId, string? iconPath = null,
+        Uri? recycleBinUri = null, string? webUrlTemplate = null)
     {
-        await _syncRoot.RegisterAsync(displayName, "1.0", accountId, iconPath);
+        await _syncRoot.RegisterAsync(displayName, "1.0", accountId, iconPath, recycleBinUri, webUrlTemplate);
     }
 
     /// <summary>

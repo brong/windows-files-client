@@ -77,7 +77,11 @@ sealed class AccountSupervisor : IDisposable
 
         // Register sync root
         Log.Info($"[{_displayName}] Registering sync root...");
-        await _engine.RegisterAsync(_displayName, _jmapClient.Context.AccountId, iconPath);
+        var trashUrl = _jmapClient.TrashUrl;
+        Uri? recycleBinUri = trashUrl != null ? new Uri(trashUrl) : null;
+        var webUrlTemplate = _jmapClient.WebUrlTemplate;
+        await _engine.RegisterAsync(_displayName, _jmapClient.Context.AccountId, iconPath,
+            recycleBinUri, webUrlTemplate);
 
         // Populate placeholders
         Log.Info($"[{_displayName}] Populating placeholders...");

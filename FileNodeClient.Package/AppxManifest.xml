@@ -4,7 +4,9 @@
   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
   xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
-  IgnorableNamespaces="uap desktop rescap">
+  xmlns:com="http://schemas.microsoft.com/appx/manifest/com/windows10"
+  xmlns:cloudFiles="http://schemas.microsoft.com/appx/manifest/cloudstorage/windows10"
+  IgnorableNamespaces="uap desktop rescap com cloudFiles">
 
   <Identity
     Name="Fastmail.FileNodeClient"
@@ -60,6 +62,22 @@
         <desktop:Extension Category="windows.startupTask" Executable="FileNodeClient.Service.exe" EntryPoint="Windows.FullTrustApplication">
           <desktop:StartupTask TaskId="FileNodeClientServiceStartup" Enabled="true" DisplayName="FileNodeClient Service" />
         </desktop:Extension>
+
+        <!-- COM server for URI source handler -->
+        <com:Extension Category="windows.comServer">
+          <com:ComServer>
+            <com:ExeServer Executable="FileNodeClient.Service.exe" DisplayName="FileNodeClient URI Source">
+              <com:Class Id="A7B3E2D1-9F4C-4A8B-B5E6-1D3C7F8A2E9B" DisplayName="FileNodeClient.UriSourceHandler" />
+            </com:ExeServer>
+          </com:ComServer>
+        </com:Extension>
+
+        <!-- Cloud files URI source registration -->
+        <cloudFiles:Extension Category="windows.cloudFiles">
+          <cloudFiles:CloudFiles>
+            <cloudFiles:ContentUriSource Clsid="A7B3E2D1-9F4C-4A8B-B5E6-1D3C7F8A2E9B" />
+          </cloudFiles:CloudFiles>
+        </cloudFiles:Extension>
       </Extensions>
     </Application>
   </Applications>

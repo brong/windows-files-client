@@ -17,6 +17,10 @@ public class AccountScopedJmapClient : IJmapClient
     private string? _preferredDigestAlgorithm;
     private bool _chunkSizeResolved;
     private long? _chunkSize;
+    private bool _trashUrlResolved;
+    private string? _trashUrl;
+    private bool _webUrlTemplateResolved;
+    private string? _webUrlTemplate;
     private static readonly HashSet<string> SupportedDigests = ["sha", "sha-256"];
 
     public AccountScopedJmapClient(JmapClient parent, string accountId)
@@ -56,6 +60,32 @@ public class AccountScopedJmapClient : IJmapClient
                 _chunkSizeResolved = true;
             }
             return _chunkSize;
+        }
+    }
+
+    public string? TrashUrl
+    {
+        get
+        {
+            if (!_trashUrlResolved)
+            {
+                _trashUrl = _parent.Session.GetTrashUrl(_accountId);
+                _trashUrlResolved = true;
+            }
+            return _trashUrl;
+        }
+    }
+
+    public string? WebUrlTemplate
+    {
+        get
+        {
+            if (!_webUrlTemplateResolved)
+            {
+                _webUrlTemplate = _parent.Session.GetWebUrlTemplate(_accountId);
+                _webUrlTemplateResolved = true;
+            }
+            return _webUrlTemplate;
         }
     }
 
