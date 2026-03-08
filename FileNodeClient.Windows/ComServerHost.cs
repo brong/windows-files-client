@@ -10,7 +10,6 @@ namespace FileNodeClient.Windows;
 public static class ComServerHost
 {
     private static uint _uriSourceCookie;
-    private static uint _thumbnailCookie;
     private static bool _registered;
 
     [DllImport("ole32.dll")]
@@ -50,21 +49,6 @@ public static class ComServerHost
             return;
         }
 
-        // Register ThumbnailHandler
-        var thumbClsid = new Guid(ThumbnailHandler.Clsid);
-        var thumbFactory = new ThumbnailClassFactory();
-        hr = CoRegisterClassObject(
-            ref thumbClsid,
-            thumbFactory,
-            CLSCTX_LOCAL_SERVER,
-            REGCLS_MULTIPLEUSE | REGCLS_SUSPENDED,
-            out _thumbnailCookie);
-        if (hr != 0)
-        {
-            Log.Error($"CoRegisterClassObject (Thumbnail) failed: 0x{hr:X8}");
-            return;
-        }
-
         hr = CoResumeClassObjects();
         if (hr != 0)
         {
@@ -73,14 +57,13 @@ public static class ComServerHost
         }
 
         _registered = true;
-        Log.Info("COM server registered for UriSourceHandler and ThumbnailHandler");
+        Log.Info("COM server registered for UriSourceHandler");
     }
 
     public static void Revoke()
     {
         if (!_registered) return;
         CoRevokeClassObject(_uriSourceCookie);
-        CoRevokeClassObject(_thumbnailCookie);
         _registered = false;
         Log.Info("COM server revoked");
     }
@@ -98,28 +81,6 @@ public static class ComServerHost
             var handler = new UriSourceHandler();
             ppvObject = Marshal.GetComInterfaceForObject(handler, typeof(global::Windows.Storage.Provider.IStorageProviderUriSource));
             return 0; // S_OK
-        }
-
-        public int LockServer(bool fLock) => 0; // S_OK
-    }
-
-    [ComVisible(true)]
-    [Guid("B8C4F3E2-1A5D-4B9C-C6F7-2E4D8A9B3F1D")]
-    private sealed class ThumbnailClassFactory : IClassFactory
-    {
-        public int CreateInstance(IntPtr pUnkOuter, ref Guid riid, out IntPtr ppvObject)
-        {
-            ppvObject = IntPtr.Zero;
-            if (pUnkOuter != IntPtr.Zero)
-                return unchecked((int)0x80040110); // CLASS_E_NOAGGREGATION
-
-            var handler = new ThumbnailHandler();
-            ppvObject = Marshal.GetIUnknownForObject(handler);
-            var iid = riid;
-            var hr = Marshal.QueryInterface(ppvObject, ref iid, out var ppvResult);
-            Marshal.Release(ppvObject);
-            ppvObject = ppvResult;
-            return hr;
         }
 
         public int LockServer(bool fLock) => 0; // S_OK

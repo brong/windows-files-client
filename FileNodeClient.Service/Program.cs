@@ -40,6 +40,8 @@ for (int i = 0; i < args.Length; i++)
 
 options.Token ??= Environment.GetEnvironmentVariable("FASTMAIL_TOKEN");
 
+Console.WriteLine($"FileNodeClient.Service starting (debug={options.Debug}, token={options.Token != null})");
+Console.Error.WriteLine($"FileNodeClient.Service starting (debug={options.Debug}, token={options.Token != null})");
 AppLogger.Initialize(options.Debug);
 
 // Global safety nets — log and swallow so a stray exception on any thread
@@ -58,6 +60,10 @@ Log.Info($"FileNodeClient service process starting (debug={options.Debug})");
 
 // Register COM class factories so Explorer can activate our handlers
 ComServerHost.Register();
+
+// Start named pipe server for thumbnail requests from COM Surrogate (dllhost.exe)
+var thumbnailPipeServer = new ThumbnailPipeServer();
+thumbnailPipeServer.Start();
 
 var builder = new HostBuilder();
 builder.ConfigureServices(services =>

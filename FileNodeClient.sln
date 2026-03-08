@@ -17,6 +17,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FileNodeClient.Installer", 
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FileNodeClient.Package", "FileNodeClient.Package\FileNodeClient.Package.wapproj", "{B2D8F5C1-4A3E-4F7D-9E12-8C5A6B3D1E0F}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FileNodeClient.ThumbnailExtension", "FileNodeClient.ThumbnailExtension\FileNodeClient.ThumbnailExtension.csproj", "{D4E7F1A2-3B5C-4D8E-9A6F-1C2E3D4F5A6B}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -49,5 +51,9 @@ Global
 		{B2D8F5C1-4A3E-4F7D-9E12-8C5A6B3D1E0F}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{B2D8F5C1-4A3E-4F7D-9E12-8C5A6B3D1E0F}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{B2D8F5C1-4A3E-4F7D-9E12-8C5A6B3D1E0F}.Release|Any CPU.Build.0 = Release|Any CPU
+		{D4E7F1A2-3B5C-4D8E-9A6F-1C2E3D4F5A6B}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{D4E7F1A2-3B5C-4D8E-9A6F-1C2E3D4F5A6B}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{D4E7F1A2-3B5C-4D8E-9A6F-1C2E3D4F5A6B}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{D4E7F1A2-3B5C-4D8E-9A6F-1C2E3D4F5A6B}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal
