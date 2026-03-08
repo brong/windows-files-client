@@ -785,7 +785,7 @@ public class JmapClient : IJmapClient
             {
                 [createId] = new
                 {
-                    imageConvert = new { blobId, width, height, type = mimeType },
+                    imageConvert = new { blobId, width, height, type = mimeType, autoOrient = true },
                 },
             },
         }, ct);
