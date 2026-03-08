@@ -90,23 +90,6 @@ internal class SyncRoot : IDisposable
         if (recycleBinUri != null)
             info.RecycleBinUri = recycleBinUri;
 
-        // Custom columns disabled — both StorageProviderItemPropertyDefinitions
-        // (registration) and StorageProviderItemProperty pushes cause Explorer
-        // crash (ACCESS_VIOLATION in windows.storage.dll 10.0.26100.7840).
-        // See also PushStatusColumnsAsync/FireAndForgetStatus in SyncEngine.cs.
-        // info.StorageProviderItemPropertyDefinitions.Add(
-        //     new StorageProviderItemPropertyDefinition
-        //     {
-        //         Id = StatusColumnManager.StatusPropertyId,
-        //         DisplayNameResource = "Status"
-        //     });
-        // info.StorageProviderItemPropertyDefinitions.Add(
-        //     new StorageProviderItemPropertyDefinition
-        //     {
-        //         Id = StatusColumnManager.SharingPropertyId,
-        //         DisplayNameResource = "Sharing"
-        //     });
-
         StorageProviderSyncRootManager.Register(info);
         _registered = true;
         Log.Info($"{_logPrefix} Sync root registered: {_syncRootPath} (id={_syncRootId})");

@@ -383,8 +383,6 @@ public class SyncEngine : IDisposable
             ApplyWriteProtection(_syncRootPath);
         }
 
-        // Disabled — PushStatusColumnsAsync triggers Explorer crash in windows.storage.dll
-        // _ = PushStatusColumnsAsync(allNodes);
 
         SaveNodeCache(state);
         ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_IDLE);
@@ -982,7 +980,6 @@ public class SyncEngine : IDisposable
             }
         }
 
-        // _ = PushStatusColumnsAsync(sortedUpdatedNodes.ToArray());
 
         // Process created nodes — create placeholders for new items
         foreach (var node in createdNodes)
@@ -1035,7 +1032,6 @@ public class SyncEngine : IDisposable
             ApplyWriteProtection(childPath);
         }
 
-        // _ = PushStatusColumnsAsync(createdNodes);
 
         foreach (var destroyedId in changes.Destroyed)
         {
@@ -1134,7 +1130,6 @@ public class SyncEngine : IDisposable
             var contentType = ResolveContentType(change.FullPath);
 
             _outbox.EnqueueContentChange(change.FullPath, nodeId, contentType, isDirectory);
-            // FireAndForgetStatus(change.FullPath, "Pending", isDirectory);
         }
     }
 
@@ -2208,48 +2203,6 @@ public class SyncEngine : IDisposable
     {
         NodeCache.Save(_scopeKey, _homeNodeId, state, _nodeIdToPath, _syncRootPath,
             _readOnlyPaths, _trashNodeId, _nodeIdToBlobId);
-    }
-
-    /// <summary>
-    /// Push Explorer column values (Status, Sharing) for all synced nodes.
-    /// Runs as fire-and-forget after initial populate or incremental sync.
-    /// </summary>
-    private async Task PushStatusColumnsAsync(FileNode[] nodes)
-    {
-        var nodeById = nodes.ToDictionary(n => n.Id);
-        foreach (var node in nodes)
-        {
-            if (!_nodeIdToPath.TryGetValue(node.Id, out var path))
-                continue;
-
-            var sharing = node.ShareWith != null && node.ShareWith.Count > 0 ? "Shared" : "Private";
-            try
-            {
-                if (node.IsFolder)
-                    await StatusColumnManager.SetDirectoryPropertiesAsync(path, "Synced", sharing);
-                else
-                    await StatusColumnManager.SetPropertiesAsync(path, "Synced", sharing);
-            }
-            catch { /* best-effort */ }
-        }
-    }
-
-    /// <summary>
-    /// Update Explorer Status column for a single file path.
-    /// </summary>
-    internal static void FireAndForgetStatus(string path, string status, bool isDirectory = false)
-    {
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                if (isDirectory)
-                    await StatusColumnManager.SetDirectoryPropertiesAsync(path, status);
-                else
-                    await StatusColumnManager.SetStatusAsync(path, status);
-            }
-            catch { /* best-effort */ }
-        });
     }
 
     public void Dispose()
