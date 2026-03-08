@@ -61,7 +61,7 @@ Log.Info($"FileNodeClient service process starting (debug={options.Debug})");
 // Register COM class factories so Explorer can activate our handlers
 ComServerHost.Register();
 
-// Start named pipe server for thumbnail requests from COM Surrogate (dllhost.exe)
+// Start named pipe server for thumbnail requests from native handler DLL
 var thumbnailPipeServer = new ThumbnailPipeServer();
 thumbnailPipeServer.Start();
 

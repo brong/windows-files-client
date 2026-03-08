@@ -1,0 +1,4 @@
+LIBRARY FileNodeClient.ThumbnailExtension
+EXPORTS
+    DllGetClassObject   PRIVATE
+    DllCanUnloadNow     PRIVATE

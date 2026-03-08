@@ -27,9 +27,8 @@ dotnet publish "%BUILDDIR%\FileNodeClient.App\FileNodeClient.App.csproj" -c Rele
 if errorlevel 1 goto :error
 
 echo.
-echo Publishing FileNodeClient.ThumbnailExtension...
-:: COM hosting requires framework-dependent deployment (no --self-contained)
-dotnet publish "%BUILDDIR%\FileNodeClient.ThumbnailExtension\FileNodeClient.ThumbnailExtension.csproj" -c Release -r win-x64 -o "%BUILDDIR%\FileNodeClient.Package\publish"
+echo Building native ThumbnailExtension DLL...
+call :build_thumbnail_dll
 if errorlevel 1 goto :error
 
 :: ---- Step 2: Create self-signed cert if needed ----
@@ -101,6 +100,34 @@ echo.
 echo Success: bin\Release\FileNodeClient.msix
 popd
 goto :eof
+
+:build_thumbnail_dll
+:: Compile native C thumbnail handler DLL using MSVC
+:: Locate vcvarsall.bat from Visual Studio
+set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+if not exist "%VSWHERE%" (
+    echo ERROR: vswhere.exe not found - Visual Studio required
+    exit /b 1
+)
+for /f "usebackq tokens=*" %%i in (`"%VSWHERE%" -latest -property installationPath`) do set "VSDIR=%%i"
+set "VCVARS=%VSDIR%\VC\Auxiliary\Build\vcvarsall.bat"
+if not exist "%VCVARS%" (
+    echo ERROR: vcvarsall.bat not found at %VCVARS%
+    exit /b 1
+)
+
+:: Run cl.exe in a sub-shell with x64 environment
+set "THUMB_SRC=%BUILDDIR%\FileNodeClient.ThumbnailExtension\ThumbnailHandler.c"
+set "THUMB_DEF=%BUILDDIR%\FileNodeClient.ThumbnailExtension\ThumbnailHandler.def"
+set "THUMB_OUT=%BUILDDIR%\FileNodeClient.Package\publish\FileNodeClient.ThumbnailExtension.dll"
+
+cmd /c "call "%VCVARS%" x64 >nul 2>&1 && cl /LD /O2 /nologo "%THUMB_SRC%" /link /DEF:"%THUMB_DEF%" ole32.lib windowscodecs.lib gdi32.lib user32.lib /OUT:"%THUMB_OUT%" /IMPLIB:"%BUILDDIR%\FileNodeClient.ThumbnailExtension\ThumbnailHandler.lib""
+if errorlevel 1 (
+    echo ERROR: Native DLL compilation failed
+    exit /b 1
+)
+echo Native ThumbnailExtension.dll built successfully
+exit /b 0
 
 :error
 echo.

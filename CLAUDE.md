@@ -34,10 +34,13 @@ dotnet publish FileNodeClient.Service -c Release -r win-x64 --self-contained -o 
 dotnet publish FileNodeClient.App -c Release -r win-x64 --self-contained -o FileNodeClient.Package\publish
 # COM hosting requires framework-dependent (no --self-contained)
 dotnet publish FileNodeClient.ThumbnailExtension -c Release -r win-x64 -o FileNodeClient.Package\publish
-Add-AppxPackage -Register FileNodeClient.Package\AppxManifest.xml
+# Register from publish dir — SurrogateServer DLL paths resolve relative to AppxManifest.xml
+copy FileNodeClient.Package\AppxManifest.xml FileNodeClient.Package\publish\
+xcopy /s /y FileNodeClient.Package\Assets FileNodeClient.Package\publish\Assets\
+Add-AppxPackage -Register FileNodeClient.Package\publish\AppxManifest.xml
 ```
 
-This publishes into a flat layout and registers the package identity from loose files for fast iteration. Both executables must be in the same directory for stop/start/restart to work (ServiceLauncher finds Service.exe via AppContext.BaseDirectory). The ThumbnailExtension comhost.dll must also be in this directory for dllhost.exe to load it.
+This publishes into a flat layout and registers the package identity from the publish directory. The manifest must be alongside the published files so SurrogateServer `Path` attributes resolve correctly (dllhost.exe loads comhost.dll relative to the package root). Both executables must be in the same directory for stop/start/restart to work (ServiceLauncher finds Service.exe via AppContext.BaseDirectory).
 
 ### MSI Installer (legacy, kept for now)
 

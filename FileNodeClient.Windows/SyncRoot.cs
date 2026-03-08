@@ -90,18 +90,21 @@ internal class SyncRoot : IDisposable
         if (recycleBinUri != null)
             info.RecycleBinUri = recycleBinUri;
 
-        info.StorageProviderItemPropertyDefinitions.Add(
-            new StorageProviderItemPropertyDefinition
-            {
-                Id = StatusColumnManager.StatusPropertyId,
-                DisplayNameResource = "Status"
-            });
-        info.StorageProviderItemPropertyDefinitions.Add(
-            new StorageProviderItemPropertyDefinition
-            {
-                Id = StatusColumnManager.SharingPropertyId,
-                DisplayNameResource = "Sharing"
-            });
+        // Custom columns disabled — StorageProviderItemPropertyDefinitions causes
+        // Explorer crash (ACCESS_VIOLATION in windows.storage.dll) on Windows 11
+        // 10.0.26100.7840. Re-enable when a fixed Windows update is available.
+        // info.StorageProviderItemPropertyDefinitions.Add(
+        //     new StorageProviderItemPropertyDefinition
+        //     {
+        //         Id = StatusColumnManager.StatusPropertyId,
+        //         DisplayNameResource = "Status"
+        //     });
+        // info.StorageProviderItemPropertyDefinitions.Add(
+        //     new StorageProviderItemPropertyDefinition
+        //     {
+        //         Id = StatusColumnManager.SharingPropertyId,
+        //         DisplayNameResource = "Sharing"
+        //     });
 
         StorageProviderSyncRootManager.Register(info);
         _registered = true;
