@@ -15,6 +15,9 @@ sealed class LoginManager : IDisposable
         string? RefreshToken = null, string? TokenEndpoint = null,
         string? ClientId = null, long? ExpiresAtUnixSeconds = null);
 
+    private const long DiskFullThresholdBytes = 500L * 1024 * 1024;   // Pause at <500MB
+    private const long DiskResumeThresholdBytes = 1024L * 1024 * 1024; // Resume at >1GB
+
     private readonly bool _debug;
     private readonly CredentialStore _credentialStore = new();
     private readonly List<LoginSession> _sessions = new();
@@ -24,6 +27,7 @@ sealed class LoginManager : IDisposable
     private readonly object _lock = new();
     private NetworkMonitor? _networkMonitor;
     private Timer? _retryTimer;
+    private Timer? _diskCheckTimer;
     private int _retryInProgress;
     private string? _iconPath;
     private CancellationToken _parentCt;
@@ -69,6 +73,11 @@ sealed class LoginManager : IDisposable
         _networkMonitor = new NetworkMonitor();
         _networkMonitor.NetworkStateChanged += OnNetworkStateChanged;
         Log.Info($"[NetworkMonitor] Initial state: connected={_networkMonitor.IsConnected}, metered={_networkMonitor.IsMetered}");
+
+        // Periodic disk space check as a safety net (5 minutes).
+        // Primary checks happen on-demand: before hydration (via HydrationBlockedReason)
+        // and after sync polls (via CheckDiskSpaceForAccount).
+        _diskCheckTimer = new Timer(_ => CheckDiskSpace(), null, TimeSpan.FromSeconds(10), TimeSpan.FromMinutes(5));
 
         var storedLogins = _credentialStore.LoadAll();
 
@@ -1213,6 +1222,61 @@ sealed class LoginManager : IDisposable
             s.PushState(""); // Empty state triggers a /changes poll
     }
 
+    public void PauseAccount(string accountId)
+    {
+        AccountSupervisor? supervisor;
+        lock (_lock)
+            supervisor = _supervisors.FirstOrDefault(s => s.AccountId == accountId);
+        if (supervisor != null)
+        {
+            supervisor.Pause(SyncPauseReason.UserRequested);
+            RaiseAggregateStatus();
+        }
+    }
+
+    public void ResumeAccount(string accountId)
+    {
+        AccountSupervisor? supervisor;
+        lock (_lock)
+            supervisor = _supervisors.FirstOrDefault(s => s.AccountId == accountId);
+        if (supervisor != null)
+        {
+            supervisor.Resume(SyncPauseReason.UserRequested);
+            // Trigger a catch-up poll on resume
+            supervisor.PushState("");
+            RaiseAggregateStatus();
+        }
+    }
+
+    private void CheckDiskSpace()
+    {
+        List<AccountSupervisor> supervisors;
+        lock (_lock)
+            supervisors = _supervisors.ToList();
+
+        foreach (var supervisor in supervisors)
+        {
+            var freeBytes = supervisor.GetFreeDiskSpace();
+            if (freeBytes == null) continue;
+
+            var isPausedForDisk = supervisor.PauseReason.HasFlag(SyncPauseReason.DiskFull);
+
+            if (!isPausedForDisk && freeBytes < DiskFullThresholdBytes)
+            {
+                Log.Warn($"[DiskCheck] {supervisor.DisplayName}: {freeBytes / (1024 * 1024)}MB free — pausing sync");
+                supervisor.Pause(SyncPauseReason.DiskFull);
+                RaiseAggregateStatus();
+            }
+            else if (isPausedForDisk && freeBytes > DiskResumeThresholdBytes)
+            {
+                Log.Info($"[DiskCheck] {supervisor.DisplayName}: {freeBytes / (1024 * 1024)}MB free — resuming sync");
+                supervisor.Resume(SyncPauseReason.DiskFull);
+                supervisor.PushState(""); // Catch up
+                RaiseAggregateStatus();
+            }
+        }
+    }
+
     private void OnNetworkStateChanged(bool isConnected, bool isMetered)
     {
         List<LoginSession> sessions;
@@ -1367,6 +1431,9 @@ sealed class LoginManager : IDisposable
 
         _retryTimer?.Dispose();
         _retryTimer = null;
+
+        _diskCheckTimer?.Dispose();
+        _diskCheckTimer = null;
 
         _networkMonitor?.Dispose();
         _networkMonitor = null;

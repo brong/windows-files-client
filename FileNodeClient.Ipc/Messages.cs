@@ -2,7 +2,7 @@ namespace FileNodeClient.Ipc;
 
 // ---- Shared data types ----
 
-public enum AccountStatus { Idle, Syncing, Error, Disconnected }
+public enum AccountStatus { Idle, Syncing, Error, Disconnected, Paused }
 
 public record AccountInfo(
     string AccountId,
@@ -14,7 +14,8 @@ public record AccountInfo(
     string? StatusDetail,
     int PendingCount,
     long? QuotaUsed = null,
-    long? QuotaLimit = null);
+    long? QuotaLimit = null,
+    string? PauseReason = null);
 
 public record OutboxEntry(
     Guid Id,
@@ -83,6 +84,10 @@ public sealed record RefreshAccountCommand(string AccountId) : IpcCommand;
 public sealed record CleanAccountCommand(string AccountId) : IpcCommand;
 
 public sealed record EnableAccountCommand(string LoginId, string AccountId) : IpcCommand;
+
+public sealed record PauseAccountCommand(string AccountId) : IpcCommand;
+
+public sealed record ResumeAccountCommand(string AccountId) : IpcCommand;
 
 // ---- Service -> UI events ----
 

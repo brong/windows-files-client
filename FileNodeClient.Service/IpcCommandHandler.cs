@@ -65,6 +65,12 @@ sealed class IpcCommandHandler
             case EnableAccountCommand cmd:
                 return await HandleEnableAccountAsync(cmd, ct);
 
+            case PauseAccountCommand cmd:
+                return HandlePauseAccount(cmd);
+
+            case ResumeAccountCommand cmd:
+                return HandleResumeAccount(cmd);
+
             default:
                 Log.Error($"[IPC] Unknown command type: {command.GetType().Name}");
                 return null;
@@ -299,6 +305,18 @@ sealed class IpcCommandHandler
         }
     }
 
+    private IpcEvent HandlePauseAccount(PauseAccountCommand cmd)
+    {
+        _loginManager.PauseAccount(cmd.AccountId);
+        return new CommandResultEvent("pauseAccount", true, null);
+    }
+
+    private IpcEvent HandleResumeAccount(ResumeAccountCommand cmd)
+    {
+        _loginManager.ResumeAccount(cmd.AccountId);
+        return new CommandResultEvent("resumeAccount", true, null);
+    }
+
     private AccountInfo BuildAccountInfo(AccountSupervisor s) => new(
         s.AccountId,
         _loginManager.GetLoginIdForAccount(s.AccountId) ?? "",
@@ -309,7 +327,8 @@ sealed class IpcCommandHandler
         s.StatusDetail,
         s.PendingCount,
         s.QuotaUsed,
-        s.QuotaLimit);
+        s.QuotaLimit,
+        s.PauseReason != SyncPauseReason.None ? s.PauseReason.ToString() : null);
 
     private static AccountStatus MapStatus(SyncStatus status) => status switch
     {
@@ -317,6 +336,7 @@ sealed class IpcCommandHandler
         SyncStatus.Syncing => AccountStatus.Syncing,
         SyncStatus.Error => AccountStatus.Error,
         SyncStatus.Disconnected => AccountStatus.Disconnected,
+        SyncStatus.Paused => AccountStatus.Paused,
         _ => AccountStatus.Idle,
     };
 }

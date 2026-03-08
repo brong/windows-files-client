@@ -73,6 +73,12 @@ internal class SyncCallbacks
     /// </summary>
     public event Action<string?, string>? OnFileCloseCompleted;
 
+    /// <summary>
+    /// When set and returns non-null, hydration requests are rejected with the
+    /// returned message. Used to block downloads when disk is full or sync is paused.
+    /// </summary>
+    public Func<string?>? HydrationBlockedReason;
+
     public record DirectoryPopulatedInfo(string DirectoryPath);
     public event Action<DirectoryPopulatedInfo>? OnDirectoryPopulated;
 
@@ -220,6 +226,15 @@ internal class SyncCallbacks
             {
                 Log.Error($"{_logPrefix} FETCH_DATA: No identity for {fileName}");
                 TransferError(*callbackInfo, new NTSTATUS(unchecked((int)0xC000000D)), "File not recognized by sync engine"); // STATUS_INVALID_PARAMETER
+                return;
+            }
+
+            // Check if hydration is blocked (disk full, user paused, etc.)
+            var blockedReason = HydrationBlockedReason?.Invoke();
+            if (blockedReason != null)
+            {
+                Log.Info($"{_logPrefix} FETCH_DATA: blocked for {fileName}: {blockedReason}");
+                TransferError(*callbackInfo, new NTSTATUS(unchecked((int)0xC00000CF)), blockedReason); // STATUS_DEVICE_NOT_READY
                 return;
             }
 

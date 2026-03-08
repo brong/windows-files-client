@@ -12,6 +12,9 @@ namespace FileNodeClient.Service;
 /// </summary>
 sealed class AccountSupervisor : IDisposable
 {
+    private const long DiskFullThresholdBytes = 500L * 1024 * 1024;   // Pause at <500MB
+    private const long DiskResumeThresholdBytes = 1024L * 1024 * 1024; // Resume at >1GB
+
     private readonly IJmapClient _jmapClient;
     private readonly string _syncRootPath;
     private readonly string _displayName;
@@ -36,6 +39,7 @@ sealed class AccountSupervisor : IDisposable
     public SyncOutbox? Outbox => _engine?.Outbox;
     public long? QuotaUsed { get; private set; }
     public long? QuotaLimit { get; private set; }
+    public SyncPauseReason PauseReason => _engine?.PauseReason ?? SyncPauseReason.None;
 
     /// <summary>
     /// When false, background sync polling is suppressed (metered connection).
@@ -122,6 +126,46 @@ sealed class AccountSupervisor : IDisposable
     internal void NotifyConnectivityLost() => _engine?.ReportConnectivityLost();
     internal void NotifyConnectivityRestored() => _engine?.ReportConnectivityRestored();
 
+    public void Pause(SyncPauseReason reason) => _engine?.Pause(reason);
+    public void Resume(SyncPauseReason reason) => _engine?.Resume(reason);
+
+    /// <summary>
+    /// Check free disk space on the sync root drive. Returns bytes free, or null on error.
+    /// </summary>
+    public long? GetFreeDiskSpace()
+    {
+        try
+        {
+            var driveInfo = new DriveInfo(Path.GetPathRoot(_syncRootPath)!);
+            return driveInfo.AvailableFreeSpace;
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"[{_displayName}] Cannot read disk space: {ex.Message}");
+            return null;
+        }
+    }
+
+    private void CheckDiskSpaceAfterPoll()
+    {
+        var freeBytes = GetFreeDiskSpace();
+        if (freeBytes == null) return;
+
+        var isPausedForDisk = PauseReason.HasFlag(SyncPauseReason.DiskFull);
+        if (!isPausedForDisk && freeBytes < DiskFullThresholdBytes)
+        {
+            Log.Warn($"[{_displayName}] Disk space low ({freeBytes / (1024 * 1024)}MB free) — pausing sync");
+            _engine?.Pause(SyncPauseReason.DiskFull);
+            StatusChanged?.Invoke(this);
+        }
+        else if (isPausedForDisk && freeBytes > DiskResumeThresholdBytes)
+        {
+            Log.Info($"[{_displayName}] Disk space restored ({freeBytes / (1024 * 1024)}MB free) — resuming sync");
+            _engine?.Resume(SyncPauseReason.DiskFull);
+            StatusChanged?.Invoke(this);
+        }
+    }
+
     public async Task StopAsync()
     {
         if (_loopCts != null)
@@ -159,6 +203,12 @@ sealed class AccountSupervisor : IDisposable
                     continue;
                 }
 
+                if (_engine!.IsPaused)
+                {
+                    Log.Debug($"[{_displayName}] Sync paused ({_engine.PauseReason}), skipping poll");
+                    continue;
+                }
+
                 // Empty string = forced poll (e.g. after push reconnect)
                 if (newState.Length > 0 && string.Equals(newState, currentState, StringComparison.Ordinal))
                 {
@@ -178,6 +228,7 @@ sealed class AccountSupervisor : IDisposable
                     currentState = pollResult.State;
                     UpdateQuota(pollResult.Quotas);
                     pollBackoffMs = 0; // Reset on success
+                    CheckDiskSpaceAfterPoll();
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {

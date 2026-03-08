@@ -31,6 +31,8 @@ public static class IpcSerializer
         ["refreshAccount"] = typeof(RefreshAccountCommand),
         ["cleanAccount"] = typeof(CleanAccountCommand),
         ["enableAccount"] = typeof(EnableAccountCommand),
+        ["pauseAccount"] = typeof(PauseAccountCommand),
+        ["resumeAccount"] = typeof(ResumeAccountCommand),
     };
 
     private static readonly Dictionary<string, Type> EventTypes = new()

@@ -9,7 +9,15 @@ using Windows.Win32.Storage.CloudFilters;
 
 namespace FileNodeClient.Windows;
 
-public enum SyncStatus { Idle, Syncing, Error, Disconnected }
+public enum SyncStatus { Idle, Syncing, Error, Disconnected, Paused }
+
+[Flags]
+public enum SyncPauseReason
+{
+    None = 0,
+    UserRequested = 1,
+    DiskFull = 2,
+}
 
 public class SyncEngine : IDisposable
 {
@@ -53,6 +61,10 @@ public class SyncEngine : IDisposable
 
     public string SyncRootPath => _syncRootPath;
     public SyncOutbox Outbox => _outbox;
+
+    private volatile SyncPauseReason _pauseReason = SyncPauseReason.None;
+    public SyncPauseReason PauseReason => _pauseReason;
+    public bool IsPaused => _pauseReason != SyncPauseReason.None;
 
     public string? GetBlobIdForNodeId(string nodeId)
         => _nodeIdToBlobId.TryGetValue(nodeId, out var blobId) ? blobId : null;
@@ -126,6 +138,64 @@ public class SyncEngine : IDisposable
     {
         _outboxProcessor.SetOnline(true);
         ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_IDLE);
+    }
+
+    public void Pause(SyncPauseReason reason)
+    {
+        _pauseReason |= reason;
+        Log.Info($"{_logPrefix} Sync paused: {_pauseReason}");
+
+        if (reason.HasFlag(SyncPauseReason.UserRequested))
+            _outboxProcessor.SetOnline(false);
+
+        var message = reason.HasFlag(SyncPauseReason.DiskFull)
+            ? "Sync paused — disk space is low. Free up space to resume."
+            : "Sync paused by user.";
+        _syncRoot.ReportSyncStatus(SyncStatusError, message);
+        StatusChanged?.Invoke(SyncStatus.Paused);
+    }
+
+    public void Resume(SyncPauseReason reason)
+    {
+        _pauseReason &= ~reason;
+        Log.Info($"{_logPrefix} Sync resume ({reason} cleared), remaining: {_pauseReason}");
+
+        if (_pauseReason == SyncPauseReason.None)
+        {
+            if (reason.HasFlag(SyncPauseReason.UserRequested))
+                _outboxProcessor.SetOnline(true);
+            ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_IDLE);
+        }
+        else
+        {
+            // Still paused for another reason — update the message
+            var message = _pauseReason.HasFlag(SyncPauseReason.DiskFull)
+                ? "Sync paused — disk space is low. Free up space to resume."
+                : "Sync paused by user.";
+            _syncRoot.ReportSyncStatus(SyncStatusError, message);
+        }
+    }
+
+    private string? GetHydrationBlockedReason()
+    {
+        if (_pauseReason.HasFlag(SyncPauseReason.DiskFull))
+            return "Cannot download — disk space is low. Free up space to resume syncing.";
+        if (_pauseReason.HasFlag(SyncPauseReason.UserRequested))
+            return "Sync is paused. Resume syncing to download files.";
+
+        // Real-time disk check as a safety net (pause flag may not be set yet)
+        try
+        {
+            var driveInfo = new DriveInfo(Path.GetPathRoot(_syncRootPath)!);
+            if (driveInfo.AvailableFreeSpace < 100L * 1024 * 1024) // 100MB emergency threshold
+            {
+                Pause(SyncPauseReason.DiskFull);
+                return "Cannot download — disk space is critically low.";
+            }
+        }
+        catch { }
+
+        return null;
     }
 
     private void OnDownloadStarted(long transferKey, string fileName)
@@ -216,6 +286,7 @@ public class SyncEngine : IDisposable
         _syncCallbacks.OnDeleteRequested = HandleDeleteRequestAsync;
         _syncCallbacks.OnRenameRequested = HandleRenameRequestAsync;
         _syncCallbacks.OnDehydrateRequested = HandleDehydrateRequestAsync;
+        _syncCallbacks.HydrationBlockedReason = GetHydrationBlockedReason;
         _syncCallbacks.OnDownloadStarted += OnDownloadStarted;
         _syncCallbacks.OnDownloadCompleted += OnDownloadCompleted;
         _syncCallbacks.OnDirectoryPopulated += OnDirectoryPopulated;
