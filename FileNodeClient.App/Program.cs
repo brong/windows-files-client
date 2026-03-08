@@ -6,11 +6,20 @@ class Program
 {
     static async Task<int> Main(string[] args)
     {
-        var debug = args.Contains("--debug");
-        AppLogger.Initialize(debug);
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
+
+        using var mutex = new Mutex(true, "FileNodeClient.App.SingleInstance", out var createdNew);
+        if (!createdNew)
+        {
+            MessageBox.Show("FileNodeClient is already running.", "FileNodeClient",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return 0;
+        }
+
+        var debug = args.Contains("--debug");
+        AppLogger.Initialize(debug);
 
         using var cts = new CancellationTokenSource();
 
