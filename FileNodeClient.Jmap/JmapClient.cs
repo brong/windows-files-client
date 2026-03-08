@@ -733,7 +733,10 @@ public class JmapClient : IJmapClient
                 }
             }
         }
-        catch (JsonException) { }
+        catch (JsonException ex)
+        {
+            Log.Warn($"Failed to parse SSE state change: {ex.Message}");
+        }
         return results;
     }
 

@@ -101,19 +101,33 @@ public sealed class IpcPipeClient : IDisposable
                 // Keepalive: periodically ping to detect broken pipes
                 _ = Task.Run(async () =>
                 {
+                    int consecutiveFailures = 0;
+                    const int maxFailures = 3;
                     try
                     {
                         while (!readCts.Token.IsCancellationRequested)
                         {
                             await Task.Delay(5_000, readCts.Token);
-                            await SendCommandAsync(new GetStatusCommand(), readCts.Token);
+                            try
+                            {
+                                await SendCommandAsync(new GetStatusCommand(), readCts.Token);
+                                consecutiveFailures = 0;
+                            }
+                            catch (OperationCanceledException) { throw; }
+                            catch (Exception ex)
+                            {
+                                consecutiveFailures++;
+                                if (consecutiveFailures >= maxFailures)
+                                {
+                                    Log.Warn($"[IPC Client] Keepalive failed {maxFailures} times, disconnecting: {ex.Message}");
+                                    try { readCts.Cancel(); } catch { }
+                                    return;
+                                }
+                                Log.Debug($"[IPC Client] Keepalive ping failed ({consecutiveFailures}/{maxFailures}): {ex.Message}");
+                            }
                         }
                     }
-                    catch
-                    {
-                        // Write failed — pipe is dead, cancel the read loop
-                        try { readCts.Cancel(); } catch { }
-                    }
+                    catch (OperationCanceledException) { }
                 }, readCts.Token);
 
                 // Read events until disconnected

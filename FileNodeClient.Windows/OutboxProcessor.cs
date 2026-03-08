@@ -139,11 +139,20 @@ public class OutboxProcessor : IDisposable
         }
         catch (HttpRequestException ex) when (change.IsDirtyContent)
         {
-            // Upload failed (server rejected, connection reset, etc.) — log details and back off
             Log.Error($"{_logPrefix} Outbox: upload failed for {Path.GetFileName(change.LocalPath)}: {ex.Message}");
             if (ex.InnerException != null)
                 Log.Error($"{_logPrefix}   Inner: {ex.InnerException.GetType().Name}: {ex.InnerException.Message}");
-            _outbox.MarkFailed(change.Id, ex.InnerException?.Message ?? ex.Message);
+
+            // 4xx = permanent (bad request, not found, payload too large) — don't retry
+            if (ex.StatusCode.HasValue && (int)ex.StatusCode.Value >= 400 && (int)ex.StatusCode.Value < 500)
+            {
+                _outbox.MarkRejected(change.Id, $"Server rejected ({(int)ex.StatusCode.Value}): {ex.Message}");
+            }
+            else
+            {
+                // 5xx, network errors, timeouts — transient, back off and retry
+                _outbox.MarkFailed(change.Id, ex.InnerException?.Message ?? ex.Message);
+            }
         }
         catch (IOException ex) when (change.IsDirtyContent)
         {
@@ -167,7 +176,10 @@ public class OutboxProcessor : IDisposable
                     else if (File.Exists(change.LocalPath))
                         File.Delete(change.LocalPath);
                 }
-                catch { }
+                catch (Exception cleanupEx)
+                {
+                    Log.Warn($"{_logPrefix} Outbox: failed to clean up rejected file {change.LocalPath}: {cleanupEx.Message}");
+                }
             }
         }
         catch (ObjectDisposedException) when (ct.IsCancellationRequested)

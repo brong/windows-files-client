@@ -51,7 +51,14 @@ sealed class CredentialStore
             var existing = vault.Retrieve(ResourceName, loginId);
             vault.Remove(existing);
         }
-        catch (Exception) { /* not found — ok */ }
+        catch (Exception ex) when (ex.HResult == unchecked((int)0x80070490))
+        {
+            // Element not found (E_ELEMENT_NOT_FOUND) — expected
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"CredentialStore: error removing existing credential for {loginId}: {ex.Message}");
+        }
 
         vault.Add(new PasswordCredential(ResourceName, loginId, payload));
     }
@@ -69,9 +76,14 @@ sealed class CredentialStore
         {
             creds = vault.FindAllByResource(ResourceName);
         }
-        catch (Exception)
+        catch (Exception ex) when (ex.HResult == unchecked((int)0x80070490))
         {
             return result; // No credentials stored
+        }
+        catch (Exception ex)
+        {
+            Log.Error($"CredentialStore: vault read failed: {ex.Message}");
+            return result;
         }
 
         foreach (var cred in creds)
@@ -113,7 +125,14 @@ sealed class CredentialStore
             var cred = vault.Retrieve(ResourceName, loginId);
             vault.Remove(cred);
         }
-        catch (Exception) { /* not found — ok */ }
+        catch (Exception ex) when (ex.HResult == unchecked((int)0x80070490))
+        {
+            // Element not found — already removed
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"CredentialStore: error removing credential for {loginId}: {ex.Message}");
+        }
     }
 
     /// <summary>

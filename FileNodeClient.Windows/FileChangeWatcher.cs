@@ -88,19 +88,35 @@ internal sealed class FileChangeWatcher : IDisposable
     {
         Log.Error($"{_logPrefix} FileSystemWatcher error: {e.GetException().Message}");
         // Restart the watcher — after a buffer overflow it stops delivering events
-        try
+        RestartWatcherWithBackoff();
+    }
+
+    private void RestartWatcherWithBackoff()
+    {
+        const int maxRetries = 5;
+        var delayMs = 500;
+
+        for (int attempt = 1; attempt <= maxRetries; attempt++)
         {
-            if (_watcher != null)
+            try
             {
-                _watcher.EnableRaisingEvents = false;
-                _watcher.EnableRaisingEvents = true;
-                Log.Info($"{_logPrefix} FileSystemWatcher restarted after error.");
+                if (_watcher != null)
+                {
+                    _watcher.EnableRaisingEvents = false;
+                    _watcher.EnableRaisingEvents = true;
+                    Log.Info($"{_logPrefix} FileSystemWatcher restarted after error (attempt {attempt}).");
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Error($"{_logPrefix} FileSystemWatcher restart attempt {attempt}/{maxRetries} failed: {ex.Message}");
+                if (attempt < maxRetries)
+                    Thread.Sleep(delayMs *= 2);
             }
         }
-        catch (Exception ex)
-        {
-            Log.Error($"{_logPrefix} Failed to restart FileSystemWatcher: {ex.Message}");
-        }
+
+        Log.Error($"{_logPrefix} FileSystemWatcher restart failed after {maxRetries} attempts — change detection disabled until next sync.");
     }
 
     private void OnChanged(string path)

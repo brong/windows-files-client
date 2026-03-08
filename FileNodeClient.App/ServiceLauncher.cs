@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using FileNodeClient.Logging;
 
 namespace FileNodeClient.App;
 
@@ -13,8 +14,9 @@ static class ServiceLauncher
         {
             return Process.GetProcessesByName(ServiceExeName).Length > 0;
         }
-        catch
+        catch (Exception ex)
         {
+            Log.Warn($"[ServiceLauncher] Cannot query processes: {ex.Message}");
             return false;
         }
     }
@@ -43,8 +45,9 @@ static class ServiceLauncher
             });
             return true;
         }
-        catch
+        catch (Exception ex)
         {
+            Log.Error($"[ServiceLauncher] Failed to start service: {ex.Message}");
             return false;
         }
     }
@@ -60,13 +63,14 @@ static class ServiceLauncher
             foreach (var p in processes)
             {
                 try { p.Kill(); }
-                catch { /* already exited */ }
+                catch (InvalidOperationException) { /* already exited */ }
                 finally { p.Dispose(); }
             }
             return true;
         }
-        catch
+        catch (Exception ex)
         {
+            Log.Error($"[ServiceLauncher] Failed to stop service: {ex.Message}");
             return false;
         }
     }

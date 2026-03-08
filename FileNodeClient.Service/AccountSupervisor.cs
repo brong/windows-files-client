@@ -141,6 +141,8 @@ sealed class AccountSupervisor : IDisposable
     private async Task SyncLoopAsync(string initialState, CancellationToken ct)
     {
         string currentState = initialState;
+        int pollBackoffMs = 0;
+        const int maxPollBackoffMs = 60_000;
 
         Log.Info($"[{_displayName}] Waiting for state changes...");
 
@@ -164,15 +166,24 @@ sealed class AccountSupervisor : IDisposable
                     continue;
                 }
 
+                if (pollBackoffMs > 0)
+                {
+                    try { await Task.Delay(pollBackoffMs, ct); }
+                    catch (OperationCanceledException) { break; }
+                }
+
                 try
                 {
                     var pollResult = await _engine!.PollChangesAsync(currentState, ct);
                     currentState = pollResult.State;
                     UpdateQuota(pollResult.Quotas);
+                    pollBackoffMs = 0; // Reset on success
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
                     Log.Error($"[{_displayName}] Change poll error: {ex.Message}");
+                    pollBackoffMs = pollBackoffMs == 0 ? 5_000 : Math.Min(pollBackoffMs * 2, maxPollBackoffMs);
+                    Log.Info($"[{_displayName}] Backing off poll for {pollBackoffMs / 1000}s");
                 }
             }
             catch (OperationCanceledException) { break; }

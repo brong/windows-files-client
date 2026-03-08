@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Http;
 using System.Net.Http.Headers;
 using FileNodeClient.Logging;
 
@@ -74,17 +75,46 @@ public class OAuthTokenHandler : DelegatingHandler
             if (DateTimeOffset.UtcNow < _expiresAt.AddSeconds(-60))
                 return true; // Already refreshed by another caller
 
-            var tokenResponse = await OAuthClient.RefreshTokenAsync(
-                _tokenEndpoint, _clientId, _refreshToken, ct);
+            // Retry transient failures with exponential backoff (1s, 2s, 4s)
+            const int maxRetries = 3;
+            for (int attempt = 0; attempt < maxRetries; attempt++)
+            {
+                try
+                {
+                    var tokenResponse = await OAuthClient.RefreshTokenAsync(
+                        _tokenEndpoint, _clientId, _refreshToken, ct);
 
-            _accessToken = tokenResponse.AccessToken;
-            if (tokenResponse.RefreshToken != null)
-                _refreshToken = tokenResponse.RefreshToken;
-            _expiresAt = DateTimeOffset.UtcNow.AddSeconds(tokenResponse.ExpiresIn);
+                    _accessToken = tokenResponse.AccessToken;
+                    if (tokenResponse.RefreshToken != null)
+                        _refreshToken = tokenResponse.RefreshToken;
+                    _expiresAt = DateTimeOffset.UtcNow.AddSeconds(tokenResponse.ExpiresIn);
 
-            Log.Info($"[OAuth] Token refreshed, expires at {_expiresAt:u}");
-            TokenRefreshed?.Invoke(this);
-            return true;
+                    Log.Info($"[OAuth] Token refreshed, expires at {_expiresAt:u}");
+                    TokenRefreshed?.Invoke(this);
+                    return true;
+                }
+                catch (HttpRequestException ex) when (attempt < maxRetries - 1
+                    && (!ex.StatusCode.HasValue || (int)ex.StatusCode.Value >= 500))
+                {
+                    // Transient (network error or 5xx) — retry after backoff
+                    var delayMs = 1000 * (1 << attempt);
+                    Log.Warn($"[OAuth] Token refresh attempt {attempt + 1} failed ({ex.Message}), retrying in {delayMs}ms");
+                    await Task.Delay(delayMs, ct);
+                }
+                catch (HttpRequestException ex) when (ex.StatusCode.HasValue && (int)ex.StatusCode.Value >= 400 && (int)ex.StatusCode.Value < 500)
+                {
+                    // 4xx = permanent auth failure (revoked token, invalid grant) — don't retry
+                    Log.Error($"[OAuth] Token refresh rejected ({(int)ex.StatusCode.Value}): {ex.Message}");
+                    return false;
+                }
+            }
+
+            Log.Error($"[OAuth] Token refresh failed after {maxRetries} attempts");
+            return false;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
         }
         catch (Exception ex)
         {
