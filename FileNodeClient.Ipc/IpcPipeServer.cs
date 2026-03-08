@@ -237,7 +237,8 @@ public sealed class IpcPipeServer : IDisposable
         {
             _writeLock.Dispose();
             _reader.Dispose();
-            _writer.Dispose();
+            try { _writer.Dispose(); }
+            catch (ObjectDisposedException) { }
             _pipe.Dispose();
         }
     }

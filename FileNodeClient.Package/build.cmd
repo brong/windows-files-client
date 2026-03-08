@@ -26,6 +26,12 @@ echo Publishing FileNodeClient.App...
 dotnet publish "%BUILDDIR%\FileNodeClient.App\FileNodeClient.App.csproj" -c Release -r win-x64 --self-contained -o "%BUILDDIR%\FileNodeClient.Package\publish"
 if errorlevel 1 goto :error
 
+echo.
+echo Publishing FileNodeClient.ThumbnailExtension...
+:: COM hosting requires framework-dependent deployment (no --self-contained)
+dotnet publish "%BUILDDIR%\FileNodeClient.ThumbnailExtension\FileNodeClient.ThumbnailExtension.csproj" -c Release -r win-x64 -o "%BUILDDIR%\FileNodeClient.Package\publish"
+if errorlevel 1 goto :error
+
 :: ---- Step 2: Create self-signed cert if needed ----
 set "CERT_SUBJECT=CN=Fastmail Pty Ltd"
 set "CERT_PFX=%BUILDDIR%\FileNodeClient.Package\DevCert.pfx"
