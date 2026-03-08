@@ -232,6 +232,21 @@ sealed class ServiceClient : IDisposable
         return await tcs.Task;
     }
 
+    public async Task PauseAccountAsync(string accountId, CancellationToken ct = default)
+    {
+        await _client.SendCommandAsync(new PauseAccountCommand(accountId), ct);
+    }
+
+    public async Task ResumeAccountAsync(string accountId, CancellationToken ct = default)
+    {
+        await _client.SendCommandAsync(new ResumeAccountCommand(accountId), ct);
+    }
+
+    public async Task SyncNowAsync(string accountId, CancellationToken ct = default)
+    {
+        await _client.SendCommandAsync(new SyncNowCommand(accountId), ct);
+    }
+
     public async Task<LoginAccountsResultEvent> GetLoginAccountsAsync(string loginId,
         CancellationToken ct = default)
     {

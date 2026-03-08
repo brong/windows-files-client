@@ -71,6 +71,9 @@ sealed class IpcCommandHandler
             case ResumeAccountCommand cmd:
                 return HandleResumeAccount(cmd);
 
+            case SyncNowCommand cmd:
+                return HandleSyncNow(cmd);
+
             default:
                 Log.Error($"[IPC] Unknown command type: {command.GetType().Name}");
                 return null;
@@ -315,6 +318,12 @@ sealed class IpcCommandHandler
     {
         _loginManager.ResumeAccount(cmd.AccountId);
         return new CommandResultEvent("resumeAccount", true, null);
+    }
+
+    private IpcEvent HandleSyncNow(SyncNowCommand cmd)
+    {
+        _loginManager.SyncNow(cmd.AccountId);
+        return new CommandResultEvent("syncNow", true, null);
     }
 
     private AccountInfo BuildAccountInfo(AccountSupervisor s) => new(

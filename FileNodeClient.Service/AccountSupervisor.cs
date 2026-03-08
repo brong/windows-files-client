@@ -19,6 +19,7 @@ sealed class AccountSupervisor : IDisposable
     private readonly string _syncRootPath;
     private readonly string _displayName;
     private readonly bool _debug;
+    private const string SyncNowSentinel = "\x01SYNC_NOW";
     private readonly Channel<string> _stateChannel = Channel.CreateBounded<string>(
         new BoundedChannelOptions(16) { FullMode = BoundedChannelFullMode.DropOldest });
 
@@ -40,12 +41,6 @@ sealed class AccountSupervisor : IDisposable
     public long? QuotaUsed { get; private set; }
     public long? QuotaLimit { get; private set; }
     public SyncPauseReason PauseReason => _engine?.PauseReason ?? SyncPauseReason.None;
-
-    /// <summary>
-    /// When false, background sync polling is suppressed (metered connection).
-    /// On-demand hydration and outbox uploads still work.
-    /// </summary>
-    public bool BackgroundSyncEnabled { get; set; } = true;
 
     public event Action<AccountSupervisor>? StatusChanged;
     public event Action<AccountSupervisor>? StatusDetailChanged;
@@ -123,6 +118,11 @@ sealed class AccountSupervisor : IDisposable
     /// </summary>
     internal void PushState(string state) => _stateChannel.Writer.TryWrite(state);
 
+    /// <summary>
+    /// User-requested one-shot sync. Bypasses metered pause (but not user-pause or disk-full).
+    /// </summary>
+    internal void SyncNow() => _stateChannel.Writer.TryWrite(SyncNowSentinel);
+
     internal void NotifyConnectivityLost() => _engine?.ReportConnectivityLost();
     internal void NotifyConnectivityRestored() => _engine?.ReportConnectivityRestored();
 
@@ -195,22 +195,22 @@ sealed class AccountSupervisor : IDisposable
             try
             {
                 var newState = await _stateChannel.Reader.ReadAsync(ct);
-
-                if (!BackgroundSyncEnabled)
-                {
-                    if (_debug)
-                        Log.Debug($"[{_displayName}] Metered connection, skipping background sync");
-                    continue;
-                }
+                var isSyncNow = newState == SyncNowSentinel;
 
                 if (_engine!.IsPaused)
                 {
-                    Log.Debug($"[{_displayName}] Sync paused ({_engine.PauseReason}), skipping poll");
-                    continue;
+                    // SyncNow bypasses user-pause and metered, but not disk-full
+                    if (!isSyncNow || _engine.PauseReason.HasFlag(SyncPauseReason.DiskFull))
+                    {
+                        Log.Debug($"[{_displayName}] Sync paused ({_engine.PauseReason}), skipping poll");
+                        continue;
+                    }
+                    Log.Info($"[{_displayName}] User-requested sync (paused: {_engine.PauseReason})");
                 }
 
-                // Empty string = forced poll (e.g. after push reconnect)
-                if (newState.Length > 0 && string.Equals(newState, currentState, StringComparison.Ordinal))
+                // Empty string or SyncNow = forced poll
+                if (!isSyncNow && newState.Length > 0
+                    && string.Equals(newState, currentState, StringComparison.Ordinal))
                 {
                     Log.Info($"[{_displayName}] State unchanged ({currentState}), skipping poll");
                     continue;

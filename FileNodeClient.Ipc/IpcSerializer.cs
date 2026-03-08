@@ -33,6 +33,7 @@ public static class IpcSerializer
         ["enableAccount"] = typeof(EnableAccountCommand),
         ["pauseAccount"] = typeof(PauseAccountCommand),
         ["resumeAccount"] = typeof(ResumeAccountCommand),
+        ["syncNow"] = typeof(SyncNowCommand),
     };
 
     private static readonly Dictionary<string, Type> EventTypes = new()

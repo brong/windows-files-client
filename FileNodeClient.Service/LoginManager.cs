@@ -514,6 +514,7 @@ sealed class LoginManager : IDisposable
             try
             {
                 await supervisor.StartAsync(iconPath, clean: false, ct);
+                ApplyInitialPauseState(supervisor);
                 updateStarted.Add(supervisor);
             }
             catch (Exception ex)
@@ -784,6 +785,7 @@ sealed class LoginManager : IDisposable
         try
         {
             await supervisor.StartAsync(iconPath, clean: false, ct);
+            ApplyInitialPauseState(supervisor);
         }
         catch (Exception ex)
         {
@@ -952,6 +954,7 @@ sealed class LoginManager : IDisposable
             try
             {
                 await supervisor.StartAsync(iconPath, clean, ct);
+                ApplyInitialPauseState(supervisor);
                 configStarted.Add(supervisor);
             }
             catch (Exception ex)
@@ -1086,6 +1089,7 @@ sealed class LoginManager : IDisposable
             try
             {
                 await supervisor.StartAsync(iconPath, clean, ct);
+                ApplyInitialPauseState(supervisor);
                 startedSupervisors.Add(supervisor);
             }
             catch (Exception ex)
@@ -1248,6 +1252,14 @@ sealed class LoginManager : IDisposable
         }
     }
 
+    public void SyncNow(string accountId)
+    {
+        AccountSupervisor? supervisor;
+        lock (_lock)
+            supervisor = _supervisors.FirstOrDefault(s => s.AccountId == accountId);
+        supervisor?.SyncNow();
+    }
+
     private void CheckDiskSpace()
     {
         List<AccountSupervisor> supervisors;
@@ -1275,6 +1287,15 @@ sealed class LoginManager : IDisposable
                 RaiseAggregateStatus();
             }
         }
+    }
+
+    /// <summary>
+    /// Apply initial pause state for a newly started supervisor (e.g. metered network).
+    /// </summary>
+    private void ApplyInitialPauseState(AccountSupervisor supervisor)
+    {
+        if (_networkMonitor is { IsMetered: true })
+            supervisor.Pause(SyncPauseReason.MeteredConnection);
     }
 
     private void OnNetworkStateChanged(bool isConnected, bool isMetered)
@@ -1310,15 +1331,18 @@ sealed class LoginManager : IDisposable
             _ = RetryFailedLoginsAsync();
         }
 
-        // Handle metered state changes
-        foreach (var supervisor in supervisors)
-            supervisor.BackgroundSyncEnabled = !isMetered;
-
+        // Handle metered state changes — pause outbox + background sync, but allow hydration
         if (isMetered)
-            Log.Info("[NetworkMonitor] Metered connection — background sync suppressed");
+        {
+            Log.Info("[NetworkMonitor] Metered connection — background sync and uploads suppressed");
+            foreach (var supervisor in supervisors)
+                supervisor.Pause(SyncPauseReason.MeteredConnection);
+        }
         else if (isConnected)
         {
-            Log.Info("[NetworkMonitor] Unmetered connection — background sync enabled");
+            Log.Info("[NetworkMonitor] Unmetered connection — full sync enabled");
+            foreach (var supervisor in supervisors)
+                supervisor.Resume(SyncPauseReason.MeteredConnection);
             // Trigger catch-up poll on transition from metered to unmetered
             foreach (var supervisor in supervisors)
                 supervisor.PushState("");

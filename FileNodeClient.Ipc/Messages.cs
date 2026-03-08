@@ -89,6 +89,8 @@ public sealed record PauseAccountCommand(string AccountId) : IpcCommand;
 
 public sealed record ResumeAccountCommand(string AccountId) : IpcCommand;
 
+public sealed record SyncNowCommand(string AccountId) : IpcCommand;
+
 // ---- Service -> UI events ----
 
 public abstract record IpcEvent;

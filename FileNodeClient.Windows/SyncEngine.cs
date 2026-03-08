@@ -17,6 +17,7 @@ public enum SyncPauseReason
     None = 0,
     UserRequested = 1,
     DiskFull = 2,
+    MeteredConnection = 4,
 }
 
 public class SyncEngine : IDisposable
@@ -145,13 +146,15 @@ public class SyncEngine : IDisposable
         _pauseReason |= reason;
         Log.Info($"{_logPrefix} Sync paused: {_pauseReason}");
 
-        if (reason.HasFlag(SyncPauseReason.UserRequested))
+        if (reason.HasFlag(SyncPauseReason.UserRequested) || reason.HasFlag(SyncPauseReason.MeteredConnection))
             _outboxProcessor.SetOnline(false);
 
-        var message = reason.HasFlag(SyncPauseReason.DiskFull)
-            ? "Sync paused — disk space is low. Free up space to resume."
-            : "Sync paused by user.";
-        _syncRoot.ReportSyncStatus(SyncStatusError, message);
+        // Metered doesn't show an error status — it's a quiet optimization
+        if (!reason.HasFlag(SyncPauseReason.MeteredConnection))
+        {
+            var message = GetPauseStatusMessage();
+            _syncRoot.ReportSyncStatus(SyncStatusError, message);
+        }
         StatusChanged?.Invoke(SyncStatus.Paused);
     }
 
@@ -162,18 +165,27 @@ public class SyncEngine : IDisposable
 
         if (_pauseReason == SyncPauseReason.None)
         {
-            if (reason.HasFlag(SyncPauseReason.UserRequested))
-                _outboxProcessor.SetOnline(true);
+            _outboxProcessor.SetOnline(true);
             ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_IDLE);
+        }
+        else if (_pauseReason == SyncPauseReason.MeteredConnection)
+        {
+            // Only metered remains — no error status, but outbox stays offline
         }
         else
         {
-            // Still paused for another reason — update the message
-            var message = _pauseReason.HasFlag(SyncPauseReason.DiskFull)
-                ? "Sync paused — disk space is low. Free up space to resume."
-                : "Sync paused by user.";
-            _syncRoot.ReportSyncStatus(SyncStatusError, message);
+            // Still paused for a visible reason — update the message
+            _syncRoot.ReportSyncStatus(SyncStatusError, GetPauseStatusMessage());
         }
+    }
+
+    private string GetPauseStatusMessage()
+    {
+        if (_pauseReason.HasFlag(SyncPauseReason.DiskFull))
+            return "Sync paused — disk space is low. Free up space to resume.";
+        if (_pauseReason.HasFlag(SyncPauseReason.UserRequested))
+            return "Sync paused by user.";
+        return "Sync paused.";
     }
 
     private string? GetHydrationBlockedReason()

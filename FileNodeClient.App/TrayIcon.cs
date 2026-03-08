@@ -122,13 +122,14 @@ sealed class TrayIcon : IDisposable
         else if (accounts.Count == 1)
         {
             var a = accounts[0];
-            (color, tooltip) = FormatSingleAccountTooltip(a.Username, a.Status, a.PendingCount, a.StatusDetail);
+            (color, tooltip) = FormatSingleAccountTooltip(a.Username, a.Status, a.PendingCount, a.StatusDetail, a.PauseReason);
         }
         else
         {
             color = status switch
             {
                 AccountStatus.Error => Color.Red,
+                AccountStatus.Paused => Color.FromArgb(200, 120, 0),
                 AccountStatus.Disconnected => Color.Gray,
                 AccountStatus.Syncing => Color.DodgerBlue,
                 AccountStatus.Idle when pendingCount > 0 => Color.DodgerBlue,
@@ -138,6 +139,7 @@ sealed class TrayIcon : IDisposable
 
             var statusText = status switch
             {
+                AccountStatus.Paused => "Paused",
                 AccountStatus.Idle when pendingCount > 0 => $"{pendingCount} pending",
                 AccountStatus.Idle => "Up to date",
                 AccountStatus.Syncing => "Syncing...",
@@ -169,12 +171,18 @@ sealed class TrayIcon : IDisposable
     }
 
     private static (Color color, string tooltip) FormatSingleAccountTooltip(
-        string username, AccountStatus status, int pendingCount, string? detail)
+        string username, AccountStatus status, int pendingCount, string? detail, string? pauseReason)
     {
         var pendingSuffix = pendingCount > 0 ? $" ({pendingCount} pending)" : "";
 
         var (color, defaultTooltip) = status switch
         {
+            AccountStatus.Paused when pauseReason?.Contains("DiskFull") == true =>
+                (Color.Red, $"{username} - Disk full"),
+            AccountStatus.Paused when pauseReason?.Contains("MeteredConnection") == true =>
+                (Color.FromArgb(200, 120, 0), $"{username} - Metered connection"),
+            AccountStatus.Paused =>
+                (Color.FromArgb(200, 120, 0), $"{username} - Paused"),
             AccountStatus.Idle when pendingCount > 0 =>
                 (Color.DodgerBlue, $"{username} - {pendingCount} pending changes"),
             AccountStatus.Idle => (Color.LimeGreen, $"{username} - Up to date"),

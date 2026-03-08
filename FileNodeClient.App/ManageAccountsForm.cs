@@ -37,6 +37,9 @@ sealed class ManageAccountsForm : Form
     private readonly Button _refreshButton;
     private readonly Button _cleanButton;
     private readonly Button _openFolderButton;
+    private readonly Button _pauseButton;
+    private readonly Button _resumeButton;
+    private readonly Button _syncNowButton;
     private readonly ListView _activityListView;
 
     // Detail panel controls — non-synced account selected
@@ -291,10 +294,19 @@ sealed class ManageAccountsForm : Form
         _refreshButton = new Button { Text = "Refresh", AutoSize = true, Height = 30, Margin = new Padding(0, 0, 8, 6) };
         _refreshButton.Click += OnRefreshClicked;
 
-        _cleanButton = new Button { Text = "Clean", AutoSize = true, Height = 30, Margin = new Padding(0, 0, 0, 6) };
+        _cleanButton = new Button { Text = "Clean", AutoSize = true, Height = 30, Margin = new Padding(0, 0, 8, 6) };
         _cleanButton.Click += OnCleanClicked;
 
-        syncedButtonFlow.Controls.AddRange([_openFolderButton, _detachButton, _removeButton, _refreshButton, _cleanButton]);
+        _pauseButton = new Button { Text = "Pause", AutoSize = true, Height = 30, Margin = new Padding(0, 0, 8, 6), Visible = false };
+        _pauseButton.Click += OnPauseClicked;
+
+        _resumeButton = new Button { Text = "Resume", AutoSize = true, Height = 30, Margin = new Padding(0, 0, 8, 6), Visible = false };
+        _resumeButton.Click += OnResumeClicked;
+
+        _syncNowButton = new Button { Text = "Sync Now", AutoSize = true, Height = 30, Margin = new Padding(0, 0, 0, 6), Visible = false };
+        _syncNowButton.Click += OnSyncNowClicked;
+
+        syncedButtonFlow.Controls.AddRange([_openFolderButton, _pauseButton, _resumeButton, _syncNowButton, _detachButton, _removeButton, _refreshButton, _cleanButton]);
         syncedTopLayout.Controls.Add(syncedButtonFlow);
 
         _syncedAccountPanel.Controls.Add(syncedTopLayout);
@@ -1069,6 +1081,9 @@ sealed class ManageAccountsForm : Form
 
                 var statusText = an.IsMissing ? "Missing on server" : info.Status switch
                 {
+                    AccountStatus.Paused when info.PauseReason?.Contains("DiskFull") == true => "Disk full",
+                    AccountStatus.Paused when info.PauseReason?.Contains("UserRequested") == true => "Paused",
+                    AccountStatus.Paused when info.PauseReason?.Contains("MeteredConnection") == true => "Metered",
                     AccountStatus.Idle when info.PendingCount > 0 => $"{info.PendingCount} pending",
                     AccountStatus.Idle => "Up to date",
                     AccountStatus.Syncing => "Syncing",
@@ -1086,20 +1101,11 @@ sealed class ManageAccountsForm : Form
             }
         }
 
-        // If the selected node is a synced account, update the detail panel status
+        // If the selected node is a synced account, update the detail panel (status + buttons)
         if (_treeView.SelectedNode?.Tag is AccountNode selAn
-            && selAn.IsSynced && selAn.SyncInfo != null && !selAn.IsMissing)
+            && selAn.IsSynced && selAn.SyncInfo != null)
         {
-            var selInfo = selAn.SyncInfo;
-            _accountStatusLabel.Text = selInfo.Status switch
-            {
-                AccountStatus.Idle when selInfo.PendingCount > 0 => $"Status: {selInfo.PendingCount} pending",
-                AccountStatus.Idle => "Status: Up to date",
-                AccountStatus.Syncing => "Status: Syncing",
-                AccountStatus.Error => $"Status: Error \u2014 {selInfo.StatusDetail}",
-                AccountStatus.Disconnected => "Status: Offline",
-                _ => "Status: Unknown",
-            };
+            UpdateSyncedAccountLabels(selAn);
         }
     }
 
@@ -1190,8 +1196,21 @@ sealed class ManageAccountsForm : Form
         }
         else
         {
+            var isDiskFull = info.PauseReason?.Contains("DiskFull") == true;
+            var isUserPaused = info.PauseReason?.Contains("UserRequested") == true;
+            var isMetered = info.PauseReason?.Contains("MeteredConnection") == true;
+            var isPaused = info.Status == AccountStatus.Paused;
+
             _accountStatusLabel.Text = info.Status switch
             {
+                AccountStatus.Paused when isDiskFull =>
+                    "Status: Paused \u2014 disk space is low. Free up space to resume.",
+                AccountStatus.Paused when isUserPaused && isMetered =>
+                    "Status: Paused by user (metered connection)",
+                AccountStatus.Paused when isUserPaused =>
+                    "Status: Paused by user",
+                AccountStatus.Paused when isMetered =>
+                    "Status: Metered connection \u2014 uploads paused",
                 AccountStatus.Idle when info.PendingCount > 0 => $"Status: {info.PendingCount} pending",
                 AccountStatus.Idle => "Status: Up to date",
                 AccountStatus.Syncing => "Status: Syncing",
@@ -1199,10 +1218,16 @@ sealed class ManageAccountsForm : Form
                 AccountStatus.Disconnected => "Status: Offline",
                 _ => "Status: Unknown",
             };
-            _accountStatusLabel.ForeColor = default;
+            _accountStatusLabel.ForeColor = isDiskFull ? Color.FromArgb(200, 50, 50) : default;
             _refreshButton.Visible = true;
             _cleanButton.Visible = true;
             _openFolderButton.Visible = true;
+
+            // Show Pause when actively syncing, Resume when user-paused
+            _pauseButton.Visible = !isPaused;
+            _resumeButton.Visible = isUserPaused;
+            // Sync Now available when paused (metered or user), but disabled when disk full
+            _syncNowButton.Visible = isPaused && !isDiskFull;
         }
         _syncFolderLabel.Text = $"Folder: {info.SyncRootPath}";
 
@@ -1616,6 +1641,36 @@ sealed class ManageAccountsForm : Form
         }
     }
 
+    private async void OnPauseClicked(object? sender, EventArgs e)
+    {
+        if (_operationInProgress) return;
+        if (_treeView.SelectedNode?.Tag is not AccountNode { IsSynced: true } accountNode)
+            return;
+
+        try { await _serviceClient.PauseAccountAsync(accountNode.AccountId); }
+        catch (Exception ex) { Log.Error($"Pause failed: {ex.Message}"); }
+    }
+
+    private async void OnResumeClicked(object? sender, EventArgs e)
+    {
+        if (_operationInProgress) return;
+        if (_treeView.SelectedNode?.Tag is not AccountNode { IsSynced: true } accountNode)
+            return;
+
+        try { await _serviceClient.ResumeAccountAsync(accountNode.AccountId); }
+        catch (Exception ex) { Log.Error($"Resume failed: {ex.Message}"); }
+    }
+
+    private async void OnSyncNowClicked(object? sender, EventArgs e)
+    {
+        if (_operationInProgress) return;
+        if (_treeView.SelectedNode?.Tag is not AccountNode { IsSynced: true } accountNode)
+            return;
+
+        try { await _serviceClient.SyncNowAsync(accountNode.AccountId); }
+        catch (Exception ex) { Log.Error($"Sync now failed: {ex.Message}"); }
+    }
+
     private void SetAllButtonsEnabled(bool enabled)
     {
         _operationInProgress = !enabled;
@@ -1624,6 +1679,9 @@ sealed class ManageAccountsForm : Form
         _removeButton.Enabled = enabled;
         _refreshButton.Enabled = enabled;
         _cleanButton.Enabled = enabled;
+        _pauseButton.Enabled = enabled;
+        _resumeButton.Enabled = enabled;
+        _syncNowButton.Enabled = enabled;
         _removeLoginButton.Enabled = enabled;
         _updateCredentialsButton.Enabled = enabled;
         _reauthenticateButton.Enabled = enabled;
