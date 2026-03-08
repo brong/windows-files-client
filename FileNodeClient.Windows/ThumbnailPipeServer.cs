@@ -1,91 +1,24 @@
 using System.IO.Pipes;
 using System.Text;
 using FileNodeClient.Ipc;
-using Microsoft.Win32;
 
 namespace FileNodeClient.Windows;
 
 /// <summary>
 /// Named pipe server that accepts thumbnail requests from the native COM
-/// ThumbnailHandler DLL loaded in-process into Explorer. Each connection
-/// handles one request/response.
+/// ThumbnailHandler DLL running in dllhost.exe (COM Surrogate). Each
+/// connection handles one request/response.
 /// </summary>
 public sealed class ThumbnailPipeServer : IDisposable
 {
     private const string PipeName = "FileNodeClient.Thumbnails";
-    private const string ThumbnailClsid = "{B8C4F3E2-1A5D-4B9C-C6F7-2E4D8A9B3F1C}";
-    private const string UriSourceClsid = "{A7B3E2D1-9F4C-4A8B-B5E6-1D3C7F8A2E9B}";
     private readonly CancellationTokenSource _cts = new();
     private Task? _listenTask;
 
     public void Start()
     {
-        // Don't register CLSIDs in real HKCU — the MSIX manifest's
-        // com:SurrogateServer handles COM registration via virtual registry.
-        // Real HKCU entries conflict with/override the MSIX registration.
         _listenTask = Task.Run(() => ListenLoop(_cts.Token));
         Log.Info("Thumbnail pipe server started");
-    }
-
-    /// <summary>
-    /// Register the native handler DLL as InprocServer32 in the real Windows
-    /// registry for both CLSIDs (ThumbnailHandler and UriSourceHandler).
-    /// This ensures COM can always activate the handlers even when the MSIX
-    /// virtual registry has stale entries, preventing the windows.storage.dll
-    /// crash that occurs when handler CLSIDs can't be resolved.
-    /// </summary>
-    private static void RegisterNativeDll()
-    {
-        try
-        {
-            var baseDir = AppContext.BaseDirectory;
-            var dllPath = Path.Combine(baseDir, "FileNodeClient.ThumbnailExtension.dll");
-
-            if (!File.Exists(dllPath))
-            {
-                Log.Warn($"ThumbnailPipeServer: native DLL not found at {dllPath}, skipping COM registration");
-                return;
-            }
-
-            RegisterInprocServer(ThumbnailClsid, dllPath);
-            RegisterInprocServer(UriSourceClsid, dllPath);
-
-            Log.Info($"ThumbnailPipeServer: registered native DLL at {dllPath}");
-        }
-        catch (Exception ex)
-        {
-            Log.Error($"ThumbnailPipeServer: COM registration failed: {ex.Message}");
-        }
-    }
-
-    private static void RegisterInprocServer(string clsid, string dllPath)
-    {
-        using var clsidKey = Registry.CurrentUser.CreateSubKey(
-            $@"Software\Classes\CLSID\{clsid}");
-
-        using var inprocKey = Registry.CurrentUser.CreateSubKey(
-            $@"Software\Classes\CLSID\{clsid}\InprocServer32");
-        inprocKey.SetValue(null, dllPath);
-        inprocKey.SetValue("ThreadingModel", "Both");
-    }
-
-    /// <summary>
-    /// Remove the registry-based COM registration.
-    /// </summary>
-    public static void UnregisterComServer()
-    {
-        try
-        {
-            Registry.CurrentUser.DeleteSubKeyTree(
-                $@"Software\Classes\CLSID\{ThumbnailClsid}", throwOnMissingSubKey: false);
-            Registry.CurrentUser.DeleteSubKeyTree(
-                $@"Software\Classes\CLSID\{UriSourceClsid}", throwOnMissingSubKey: false);
-            Log.Info("ThumbnailPipeServer: unregistered COM servers");
-        }
-        catch (Exception ex)
-        {
-            Log.Error($"ThumbnailPipeServer: COM unregistration failed: {ex.Message}");
-        }
     }
 
     private async Task ListenLoop(CancellationToken ct)

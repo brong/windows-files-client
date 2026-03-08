@@ -1,22 +1,14 @@
 /*
- * ThumbnailHandler.c — Native COM handler DLL for Windows Cloud Files.
+ * ThumbnailHandler.c — Native COM thumbnail handler for Windows Cloud Files.
  *
- * This DLL is loaded in-process into Explorer.exe by cloud files handlers.
- * It MUST be native (no .NET runtime) because loading the CLR into Explorer
- * crashes windows.storage.dll.
+ * Loaded into dllhost.exe via com:SurrogateServer in the MSIX manifest.
+ * Native C (no CLR) for fast cold-start in the COM Surrogate process.
  *
- * Handles two CLSIDs:
+ * Implements IInitializeWithItem + IInitializeWithFile + IThumbnailProvider.
+ * Explorer uses IInitializeWithItem for cloud file placeholders.
+ * Connects to Service.exe over named pipe to fetch PNG thumbnails via JMAP.
  *
- * 1. ThumbnailHandler (B8C4F3E2-1A5D-4B9C-C6F7-2E4D8A9B3F1C)
- *    Implements IInitializeWithFile + IThumbnailProvider.
- *    Connects to Service.exe over named pipe to fetch PNG thumbnails.
- *
- * 2. UriSourceHandler (A7B3E2D1-9F4C-4A8B-B5E6-1D3C7F8A2E9B)
- *    Implements IStorageProviderUriSource (WinRT/IInspectable).
- *    No-op fallback: returns "no sync root" for all requests.
- *    Prevents windows.storage.dll crash when Service.exe isn't running.
- *    When Service.exe IS running, it registers its own ExeServer that
- *    overrides this fallback via CoRegisterClassObject.
+ * CLSID: {B8C4F3E2-1A5D-4B9C-C6F7-2E4D8A9B3F1C}
  *
  * Compile with MinGW:
  *   x86_64-w64-mingw32-gcc -shared -O2 -o FileNodeClient.ThumbnailExtension.dll \
@@ -35,12 +27,6 @@
 #include <objbase.h>
 #include <shobjidl.h>
 
-/* WinRT types not available in MinGW headers */
-#ifndef __HSTRING_defined
-typedef struct HSTRING__* HSTRING;
-#define __HSTRING_defined
-#endif
-
 /* ================================================================== */
 /*  GUIDs                                                             */
 /* ================================================================== */
@@ -49,12 +35,6 @@ typedef struct HSTRING__* HSTRING;
 static const GUID CLSID_ThumbnailHandler = {
     0xB8C4F3E2, 0x1A5D, 0x4B9C,
     { 0xC6, 0xF7, 0x2E, 0x4D, 0x8A, 0x9B, 0x3F, 0x1C }
-};
-
-/* UriSource CLSID: {A7B3E2D1-9F4C-4A8B-B5E6-1D3C7F8A2E9B} */
-static const GUID CLSID_UriSourceHandler = {
-    0xA7B3E2D1, 0x9F4C, 0x4A8B,
-    { 0xB5, 0xE6, 0x1D, 0x3C, 0x7F, 0x8A, 0x2E, 0x9B }
 };
 
 /* IInitializeWithFile {B7D14566-0509-4CCE-A71F-0A554233BD9B} */
@@ -75,142 +55,8 @@ static const GUID IID_IThumbnailProvider_local = {
     { 0xB0, 0x1F, 0x23, 0x46, 0x30, 0x15, 0x4E, 0x96 }
 };
 
-/* IInspectable {AF86E2E0-B12D-4C6A-9C5A-D7AA65101E90} */
-static const GUID IID_IInspectable_local = {
-    0xAF86E2E0, 0xB12D, 0x4C6A,
-    { 0x9C, 0x5A, 0xD7, 0xAA, 0x65, 0x10, 0x1E, 0x90 }
-};
-
-/* IStorageProviderUriSource {B29806D1-8BE0-4962-8F6C-0F6CD4AD39E8} */
-static const GUID IID_IStorageProviderUriSource = {
-    0xB29806D1, 0x8BE0, 0x4962,
-    { 0x8F, 0x6C, 0x0F, 0x6C, 0xD4, 0xAD, 0x39, 0xE8 }
-};
-
 static HMODULE g_hModule;
 static LONG g_cRef;  /* global DLL reference count */
-
-/* ================================================================== */
-/*  UriSourceHandler — no-op IStorageProviderUriSource                */
-/* ================================================================== */
-
-/*
- * IStorageProviderUriSource inherits from IInspectable:
- *   IUnknown:     [0] QI, [1] AddRef, [2] Release
- *   IInspectable: [3] GetIids, [4] GetRuntimeClassName, [5] GetTrustLevel
- *   IStorageProviderUriSource:
- *     [6] GetPathForContentUri(HSTRING contentUri, IUnknown* result)
- *     [7] GetContentInfoForPath(HSTRING path, IUnknown* result)
- *
- * The result parameters are WinRT objects with Status property setters.
- * For the no-op fallback, we just need these methods to return S_OK
- * without touching the result objects — Explorer passes pre-initialized
- * result objects and checks their Status (which defaults to failure).
- */
-
-typedef struct UriSourceHandler UriSourceHandler;
-
-/* Virtual function table for IStorageProviderUriSource */
-typedef struct {
-    /* IUnknown */
-    HRESULT (STDMETHODCALLTYPE *QueryInterface)(UriSourceHandler*, REFIID, void**);
-    ULONG   (STDMETHODCALLTYPE *AddRef)(UriSourceHandler*);
-    ULONG   (STDMETHODCALLTYPE *Release)(UriSourceHandler*);
-    /* IInspectable */
-    HRESULT (STDMETHODCALLTYPE *GetIids)(UriSourceHandler*, ULONG*, IID**);
-    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(UriSourceHandler*, HSTRING*);
-    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(UriSourceHandler*, INT*);
-    /* IStorageProviderUriSource */
-    HRESULT (STDMETHODCALLTYPE *GetPathForContentUri)(UriSourceHandler*, HSTRING, IUnknown*);
-    HRESULT (STDMETHODCALLTYPE *GetContentInfoForPath)(UriSourceHandler*, HSTRING, IUnknown*);
-} UriSourceVtbl;
-
-struct UriSourceHandler {
-    UriSourceVtbl *lpVtbl;
-    LONG cRef;
-};
-
-static HRESULT STDMETHODCALLTYPE Uri_QueryInterface(
-    UriSourceHandler *This, REFIID riid, void **ppv)
-{
-    if (IsEqualIID(riid, &IID_IUnknown) ||
-        IsEqualIID(riid, &IID_IInspectable_local) ||
-        IsEqualIID(riid, &IID_IStorageProviderUriSource))
-    {
-        *ppv = This;
-        InterlockedIncrement(&This->cRef);
-        return S_OK;
-    }
-    *ppv = NULL;
-    return E_NOINTERFACE;
-}
-
-static ULONG STDMETHODCALLTYPE Uri_AddRef(UriSourceHandler *This)
-{
-    return InterlockedIncrement(&This->cRef);
-}
-
-static ULONG STDMETHODCALLTYPE Uri_Release(UriSourceHandler *This)
-{
-    LONG c = InterlockedDecrement(&This->cRef);
-    if (c == 0) {
-        HeapFree(GetProcessHeap(), 0, This);
-        InterlockedDecrement(&g_cRef);
-    }
-    return c;
-}
-
-static HRESULT STDMETHODCALLTYPE Uri_GetIids(
-    UriSourceHandler *This, ULONG *iidCount, IID **iids)
-{
-    (void)This;
-    *iidCount = 0;
-    *iids = NULL;
-    return S_OK;
-}
-
-static HRESULT STDMETHODCALLTYPE Uri_GetRuntimeClassName(
-    UriSourceHandler *This, HSTRING *className)
-{
-    (void)This;
-    *className = NULL;
-    return S_OK;
-}
-
-static HRESULT STDMETHODCALLTYPE Uri_GetTrustLevel(
-    UriSourceHandler *This, INT *trustLevel)
-{
-    (void)This;
-    *trustLevel = 0; /* BaseTrust */
-    return S_OK;
-}
-
-static HRESULT STDMETHODCALLTYPE Uri_GetPathForContentUri(
-    UriSourceHandler *This, HSTRING contentUri, IUnknown *result)
-{
-    (void)This; (void)contentUri; (void)result;
-    /* No-op: result object keeps its default "not found" status */
-    return S_OK;
-}
-
-static HRESULT STDMETHODCALLTYPE Uri_GetContentInfoForPath(
-    UriSourceHandler *This, HSTRING path, IUnknown *result)
-{
-    (void)This; (void)path; (void)result;
-    /* No-op: result object keeps its default "not found" status */
-    return S_OK;
-}
-
-static UriSourceVtbl g_UriVtbl = {
-    Uri_QueryInterface,
-    Uri_AddRef,
-    Uri_Release,
-    Uri_GetIids,
-    Uri_GetRuntimeClassName,
-    Uri_GetTrustLevel,
-    Uri_GetPathForContentUri,
-    Uri_GetContentInfoForPath
-};
 
 /* ================================================================== */
 /*  ThumbnailHandler — IThumbnailProvider via named pipe               */
@@ -568,13 +414,12 @@ static HRESULT STDMETHODCALLTYPE Thumb_GetThumbnail(
 }
 
 /* ================================================================== */
-/*  Class Factory — dispatches to ThumbnailHandler or UriSourceHandler */
+/*  Class Factory                                                      */
 /* ================================================================== */
 
 typedef struct ClassFactory {
     IClassFactoryVtbl *lpVtbl;
     LONG cRef;
-    const GUID *clsid;  /* which CLSID this factory creates */
 } ClassFactory;
 
 static HRESULT STDMETHODCALLTYPE CF_QueryInterface(
@@ -609,45 +454,26 @@ static ULONG STDMETHODCALLTYPE CF_Release(IClassFactory *This)
 static HRESULT STDMETHODCALLTYPE CF_CreateInstance(
     IClassFactory *This, IUnknown *pOuter, REFIID riid, void **ppv)
 {
-    ClassFactory *self = (ClassFactory*)This;
+    ThumbnailHandler *handler;
     HRESULT hr;
+    (void)This;
 
     *ppv = NULL;
     if (pOuter) return CLASS_E_NOAGGREGATION;
 
-    if (IsEqualCLSID(self->clsid, &CLSID_ThumbnailHandler))
-    {
-        ThumbnailHandler *handler = (ThumbnailHandler*)HeapAlloc(
-            GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(ThumbnailHandler));
-        if (!handler) return E_OUTOFMEMORY;
+    handler = (ThumbnailHandler*)HeapAlloc(
+        GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(ThumbnailHandler));
+    if (!handler) return E_OUTOFMEMORY;
 
-        handler->lpVtblInit = &g_InitVtbl;
-        handler->lpVtblThumb = &g_ThumbVtbl;
-        handler->lpVtblItem = &g_ItemVtbl;
-        handler->cRef = 1;
-        InterlockedIncrement(&g_cRef);
+    handler->lpVtblInit = &g_InitVtbl;
+    handler->lpVtblThumb = &g_ThumbVtbl;
+    handler->lpVtblItem = &g_ItemVtbl;
+    handler->cRef = 1;
+    InterlockedIncrement(&g_cRef);
 
-        hr = Init_QueryInterface((IInitializeWithFile*)handler, riid, ppv);
-        Init_Release((IInitializeWithFile*)handler);
-        return hr;
-    }
-
-    if (IsEqualCLSID(self->clsid, &CLSID_UriSourceHandler))
-    {
-        UriSourceHandler *handler = (UriSourceHandler*)HeapAlloc(
-            GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(UriSourceHandler));
-        if (!handler) return E_OUTOFMEMORY;
-
-        handler->lpVtbl = &g_UriVtbl;
-        handler->cRef = 1;
-        InterlockedIncrement(&g_cRef);
-
-        hr = Uri_QueryInterface(handler, riid, ppv);
-        Uri_Release(handler);
-        return hr;
-    }
-
-    return CLASS_E_CLASSNOTAVAILABLE;
+    hr = Init_QueryInterface((IInitializeWithFile*)handler, riid, ppv);
+    Init_Release((IInitializeWithFile*)handler);
+    return hr;
 }
 
 static HRESULT STDMETHODCALLTYPE CF_LockServer(IClassFactory *This, BOOL fLock)
@@ -685,8 +511,7 @@ STDAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, void **ppv)
 
     *ppv = NULL;
 
-    if (!IsEqualCLSID(rclsid, &CLSID_ThumbnailHandler) &&
-        !IsEqualCLSID(rclsid, &CLSID_UriSourceHandler))
+    if (!IsEqualCLSID(rclsid, &CLSID_ThumbnailHandler))
         return CLASS_E_CLASSNOTAVAILABLE;
 
     cf = (ClassFactory*)HeapAlloc(
@@ -695,9 +520,6 @@ STDAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, void **ppv)
 
     cf->lpVtbl = &g_CFVtbl;
     cf->cRef = 1;
-    cf->clsid = IsEqualCLSID(rclsid, &CLSID_ThumbnailHandler)
-        ? &CLSID_ThumbnailHandler
-        : &CLSID_UriSourceHandler;
 
     hr = CF_QueryInterface((IClassFactory*)cf, riid, ppv);
     CF_Release((IClassFactory*)cf);
