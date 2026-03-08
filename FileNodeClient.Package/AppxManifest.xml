@@ -5,8 +5,10 @@
   xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
   xmlns:com="http://schemas.microsoft.com/appx/manifest/com/windows10"
+  xmlns:desktop3="http://schemas.microsoft.com/appx/manifest/desktop/windows10/3"
+  xmlns:desktop4="http://schemas.microsoft.com/appx/manifest/desktop/windows10/4"
   xmlns:cloudFiles="http://schemas.microsoft.com/appx/manifest/cloudstorage/windows10"
-  IgnorableNamespaces="uap desktop rescap com cloudFiles">
+  IgnorableNamespaces="uap desktop desktop3 desktop4 rescap com cloudFiles">
 
   <Identity
     Name="Fastmail.FileNodeClient"
@@ -69,14 +71,25 @@
             <com:ExeServer Executable="FileNodeClient.Service.exe" DisplayName="FileNodeClient Handlers">
               <com:Class Id="A7B3E2D1-9F4C-4A8B-B5E6-1D3C7F8A2E9B" DisplayName="FileNodeClient UriSource" />
             </com:ExeServer>
+            <com:SurrogateServer DisplayName="FileNodeClient ThumbnailProvider">
+              <com:Class Id="B8C4F3E2-1A5D-4B9C-C6F7-2E4D8A9B3F1C"
+                         Path="FileNodeClient.ThumbnailExtension.dll"
+                         ThreadingModel="Both" />
+            </com:SurrogateServer>
           </com:ComServer>
         </com:Extension>
 
-        <cloudFiles:Extension Category="windows.cloudFiles">
-          <cloudFiles:CloudFiles>
-            <cloudFiles:ContentUriSource Clsid="A7B3E2D1-9F4C-4A8B-B5E6-1D3C7F8A2E9B" />
-          </cloudFiles:CloudFiles>
-        </cloudFiles:Extension>
+        <desktop3:Extension Category="windows.cloudFiles">
+          <desktop3:CloudFiles>
+            <!-- Dummy CLSIDs for required-but-unimplemented handlers (not registered, COM returns REGDB_E_CLASSNOTREG) -->
+            <desktop3:CustomStateHandler Clsid="00000000-0000-0000-0000-000000000001" />
+            <desktop3:ThumbnailProviderHandler Clsid="B8C4F3E2-1A5D-4B9C-C6F7-2E4D8A9B3F1C" />
+            <desktop3:ExtendedPropertyHandler Clsid="00000000-0000-0000-0000-000000000002" />
+            <desktop3:BannersHandler Clsid="00000000-0000-0000-0000-000000000003" />
+            <desktop3:CloudFilesContextMenus />
+            <desktop4:ContentUriSource Clsid="A7B3E2D1-9F4C-4A8B-B5E6-1D3C7F8A2E9B" />
+          </desktop3:CloudFiles>
+        </desktop3:Extension>
       </Extensions>
     </Application>
   </Applications>

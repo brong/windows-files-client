@@ -7,3 +7,5 @@ FileNodeClient.Installer/publish/
 FileNodeClient.Package/publish/
 FileNodeClient.Package/DevCert.pfx
 FileNodeClient.Package/mapping.txt
+FileNodeClient.ThumbnailExtension/*.dll
+.claude/

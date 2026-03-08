@@ -33,6 +33,7 @@
 #include <shlwapi.h>
 #include <thumbcache.h>
 #include <objbase.h>
+#include <shobjidl.h>
 
 /* WinRT types not available in MinGW headers */
 #ifndef __HSTRING_defined
@@ -60,6 +61,12 @@ static const GUID CLSID_UriSourceHandler = {
 static const GUID IID_IInitializeWithFile_local = {
     0xB7D14566, 0x0509, 0x4CCE,
     { 0xA7, 0x1F, 0x0A, 0x55, 0x42, 0x33, 0xBD, 0x9B }
+};
+
+/* IInitializeWithItem {7F73BE3F-FB79-493C-A6C7-7EE14E245841} */
+static const GUID IID_IInitializeWithItem_local = {
+    0x7F73BE3F, 0xFB79, 0x493C,
+    { 0xA6, 0xC7, 0x7E, 0xE1, 0x4E, 0x24, 0x58, 0x41 }
 };
 
 /* IThumbnailProvider {E357FCCD-A995-4576-B01F-234630154E96} */
@@ -209,15 +216,28 @@ static UriSourceVtbl g_UriVtbl = {
 /*  ThumbnailHandler — IThumbnailProvider via named pipe               */
 /* ================================================================== */
 
+/* IInitializeWithItem vtable (not in MinGW headers) */
+typedef struct IInitializeWithItemVtbl_local {
+    /* IUnknown */
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(void*, REFIID, void**);
+    ULONG   (STDMETHODCALLTYPE *AddRef)(void*);
+    ULONG   (STDMETHODCALLTYPE *Release)(void*);
+    /* IInitializeWithItem */
+    HRESULT (STDMETHODCALLTYPE *Initialize)(void*, IShellItem*, DWORD);
+} IInitializeWithItemVtbl_local;
+
 typedef struct ThumbnailHandler {
-    IInitializeWithFileVtbl *lpVtblInit;
-    IThumbnailProviderVtbl  *lpVtblThumb;
+    IInitializeWithFileVtbl       *lpVtblInit;
+    IThumbnailProviderVtbl        *lpVtblThumb;
+    IInitializeWithItemVtbl_local *lpVtblItem;
     LONG cRef;
     WCHAR filePath[MAX_PATH];
 } ThumbnailHandler;
 
 #define HANDLER_FROM_ITHUMB(p) \
     ((ThumbnailHandler*)((BYTE*)(p) - offsetof(ThumbnailHandler, lpVtblThumb)))
+#define HANDLER_FROM_IITEM(p) \
+    ((ThumbnailHandler*)((BYTE*)(p) - offsetof(ThumbnailHandler, lpVtblItem)))
 
 /* Forward declarations */
 static HRESULT STDMETHODCALLTYPE Init_QueryInterface(IInitializeWithFile*, REFIID, void**);
@@ -230,12 +250,21 @@ static ULONG   STDMETHODCALLTYPE Thumb_AddRef(IThumbnailProvider*);
 static ULONG   STDMETHODCALLTYPE Thumb_Release(IThumbnailProvider*);
 static HRESULT STDMETHODCALLTYPE Thumb_GetThumbnail(IThumbnailProvider*, UINT, HBITMAP*, WTS_ALPHATYPE*);
 
+static HRESULT STDMETHODCALLTYPE Item_QueryInterface(void*, REFIID, void**);
+static ULONG   STDMETHODCALLTYPE Item_AddRef(void*);
+static ULONG   STDMETHODCALLTYPE Item_Release(void*);
+static HRESULT STDMETHODCALLTYPE Item_Initialize(void*, IShellItem*, DWORD);
+
 static IInitializeWithFileVtbl g_InitVtbl = {
     Init_QueryInterface, Init_AddRef, Init_Release, Init_Initialize
 };
 
 static IThumbnailProviderVtbl g_ThumbVtbl = {
     Thumb_QueryInterface, Thumb_AddRef, Thumb_Release, Thumb_GetThumbnail
+};
+
+static IInitializeWithItemVtbl_local g_ItemVtbl = {
+    Item_QueryInterface, Item_AddRef, Item_Release, Item_Initialize
 };
 
 static HRESULT STDMETHODCALLTYPE Init_QueryInterface(
@@ -248,6 +277,12 @@ static HRESULT STDMETHODCALLTYPE Init_QueryInterface(
     {
         *ppv = &self->lpVtblInit;
         Init_AddRef(This);
+        return S_OK;
+    }
+    if (IsEqualIID(riid, &IID_IInitializeWithItem_local))
+    {
+        *ppv = &self->lpVtblItem;
+        InterlockedIncrement(&self->cRef);
         return S_OK;
     }
     if (IsEqualIID(riid, &IID_IThumbnailProvider_local))
@@ -285,6 +320,44 @@ static HRESULT STDMETHODCALLTYPE Init_Initialize(
     if (!pszFilePath) return E_INVALIDARG;
     wcsncpy_s(self->filePath, MAX_PATH, pszFilePath, _TRUNCATE);
     return S_OK;
+}
+
+/* IInitializeWithItem implementation */
+static HRESULT STDMETHODCALLTYPE Item_QueryInterface(void *This, REFIID riid, void **ppv)
+{
+    ThumbnailHandler *self = HANDLER_FROM_IITEM(This);
+    return Init_QueryInterface((IInitializeWithFile*)self, riid, ppv);
+}
+
+static ULONG STDMETHODCALLTYPE Item_AddRef(void *This)
+{
+    ThumbnailHandler *self = HANDLER_FROM_IITEM(This);
+    return InterlockedIncrement(&self->cRef);
+}
+
+static ULONG STDMETHODCALLTYPE Item_Release(void *This)
+{
+    ThumbnailHandler *self = HANDLER_FROM_IITEM(This);
+    return Init_Release((IInitializeWithFile*)self);
+}
+
+static HRESULT STDMETHODCALLTYPE Item_Initialize(void *This, IShellItem *psi, DWORD grfMode)
+{
+    ThumbnailHandler *self = HANDLER_FROM_IITEM(This);
+    LPWSTR pszPath = NULL;
+    HRESULT hr;
+    (void)grfMode;
+
+    if (!psi) return E_INVALIDARG;
+
+    hr = IShellItem_GetDisplayName(psi, SIGDN_FILESYSPATH, &pszPath);
+    if (SUCCEEDED(hr) && pszPath) {
+        wcsncpy_s(self->filePath, MAX_PATH, pszPath, _TRUNCATE);
+        CoTaskMemFree(pszPath);
+        return S_OK;
+    }
+
+    return hr;
 }
 
 static HRESULT STDMETHODCALLTYPE Thumb_QueryInterface(
@@ -550,6 +623,7 @@ static HRESULT STDMETHODCALLTYPE CF_CreateInstance(
 
         handler->lpVtblInit = &g_InitVtbl;
         handler->lpVtblThumb = &g_ThumbVtbl;
+        handler->lpVtblItem = &g_ItemVtbl;
         handler->cRef = 1;
         InterlockedIncrement(&g_cRef);
 

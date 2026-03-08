@@ -20,7 +20,9 @@ public sealed class ThumbnailPipeServer : IDisposable
 
     public void Start()
     {
-        RegisterNativeDll();
+        // Don't register CLSIDs in real HKCU — the MSIX manifest's
+        // com:SurrogateServer handles COM registration via virtual registry.
+        // Real HKCU entries conflict with/override the MSIX registration.
         _listenTask = Task.Run(() => ListenLoop(_cts.Token));
         Log.Info("Thumbnail pipe server started");
     }
