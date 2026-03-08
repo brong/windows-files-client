@@ -110,7 +110,7 @@ Several cfapi features require capabilities beyond what the current JMAP FileNod
 
 ### ~~Thumbnail downloads~~ ✓ Resolved (Blob/convert implemented)
 
-~~The `IThumbnailProvider` COM handler needs to return image data for dehydrated files without hydrating them.~~ Implemented via `Blob/convert` with `resizeImage` action from the blobext capability. The client calls `ConvertImageAsync(blobId, width, height)` to get a server-generated thumbnail at the requested size, then downloads the resulting blob as PNG.
+~~The `IThumbnailProvider` COM handler needs to return image data for dehydrated files without hydrating them.~~ Implemented via `Blob/convert` with `imageConvert` recipe from the blobext capability (draft-gondwana-jmap-blobext). The client calls `ConvertImageAsync(blobId, width, height)` to get a server-generated thumbnail at the requested size, then downloads the resulting blob as PNG.
 
 ### ~~Web URL per node~~ ✓ Resolved (URI Source implemented)
 

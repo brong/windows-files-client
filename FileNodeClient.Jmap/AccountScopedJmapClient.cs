@@ -594,7 +594,7 @@ public class AccountScopedJmapClient : IJmapClient
             {
                 [createId] = new
                 {
-                    imageResize = new { blobId, width, height, type = mimeType },
+                    imageConvert = new { blobId, width, height, type = mimeType },
                 },
             },
         }, ct);
