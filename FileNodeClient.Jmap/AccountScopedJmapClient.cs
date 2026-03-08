@@ -392,8 +392,9 @@ public class AccountScopedJmapClient : IJmapClient
         return (allIds.ToArray(), queryState, total > 0 ? total : allIds.Count);
     }
 
-    public async Task<(FileNode[] Nodes, string State)> GetFileNodesByIdsPagedAsync(string[] ids, int pageSize = 1024, CancellationToken ct = default)
+    public async Task<(FileNode[] Nodes, string State)> GetFileNodesByIdsPagedAsync(string[] ids, int pageSize = 0, CancellationToken ct = default)
     {
+        if (pageSize <= 0) pageSize = Session.MaxObjectsInGet;
         var allNodes = new List<FileNode>();
         string state = "";
 
@@ -609,6 +610,53 @@ public class AccountScopedJmapClient : IJmapClient
             throw new InvalidOperationException("Blob/convert returned no result");
 
         return created.Id;
+    }
+
+    public async Task<Dictionary<string, string>> ConvertImagesAsync(
+        IReadOnlyList<(string BlobId, uint Width, uint Height)> items,
+        string mimeType = "image/png", CancellationToken ct = default)
+    {
+        if (items.Count == 0)
+            return new Dictionary<string, string>();
+
+        var maxPerRequest = Session.MaxObjectsInSet;
+        var allConverted = new Dictionary<string, string>();
+
+        for (int offset = 0; offset < items.Count; offset += maxPerRequest)
+        {
+            var chunk = items.Skip(offset).Take(maxPerRequest).ToList();
+            var create = new Dictionary<string, object>();
+            var idToBlobId = new Dictionary<string, string>();
+            for (int i = 0; i < chunk.Count; i++)
+            {
+                var createId = $"t{i}";
+                var (blobId, width, height) = chunk[i];
+                create[createId] = new
+                {
+                    imageConvert = new { blobId, width, height, type = mimeType, autoOrient = true },
+                };
+                idToBlobId[createId] = blobId;
+            }
+
+            var result = await CallAsync(BlobExtUsing, "Blob/convert", new
+            {
+                accountId = _accountId,
+                create,
+            }, ct);
+
+            var response = result.Deserialize<BlobUploadResponse>(JmapSerializerOptions.Default)
+                ?? throw new InvalidOperationException("Failed to parse Blob/convert response");
+
+            if (response.Created != null)
+            {
+                foreach (var (createId, item) in response.Created)
+                {
+                    if (idToBlobId.TryGetValue(createId, out var blobId))
+                        allConverted[blobId] = item.Id;
+                }
+            }
+        }
+        return allConverted;
     }
 
     /// <summary>

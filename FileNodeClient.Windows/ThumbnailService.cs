@@ -10,6 +10,11 @@ namespace FileNodeClient.Windows;
 /// Static registry bridging the COM ThumbnailHandler to running SyncEngine instances.
 /// The COM handler runs in the Service.exe process (ExeServer via MSIX manifest),
 /// so it has direct access to JMAP clients and mappings — no IPC needed.
+///
+/// Thumbnail requests from Explorer arrive concurrently (one per file). Rather than
+/// issuing a separate Blob/convert HTTP request per file, we batch them: requests
+/// accumulate for up to 20ms, then a single Blob/convert call converts all blobs,
+/// and the resulting PNGs are downloaded concurrently.
 /// </summary>
 public static class ThumbnailService
 {
@@ -30,6 +35,22 @@ public static class ThumbnailService
 
     // Timeout for server requests — Explorer will abandon slow handlers
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(10);
+
+    // Batching: accumulate requests for BatchDelay, then fire one Blob/convert
+    private static readonly TimeSpan BatchDelay = TimeSpan.FromMilliseconds(20);
+
+    // Limit concurrent blob downloads to avoid hammering the server
+    private static readonly SemaphoreSlim _downloadSemaphore = new(4);
+
+    private record PendingRequest(
+        string SyncRootPath,
+        string BlobId,
+        uint Cx,
+        TaskCompletionSource<byte[]?> Tcs);
+
+    private static readonly object _batchLock = new();
+    private static List<PendingRequest> _pendingBatch = new();
+    private static Timer? _batchTimer;
 
     public static void Register(string syncRootPath, IJmapClient client,
         Func<string, string?> getBlobId)
@@ -61,8 +82,7 @@ public static class ThumbnailService
 
     /// <summary>
     /// Get a thumbnail for the given node. Returns PNG bytes or null on failure.
-    /// Called by the COM ThumbnailHandler on the STA thread — all async work
-    /// is dispatched to the thread pool to avoid STA deadlocks.
+    /// Called from pipe server threads — blocks until the batch completes.
     /// </summary>
     public static byte[]? GetThumbnail(string syncRootPath, string nodeId, uint cx)
     {
@@ -79,59 +99,168 @@ public static class ThumbnailService
             return null;
         }
 
-        Log.Debug($"ThumbnailService: requesting thumbnail for blob {blobId} at {cx}px");
-
         // Check cache
         var cacheKey = (blobId, cx);
         if (_cache.TryGetValue(cacheKey, out var cached))
             return cached;
 
-        // Skip blobIds that recently failed (server may not support Blob/convert yet)
+        // Skip blobIds that recently failed
         if (_failedBlobIds.TryGetValue(blobId, out var failedAt)
             && DateTime.UtcNow - failedAt < FailureCooldown)
             return null;
 
+        Log.Debug($"ThumbnailService: queuing thumbnail for blob {blobId} at {cx}px");
+
+        // Enqueue into the batch and wait for result
+        var tcs = new TaskCompletionSource<byte[]?>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        lock (_batchLock)
+        {
+            _pendingBatch.Add(new PendingRequest(syncRootPath, blobId, cx, tcs));
+
+            // Start or reset the batch timer
+            if (_batchTimer == null)
+                _batchTimer = new Timer(OnBatchTimerFired, null, BatchDelay, Timeout.InfiniteTimeSpan);
+            else
+                _batchTimer.Change(BatchDelay, Timeout.InfiniteTimeSpan);
+        }
+
         try
         {
-            // Run async work on thread pool to avoid STA deadlock
-            var task = Task.Run(async () =>
-            {
-                using var cts = new CancellationTokenSource(RequestTimeout);
-
-                // Blob/convert to get a resized thumbnail blobId
-                var thumbnailBlobId = await reg.Client.ConvertImageAsync(
-                    blobId, cx, cx, "image/png", cts.Token);
-
-                // Download the thumbnail blob
-                using var stream = await reg.Client.DownloadBlobAsync(
-                    thumbnailBlobId, "image/png", null, cts.Token);
-
-                using var ms = new MemoryStream();
-                await stream.CopyToAsync(ms, cts.Token);
-                return ms.ToArray();
-            });
-
-            var pngBytes = task.GetAwaiter().GetResult();
-
-            // Evict oldest entries if cache is full
-            if (_cache.Count >= MaxCacheEntries)
-            {
-                int toRemove = _cache.Count / 2;
-                foreach (var key in _cache.Keys.Take(toRemove))
-                    _cache.TryRemove(key, out _);
-            }
-
-            _cache[cacheKey] = pngBytes;
-            // Clear any previous failure record on success
-            _failedBlobIds.TryRemove(blobId, out _);
-            return pngBytes;
+            return tcs.Task.GetAwaiter().GetResult();
         }
         catch (Exception ex)
         {
-            Log.Error($"ThumbnailService: failed for node {nodeId}: {ex.Message}");
-            _failedBlobIds[blobId] = DateTime.UtcNow;
+            Log.Error($"ThumbnailService: batch failed for node {nodeId}: {ex.Message}");
             return null;
         }
+    }
+
+    private static void OnBatchTimerFired(object? state)
+    {
+        List<PendingRequest> batch;
+        lock (_batchLock)
+        {
+            batch = _pendingBatch;
+            _pendingBatch = new List<PendingRequest>();
+        }
+
+        if (batch.Count == 0)
+            return;
+
+        // Fire and forget — each TCS will be completed
+        _ = Task.Run(() => ProcessBatchAsync(batch));
+    }
+
+    private static async Task ProcessBatchAsync(List<PendingRequest> batch)
+    {
+        Log.Info($"ThumbnailService: processing batch of {batch.Count} thumbnail(s)");
+
+        // Group by sync root (all should typically be the same)
+        var byRoot = batch.GroupBy(r => r.SyncRootPath, StringComparer.OrdinalIgnoreCase);
+
+        foreach (var group in byRoot)
+        {
+            if (!_registrations.TryGetValue(group.Key, out var reg))
+            {
+                foreach (var req in group)
+                    req.Tcs.TrySetResult(null);
+                continue;
+            }
+
+            var requests = group.ToList();
+
+            // Deduplicate by (blobId, cx) — multiple requests for the same blob
+            // share one conversion
+            var unique = requests
+                .GroupBy(r => (r.BlobId, r.Cx))
+                .Select(g => g.First())
+                .ToList();
+
+            try
+            {
+                using var cts = new CancellationTokenSource(RequestTimeout);
+
+                // Single batched Blob/convert call
+                var items = unique
+                    .Select(r => (r.BlobId, r.Cx, r.Cx))
+                    .ToList();
+
+                var converted = await reg.Client.ConvertImagesAsync(items, "image/png", cts.Token);
+
+                Log.Debug($"ThumbnailService: Blob/convert returned {converted.Count}/{unique.Count} thumbnails");
+
+                // Download all converted blobs concurrently (throttled)
+                var downloadTasks = converted.Select(async kv =>
+                {
+                    var (blobId, thumbBlobId) = kv;
+                    await _downloadSemaphore.WaitAsync(cts.Token);
+                    try
+                    {
+                        using var stream = await reg.Client.DownloadBlobAsync(
+                            thumbBlobId, "image/png", null, cts.Token);
+                        using var ms = new MemoryStream();
+                        await stream.CopyToAsync(ms, cts.Token);
+                        return (BlobId: blobId, Data: ms.ToArray());
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Error($"ThumbnailService: download failed for blob {blobId}: {ex.Message}");
+                        return (BlobId: blobId, Data: (byte[]?)null);
+                    }
+                    finally
+                    {
+                        _downloadSemaphore.Release();
+                    }
+                }).ToList();
+
+                var results = await Task.WhenAll(downloadTasks);
+
+                // Build lookup from blobId → PNG bytes
+                var pngByBlobId = new Dictionary<string, byte[]?>();
+                foreach (var (blobId, data) in results)
+                    pngByBlobId[blobId] = data;
+
+                // Complete all waiting callers
+                foreach (var req in requests)
+                {
+                    byte[]? pngBytes = null;
+                    if (pngByBlobId.TryGetValue(req.BlobId, out var data) && data != null)
+                    {
+                        pngBytes = data;
+                        CacheResult(req.BlobId, req.Cx, pngBytes);
+                        _failedBlobIds.TryRemove(req.BlobId, out _);
+                    }
+                    else if (!converted.ContainsKey(req.BlobId))
+                    {
+                        // Blob/convert didn't return this one — record failure
+                        _failedBlobIds[req.BlobId] = DateTime.UtcNow;
+                    }
+                    req.Tcs.TrySetResult(pngBytes);
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Error($"ThumbnailService: batch Blob/convert failed: {ex.Message}");
+                foreach (var req in requests)
+                {
+                    _failedBlobIds[req.BlobId] = DateTime.UtcNow;
+                    req.Tcs.TrySetResult(null);
+                }
+            }
+        }
+    }
+
+    private static void CacheResult(string blobId, uint cx, byte[] pngBytes)
+    {
+        // Evict oldest entries if cache is full
+        if (_cache.Count >= MaxCacheEntries)
+        {
+            int toRemove = _cache.Count / 2;
+            foreach (var key in _cache.Keys.Take(toRemove))
+                _cache.TryRemove(key, out _);
+        }
+        _cache[(blobId, cx)] = pngBytes;
     }
 
     /// <summary>

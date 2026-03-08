@@ -78,6 +78,21 @@ public class JmapSession
 
     public bool HasCapability(string capability) => Capabilities.ContainsKey(capability);
 
+    // JMAP core capability limits (RFC 8620 §2)
+    public int MaxCallsInRequest => GetCoreInt("maxCallsInRequest", 16);
+    public int MaxObjectsInGet => GetCoreInt("maxObjectsInGet", 500);
+    public int MaxObjectsInSet => GetCoreInt("maxObjectsInSet", 500);
+    public int MaxConcurrentRequests => GetCoreInt("maxConcurrentRequests", 4);
+
+    private int GetCoreInt(string property, int defaultValue)
+    {
+        if (!Capabilities.TryGetValue("urn:ietf:params:jmap:core", out var core))
+            return defaultValue;
+        if (core.TryGetProperty(property, out var val) && val.ValueKind == JsonValueKind.Number)
+            return val.GetInt32();
+        return defaultValue;
+    }
+
     public long? GetChunkSize(string accountId)
     {
         if (!Accounts.TryGetValue(accountId, out var account))
