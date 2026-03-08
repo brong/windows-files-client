@@ -383,7 +383,8 @@ public class SyncEngine : IDisposable
             ApplyWriteProtection(_syncRootPath);
         }
 
-        _ = PushStatusColumnsAsync(allNodes);
+        // Disabled — PushStatusColumnsAsync triggers Explorer crash in windows.storage.dll
+        // _ = PushStatusColumnsAsync(allNodes);
 
         SaveNodeCache(state);
         ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_IDLE);
@@ -981,7 +982,7 @@ public class SyncEngine : IDisposable
             }
         }
 
-        _ = PushStatusColumnsAsync(sortedUpdatedNodes.ToArray());
+        // _ = PushStatusColumnsAsync(sortedUpdatedNodes.ToArray());
 
         // Process created nodes — create placeholders for new items
         foreach (var node in createdNodes)
@@ -1034,7 +1035,7 @@ public class SyncEngine : IDisposable
             ApplyWriteProtection(childPath);
         }
 
-        _ = PushStatusColumnsAsync(createdNodes);
+        // _ = PushStatusColumnsAsync(createdNodes);
 
         foreach (var destroyedId in changes.Destroyed)
         {
@@ -1133,7 +1134,7 @@ public class SyncEngine : IDisposable
             var contentType = ResolveContentType(change.FullPath);
 
             _outbox.EnqueueContentChange(change.FullPath, nodeId, contentType, isDirectory);
-            FireAndForgetStatus(change.FullPath, "Pending", isDirectory);
+            // FireAndForgetStatus(change.FullPath, "Pending", isDirectory);
         }
     }
 

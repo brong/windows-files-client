@@ -90,9 +90,10 @@ internal class SyncRoot : IDisposable
         if (recycleBinUri != null)
             info.RecycleBinUri = recycleBinUri;
 
-        // Custom columns disabled — StorageProviderItemPropertyDefinitions causes
-        // Explorer crash (ACCESS_VIOLATION in windows.storage.dll) on Windows 11
-        // 10.0.26100.7840. Re-enable when a fixed Windows update is available.
+        // Custom columns disabled — both StorageProviderItemPropertyDefinitions
+        // (registration) and StorageProviderItemProperty pushes cause Explorer
+        // crash (ACCESS_VIOLATION in windows.storage.dll 10.0.26100.7840).
+        // See also PushStatusColumnsAsync/FireAndForgetStatus in SyncEngine.cs.
         // info.StorageProviderItemPropertyDefinitions.Add(
         //     new StorageProviderItemPropertyDefinition
         //     {

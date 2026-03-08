@@ -40,7 +40,7 @@ static class AppLogger
 
         if (debug)
         {
-            _originalConsole = Console.Error;
+            _originalConsole = Console.Out;
             Log.MinLevel = LogLevel.Debug;
 
             try
