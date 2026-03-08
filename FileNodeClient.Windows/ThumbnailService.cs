@@ -1,5 +1,5 @@
 using System.Collections.Concurrent;
-using FileNodeClient.Ipc;
+using FileNodeClient.Logging;
 using FileNodeClient.Jmap;
 using Windows.Win32;
 using Windows.Win32.Storage.CloudFilters;

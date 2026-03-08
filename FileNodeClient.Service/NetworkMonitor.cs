@@ -1,4 +1,4 @@
-using FileNodeClient.Ipc;
+using FileNodeClient.Logging;
 using Windows.Networking.Connectivity;
 
 namespace FileNodeClient.Service;

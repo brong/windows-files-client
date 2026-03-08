@@ -1,6 +1,6 @@
 using System.Diagnostics;
 using System.Text;
-using FileNodeClient.Ipc;
+using FileNodeClient.Logging;
 
 namespace FileNodeClient.Service;
 

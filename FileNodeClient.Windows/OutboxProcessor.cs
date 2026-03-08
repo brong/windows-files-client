@@ -2,7 +2,7 @@ using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using Microsoft.Win32.SafeHandles;
-using FileNodeClient.Ipc;
+using FileNodeClient.Logging;
 using FileNodeClient.Jmap;
 using Windows.Win32;
 using Windows.Win32.Storage.CloudFilters;

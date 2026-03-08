@@ -1,4 +1,4 @@
-using FileNodeClient.Ipc;
+using FileNodeClient.Logging;
 using FileNodeClient.Service;
 using FileNodeClient.Windows;
 using Microsoft.Extensions.DependencyInjection;

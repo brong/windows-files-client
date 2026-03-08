@@ -1,4 +1,4 @@
-using FileNodeClient.Ipc;
+using FileNodeClient.Logging;
 
 namespace FileNodeClient.App;
 

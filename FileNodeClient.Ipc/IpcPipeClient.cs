@@ -1,3 +1,4 @@
+using FileNodeClient.Logging;
 using System.IO.Pipes;
 using System.Text;
 

@@ -1,6 +1,6 @@
 using System.Runtime.InteropServices;
 using System.Text;
-using FileNodeClient.Ipc;
+using FileNodeClient.Logging;
 using Windows.Win32;
 using Windows.Win32.Storage.CloudFilters;
 using Windows.Storage.Provider;

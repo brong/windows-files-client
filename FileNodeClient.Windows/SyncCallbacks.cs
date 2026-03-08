@@ -5,7 +5,7 @@ using System.Text;
 using Windows.Win32;
 using Windows.Win32.Foundation;
 using Windows.Win32.Storage.CloudFilters;
-using FileNodeClient.Ipc;
+using FileNodeClient.Logging;
 using FileNodeClient.Jmap;
 using FileNodeClient.Jmap.Models;
 

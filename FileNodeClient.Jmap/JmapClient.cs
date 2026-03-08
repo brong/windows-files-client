@@ -2,7 +2,7 @@ using System.Buffers;
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text.Json;
-using FileNodeClient.Ipc;
+using FileNodeClient.Logging;
 using FileNodeClient.Jmap.Auth;
 using FileNodeClient.Jmap.Models;
 

@@ -1,5 +1,5 @@
 using System.Collections.Concurrent;
-using FileNodeClient.Ipc;
+using FileNodeClient.Logging;
 
 namespace FileNodeClient.Windows;
 

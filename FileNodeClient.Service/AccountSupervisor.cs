@@ -1,5 +1,5 @@
 using System.Threading.Channels;
-using FileNodeClient.Ipc;
+using FileNodeClient.Logging;
 using FileNodeClient.Jmap;
 using FileNodeClient.Jmap.Models;
 using FileNodeClient.Windows;

@@ -3,7 +3,7 @@ using System.Text;
 using Windows.Win32;
 using Windows.Win32.Storage.CloudFilters;
 using Windows.Win32.Storage.FileSystem;
-using FileNodeClient.Ipc;
+using FileNodeClient.Logging;
 using FileNodeClient.Jmap.Models;
 
 namespace FileNodeClient.Windows;

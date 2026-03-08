@@ -1,6 +1,6 @@
 using System.IO.Pipes;
 using System.Text;
-using FileNodeClient.Ipc;
+using FileNodeClient.Logging;
 
 namespace FileNodeClient.Windows;
 

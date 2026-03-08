@@ -2,7 +2,7 @@ using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using FileNodeClient.Ipc;
+using FileNodeClient.Logging;
 
 namespace FileNodeClient.Jmap.Auth;
 

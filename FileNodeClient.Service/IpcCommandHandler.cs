@@ -1,4 +1,5 @@
 using FileNodeClient.Ipc;
+using FileNodeClient.Logging;
 using FileNodeClient.Windows;
 
 namespace FileNodeClient.Service;

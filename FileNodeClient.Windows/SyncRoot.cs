@@ -6,7 +6,7 @@ using Windows.Storage;
 using Windows.Storage.Provider;
 using Windows.Win32;
 using Windows.Win32.Storage.CloudFilters;
-using FileNodeClient.Ipc;
+using FileNodeClient.Logging;
 
 namespace FileNodeClient.Windows;
 

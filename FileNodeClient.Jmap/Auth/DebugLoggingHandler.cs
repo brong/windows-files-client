@@ -1,5 +1,5 @@
 using System.Text.Json;
-using FileNodeClient.Ipc;
+using FileNodeClient.Logging;
 
 namespace FileNodeClient.Jmap.Auth;
 

@@ -6,4 +6,8 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\FileNodeClient.Logging\FileNodeClient.Logging.csproj" />
+  </ItemGroup>
+
 </Project>

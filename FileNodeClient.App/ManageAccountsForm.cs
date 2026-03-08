@@ -1,5 +1,6 @@
 using System.Drawing;
 using FileNodeClient.Ipc;
+using FileNodeClient.Logging;
 using FileNodeClient.Jmap.Auth;
 
 namespace FileNodeClient.App;

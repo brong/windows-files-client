@@ -1,6 +1,6 @@
 using System.Net;
 using System.Net.Http.Headers;
-using FileNodeClient.Ipc;
+using FileNodeClient.Logging;
 
 namespace FileNodeClient.Jmap.Auth;
 

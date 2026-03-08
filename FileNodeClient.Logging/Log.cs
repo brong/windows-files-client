@@ -1,4 +1,4 @@
-namespace FileNodeClient.Ipc;
+namespace FileNodeClient.Logging;
 
 public enum LogLevel { Debug, Info, Warning, Error }
 

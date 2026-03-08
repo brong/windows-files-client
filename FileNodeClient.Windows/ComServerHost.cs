@@ -1,5 +1,5 @@
 using System.Runtime.InteropServices;
-using FileNodeClient.Ipc;
+using FileNodeClient.Logging;
 
 namespace FileNodeClient.Windows;
 
