@@ -1,0 +1,130 @@
+#!/bin/bash
+# Build a signed MSIX package from WSL2
+# Usage: ./build-msix.sh [commit]
+#   No args: builds from current working tree
+#   With arg: builds from that commit via worktree
+# Output: FileNodeClient.Package/bin/Release/FileNodeClient.msix
+
+set -e
+
+SRCDIR="/home/brong/src/files-client"
+BUILDDIR="/mnt/c/Users/brong/AppData/Local/Temp/files-client-msix"
+WORKTREE=""
+
+if [ -n "$1" ]; then
+    WORKTREE="/tmp/fnc-msix-$$"
+    echo "=== Creating worktree at $1 ==="
+    cd "$SRCDIR"
+    git worktree add "$WORKTREE" "$1"
+    SRCDIR="$WORKTREE"
+fi
+
+cleanup_worktree() {
+    if [ -n "$WORKTREE" ] && [ -d "$WORKTREE" ]; then
+        cd /home/brong/src/files-client
+        git worktree remove "$WORKTREE" 2>/dev/null || true
+    fi
+}
+trap cleanup_worktree EXIT
+
+WINSRC="$SRCDIR/windows"
+
+echo "=== Rsync to build dir ==="
+rm -rf "$BUILDDIR"
+rsync -a --exclude='.git' --exclude='.claude' --exclude='bin' --exclude='obj' "$WINSRC/" "$BUILDDIR/"
+
+WINBUILD=$(wslpath -w "$BUILDDIR")
+PUBLISHDIR="$BUILDDIR/FileNodeClient.Package/publish"
+
+echo "=== Publishing Service ==="
+cd "$BUILDDIR"
+dotnet.exe publish FileNodeClient.Service/FileNodeClient.Service.csproj -c Release -r win-x64 --self-contained -o FileNodeClient.Package/publish 2>&1 | tail -3
+
+echo "=== Publishing App ==="
+dotnet.exe publish FileNodeClient.App/FileNodeClient.App.csproj -c Release -r win-x64 --self-contained -o FileNodeClient.Package/publish 2>&1 | tail -3
+
+echo "=== Building native thumbnail DLL ==="
+if [ -f "$WINSRC/FileNodeClient.ThumbnailExtension/ThumbnailHandler.c" ]; then
+    x86_64-w64-mingw32-gcc -shared -O2 \
+        -o "$PUBLISHDIR/FileNodeClient.ThumbnailExtension.dll" \
+        "$WINSRC/FileNodeClient.ThumbnailExtension/ThumbnailHandler.c" \
+        "$WINSRC/FileNodeClient.ThumbnailExtension/ThumbnailHandler.def" \
+        -lole32 -lwindowscodecs -lgdi32 -luser32 -luuid
+    echo "Native DLL built"
+else
+    echo "No ThumbnailHandler.c found, skipping native DLL"
+fi
+
+echo "=== Copying manifest and assets ==="
+cp "$BUILDDIR/FileNodeClient.Package/AppxManifest.xml" "$PUBLISHDIR/"
+cp -r "$BUILDDIR/FileNodeClient.Package/Assets" "$PUBLISHDIR/"
+
+# Find Windows SDK tools
+SDKBIN=$(powershell.exe -NoProfile -Command '
+    $root = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin"
+    if (Test-Path $root) {
+        Get-ChildItem $root -Directory -Filter "10.*" |
+            Sort-Object Name -Descending |
+            ForEach-Object {
+                $x = Join-Path $_.FullName "x64\makeappx.exe"
+                if (Test-Path $x) { Split-Path $x; break }
+            }
+    }
+' | tr -d '\r')
+
+if [ -z "$SDKBIN" ]; then
+    echo "ERROR: Windows SDK not found (need makeappx.exe)"
+    exit 1
+fi
+echo "Using SDK tools from: $SDKBIN"
+# Convert Windows path to WSL path for direct invocation
+SDKBIN_WSL=$(wslpath "$SDKBIN")
+
+echo "=== Creating self-signed cert (if needed) ==="
+CERT_PFX="$BUILDDIR/FileNodeClient.Package/DevCert.pfx"
+if [ ! -f "$CERT_PFX" ]; then
+    powershell.exe -NoProfile -Command "
+        \$cert = New-SelfSignedCertificate -Type Custom -Subject 'CN=Fastmail Pty Ltd' -KeyUsage DigitalSignature -FriendlyName 'FileNodeClient Dev' -CertStoreLocation 'Cert:\CurrentUser\My' -TextExtension @('2.5.29.37={text}1.3.6.1.5.5.7.3.3','2.5.29.19={text}')
+        Export-PfxCertificate -Cert \$cert -FilePath '$(wslpath -w "$CERT_PFX")' -Password (ConvertTo-SecureString -String 'devpass' -Force -AsPlainText)
+    " || echo "WARNING: Certificate creation failed"
+fi
+
+echo "=== Building mapping file ==="
+PKGDIR="$BUILDDIR/FileNodeClient.Package"
+WINPKGDIR=$(wslpath -w "$PKGDIR")
+MAPFILE="$PKGDIR/mapping.txt"
+{
+    echo "[Files]"
+    echo "\"$WINPKGDIR\\AppxManifest.xml\" \"AppxManifest.xml\""
+    echo "\"$WINPKGDIR\\Assets\\StoreLogo.png\" \"Assets\\StoreLogo.png\""
+    echo "\"$WINPKGDIR\\Assets\\Square44x44Logo.png\" \"Assets\\Square44x44Logo.png\""
+    echo "\"$WINPKGDIR\\Assets\\Square150x150Logo.png\" \"Assets\\Square150x150Logo.png\""
+    for f in "$PUBLISHDIR"/*.exe; do
+        [ -f "$f" ] && echo "\"$WINPKGDIR\\publish\\$(basename "$f")\" \"$(basename "$f")\""
+    done
+    for f in "$PUBLISHDIR"/*.dll; do
+        [ -f "$f" ] && echo "\"$WINPKGDIR\\publish\\$(basename "$f")\" \"$(basename "$f")\""
+    done
+    for f in "$PUBLISHDIR"/*.json; do
+        [ -f "$f" ] && echo "\"$WINPKGDIR\\publish\\$(basename "$f")\" \"$(basename "$f")\""
+    done
+} > "$MAPFILE"
+
+echo "=== Packing MSIX ==="
+mkdir -p "$PKGDIR/bin/Release"
+MSIX_OUTPUT="$PKGDIR/bin/Release/FileNodeClient.msix"
+WINMSIX=$(wslpath -w "$MSIX_OUTPUT")
+
+"$SDKBIN_WSL/makeappx.exe" pack /f "$(wslpath -w "$MAPFILE")" /p "$WINMSIX" /o
+
+echo "=== Signing MSIX ==="
+if [ -f "$CERT_PFX" ]; then
+    "$SDKBIN_WSL/signtool.exe" sign /fd SHA256 /a /f "$(wslpath -w "$CERT_PFX")" /p devpass "$WINMSIX"
+fi
+
+# Copy back to source tree
+mkdir -p "$WINSRC/FileNodeClient.Package/bin/Release"
+cp "$MSIX_OUTPUT" "$WINSRC/FileNodeClient.Package/bin/Release/"
+
+echo ""
+echo "=== Success: FileNodeClient.Package/bin/Release/FileNodeClient.msix ==="

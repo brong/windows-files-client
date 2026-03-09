@@ -22,9 +22,10 @@ sealed class IpcCommandHandler
 
     public async Task<string> HandleAsync(IpcRequest request, CancellationToken ct)
     {
+        Log.Debug($"[IPC] Request id={request.Id} method={request.Method}");
         try
         {
-            return request.Method switch
+            var response = request.Method switch
             {
                 "ping" => IpcSerializer.SerializeResponse(request.Id),
                 "getStatus" => IpcSerializer.SerializeResponse(request.Id, BuildStatusSnapshot()),
@@ -46,10 +47,12 @@ sealed class IpcCommandHandler
                 "syncNow" => HandleSyncNow(request),
                 _ => IpcSerializer.SerializeError(request.Id, $"Unknown method: {request.Method}"),
             };
+            Log.Debug($"[IPC] Response id={request.Id} method={request.Method} ok");
+            return response;
         }
         catch (Exception ex)
         {
-            Log.Error($"[IPC] Error handling {request.Method}: {ex.Message}");
+            Log.Error($"[IPC] Error id={request.Id} method={request.Method}: {ex.Message}");
             return IpcSerializer.SerializeError(request.Id, ex.Message);
         }
     }

@@ -797,7 +797,7 @@ sealed class LoginManager : IDisposable
         }
         catch (Exception ex)
         {
-            Log.Error($"Failed to start supervisor for {displayName}: {ex.Message}");
+            Log.Error($"Failed to start supervisor for {displayName}: {ex}");
             lock (_lock)
                 _supervisors.Remove(supervisor);
             supervisor.Dispose();
@@ -967,7 +967,7 @@ sealed class LoginManager : IDisposable
             }
             catch (Exception ex)
             {
-                Log.Error($"Failed to start supervisor for {displayName}: {ex.Message}");
+                Log.Error($"Failed to start supervisor for {displayName}: {ex}");
                 lock (_lock)
                     _supervisors.Remove(supervisor);
                 supervisor.Dispose();
@@ -1102,7 +1102,7 @@ sealed class LoginManager : IDisposable
             }
             catch (Exception ex)
             {
-                Log.Error($"Failed to start supervisor for {displayName}: {ex.Message}");
+                Log.Error($"Failed to start supervisor for {displayName}: {ex}");
                 lock (_lock)
                     _supervisors.Remove(supervisor);
                 supervisor.Dispose();

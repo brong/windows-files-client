@@ -63,6 +63,7 @@ public sealed class IpcPipeClient : IDisposable
         });
 
         var json = IpcSerializer.SerializeRequest(id, method, @params);
+        Log.Debug($"[IPC Client] Call id={id} method={method}");
 
         await _writeLock.WaitAsync(ct);
         try
@@ -191,16 +192,23 @@ public sealed class IpcPipeClient : IDisposable
                         switch (message)
                         {
                             case IpcResponse response:
+                                Log.Debug($"[IPC Client] Response id={response.Id}");
                                 if (_pending.TryRemove(response.Id, out var resTcs))
                                     resTcs.TrySetResult(response);
+                                else
+                                    Log.Warn($"[IPC Client] No pending request for response id={response.Id}");
                                 break;
 
                             case IpcError error:
+                                Log.Warn($"[IPC Client] Error id={error.Id}: {error.Message}");
                                 if (_pending.TryRemove(error.Id, out var errTcs))
                                     errTcs.TrySetResult(error);
+                                else
+                                    Log.Warn($"[IPC Client] No pending request for error id={error.Id}");
                                 break;
 
                             case IpcPush push:
+                                Log.Debug($"[IPC Client] Push method={push.Method}");
                                 PushReceived?.Invoke(push);
                                 break;
                         }

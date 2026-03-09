@@ -2,6 +2,16 @@
 setlocal
 pushd %~dp0
 
+:: Find Windows SDK tools
+set "SDKBIN="
+for /f "tokens=*" %%p in ('powershell -NoProfile -File "%~dp0find-sdk.ps1"') do set "SDKBIN=%%p"
+if defined SDKBIN (
+    echo Using SDK tools from: %SDKBIN%
+    set "PATH=%SDKBIN%;%PATH%"
+) else (
+    echo WARNING: Windows SDK tools not found on PATH. makeappx/signtool may fail.
+)
+
 set "SRCDIR=%~dp0.."
 set "BUILDDIR=%SRCDIR%"
 

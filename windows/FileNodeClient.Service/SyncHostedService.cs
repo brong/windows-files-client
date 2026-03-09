@@ -150,9 +150,12 @@ sealed class SyncHostedService : BackgroundService
         const string FaviconUrl = "https://www.fastmail.com/favicon.ico";
         try
         {
+            // Use %USERPROFILE% directly instead of %LOCALAPPDATA% because
+            // MSIX virtualizes LocalApplicationData — the icon path must be
+            // visible to Explorer/cfapi which runs outside the package context.
             var iconDir = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "Fastmail", "FileNodeClient");
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                ".fastmail");
             Directory.CreateDirectory(iconDir);
             var iconPath = Path.Combine(iconDir, "icon.ico");
 
