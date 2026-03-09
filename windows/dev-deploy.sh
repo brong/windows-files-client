@@ -26,9 +26,12 @@ cleanup_worktree() {
 }
 trap cleanup_worktree EXIT
 
+# Windows projects are under windows/ subdirectory
+WINSRC="$SRCDIR/windows"
+
 echo "=== Rsync to build dir ==="
 rm -rf "$BUILDDIR"
-rsync -a --exclude='.git' --exclude='.claude' --exclude='bin' --exclude='obj' "$SRCDIR/" "$BUILDDIR/"
+rsync -a --exclude='.git' --exclude='.claude' --exclude='bin' --exclude='obj' "$WINSRC/" "$BUILDDIR/"
 
 echo "=== Publishing Service ==="
 cd "$BUILDDIR"
@@ -38,11 +41,11 @@ echo "=== Publishing App ==="
 dotnet.exe publish FileNodeClient.App/FileNodeClient.App.csproj -c Release -r win-x64 --self-contained -o FileNodeClient.Package/publish 2>&1 | tail -3
 
 echo "=== Building native thumbnail DLL ==="
-if [ -f "$SRCDIR/FileNodeClient.ThumbnailExtension/ThumbnailHandler.c" ]; then
+if [ -f "$WINSRC/FileNodeClient.ThumbnailExtension/ThumbnailHandler.c" ]; then
     x86_64-w64-mingw32-gcc -shared -O2 \
         -o "$BUILDDIR/FileNodeClient.Package/publish/FileNodeClient.ThumbnailExtension.dll" \
-        "$SRCDIR/FileNodeClient.ThumbnailExtension/ThumbnailHandler.c" \
-        "$SRCDIR/FileNodeClient.ThumbnailExtension/ThumbnailHandler.def" \
+        "$WINSRC/FileNodeClient.ThumbnailExtension/ThumbnailHandler.c" \
+        "$WINSRC/FileNodeClient.ThumbnailExtension/ThumbnailHandler.def" \
         -lole32 -lwindowscodecs -lgdi32 -luser32 -luuid
     echo "Native DLL built"
 else

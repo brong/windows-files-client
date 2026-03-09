@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Text;
 using FileNodeClient.Logging;
 
@@ -6,10 +5,6 @@ namespace FileNodeClient.Service;
 
 static class AppLogger
 {
-    private const string EventSourceName = "FileNodeClient";
-    private const string EventLogName = "Application";
-
-    private static EventLog? _eventLog;
     private static StreamWriter? _fileWriter;
     private static readonly object _fileLock = new();
     private static TextWriter? _originalConsole;
@@ -18,25 +13,8 @@ static class AppLogger
 
     public static void Initialize(bool debug)
     {
-        // Create event source if it doesn't exist (requires admin on first run)
-        try
-        {
-            if (!EventLog.SourceExists(EventSourceName))
-                EventLog.CreateEventSource(EventSourceName, EventLogName);
-        }
-        catch (System.Security.SecurityException)
-        {
-            // Non-admin -- source may already exist or we'll use generic source
-        }
-
-        try
-        {
-            _eventLog = new EventLog(EventLogName) { Source = EventSourceName };
-        }
-        catch
-        {
-            // If we can't create the event log, logging is best-effort
-        }
+        // Touch the ETW EventSource so it registers with the OS immediately
+        _ = FileNodeClientEventSource.Instance;
 
         if (debug)
         {
@@ -47,7 +25,7 @@ static class AppLogger
             {
                 var logDir = Path.Combine(
                     Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                    "FileNodeClient");
+                    "Fastmail", "FileNodeClient");
                 Directory.CreateDirectory(logDir);
                 LogFilePath = Path.Combine(logDir, "debug.log");
                 _fileWriter = new StreamWriter(LogFilePath, append: false, Encoding.UTF8)
@@ -79,15 +57,28 @@ static class AppLogger
 
             WriteToFile(prefix, msg);
 
-            var entryType = level switch
+            // Write to ETW (appears in Event Viewer under
+            // Applications and Services Logs > Fastmail-FileNodeClient > Operational)
+            var etw = FileNodeClientEventSource.Instance;
+            try
             {
-                LogLevel.Warning => EventLogEntryType.Warning,
-                LogLevel.Error => EventLogEntryType.Error,
-                _ => EventLogEntryType.Information,
-            };
-
-            try { _eventLog?.WriteEntry(msg, entryType); }
-            catch { /* best-effort */ }
+                switch (level)
+                {
+                    case LogLevel.Debug:
+                        etw.DebugMessage(msg);
+                        break;
+                    case LogLevel.Info:
+                        etw.InfoMessage(msg);
+                        break;
+                    case LogLevel.Warning:
+                        etw.WarningMessage(msg);
+                        break;
+                    case LogLevel.Error:
+                        etw.ErrorMessage(msg);
+                        break;
+                }
+            }
+            catch { /* best-effort ETW */ }
         };
     }
 

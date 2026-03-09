@@ -96,6 +96,11 @@ internal class SyncRoot : IDisposable
         _registered = true;
         Log.Info($"{_logPrefix} Sync root registered: {_syncRootPath} (id={_syncRootId})");
 
+        // Write AUMID to link sync root to MSIX package identity.
+        // Without this, cloud file shell extensions (icons, thumbnails, context menus)
+        // are never invoked by Explorer.
+        WriteAumidIfPackaged(_syncRootId);
+
         // Write webUrlTemplate to config so the URI source COM handler can read it
         WriteWebUrlTemplate(_syncRootId, webUrlTemplate);
     }
@@ -229,6 +234,38 @@ internal class SyncRoot : IDisposable
         Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "FileNodeClient", syncRootId);
+
+    private static void WriteAumidIfPackaged(string syncRootId)
+    {
+        try
+        {
+            var package = global::Windows.ApplicationModel.Package.Current;
+            var familyName = package.Id.FamilyName;
+            // Use the "Service" application ID from AppxManifest.xml — that's the
+            // process that hosts the cloud files COM handlers.
+            var aumid = $"{familyName}!Service";
+
+            var subKey = $@"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\SyncRootManager\{syncRootId}";
+            using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(subKey, writable: true);
+            if (key != null)
+            {
+                key.SetValue("AUMID", aumid, Microsoft.Win32.RegistryValueKind.String);
+                Log.Info($"AUMID set: {aumid}");
+            }
+            else
+            {
+                Log.Warn($"Could not open SyncRootManager registry key for AUMID: {subKey}");
+            }
+        }
+        catch (InvalidOperationException)
+        {
+            // Not running as a packaged app — no AUMID needed
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"Failed to write AUMID: {ex.Message}");
+        }
+    }
 
     private static void WriteWebUrlTemplate(string syncRootId, string? template)
     {

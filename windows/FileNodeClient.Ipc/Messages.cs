@@ -128,9 +128,12 @@ public sealed record CommandResultEvent(
     bool Success,
     string? Error) : IpcEvent;
 
+public record ActiveDownloadEntry(string FileName, DateTime StartedAt);
+
 public sealed record OutboxSnapshotEvent(
     string AccountId,
-    List<OutboxEntry> Entries) : IpcEvent;
+    List<OutboxEntry> Entries,
+    List<ActiveDownloadEntry>? ActiveDownloads = null) : IpcEvent;
 
 public sealed record LoginAccountsResultEvent(
     string LoginId,

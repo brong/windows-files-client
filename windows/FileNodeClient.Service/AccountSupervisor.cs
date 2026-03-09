@@ -41,6 +41,10 @@ sealed class AccountSupervisor : IDisposable
     public long? QuotaUsed { get; private set; }
     public long? QuotaLimit { get; private set; }
     public SyncPauseReason PauseReason => _engine?.PauseReason ?? SyncPauseReason.None;
+    public int ActiveDownloadCount => _engine?.ActiveDownloadCount ?? 0;
+
+    public List<(string FileName, DateTime StartedAt)> GetActiveDownloadSnapshot()
+        => _engine?.GetActiveDownloadSnapshot() ?? new();
 
     public event Action<AccountSupervisor>? StatusChanged;
     public event Action<AccountSupervisor>? StatusDetailChanged;
@@ -73,6 +77,7 @@ sealed class AccountSupervisor : IDisposable
         _engine.StatusChanged += OnEngineStatusChanged;
         _engine.StatusDetailChanged += OnEngineStatusDetailChanged;
         _engine.PendingCountChanged += OnEnginePendingCountChanged;
+        _engine.ActiveDownloadCountChanged += OnEngineActiveDownloadCountChanged;
 
         // Register sync root
         Log.Info($"[{_displayName}] Registering sync root...");
@@ -258,6 +263,13 @@ sealed class AccountSupervisor : IDisposable
     {
         PendingCount = count;
         PendingCountChanged?.Invoke(this);
+    }
+
+    private void OnEngineActiveDownloadCountChanged(int count)
+    {
+        // When downloads start/stop, fire StatusChanged so the tray icon
+        // reflects Syncing (blue) while downloads are active.
+        StatusChanged?.Invoke(this);
     }
 
     private void UpdateQuota(Quota[]? quotas)

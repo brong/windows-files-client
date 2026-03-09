@@ -96,6 +96,12 @@ if not "%BUILDDIR%"=="%SRCDIR%" (
     echo Copied MSIX to %~dp0bin\Release\FileNodeClient.msix
 )
 
+:: ---- Step 5: Register EventLog source (requires admin) ----
+echo.
+echo Registering EventLog source...
+powershell -NoProfile -Command ^
+    "try { if (-not [System.Diagnostics.EventLog]::SourceExists('FileNodeClient')) { [System.Diagnostics.EventLog]::CreateEventSource('FileNodeClient', 'Application'); Write-Host 'EventLog source created.' } else { Write-Host 'EventLog source already exists.' } } catch { Write-Host \"WARNING: Could not register EventLog source (requires admin): $_\" }"
+
 echo.
 echo Success: bin\Release\FileNodeClient.msix
 popd

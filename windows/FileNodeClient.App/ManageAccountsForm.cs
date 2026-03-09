@@ -61,7 +61,7 @@ sealed class ManageAccountsForm : Form
     private bool _suppressSelectionChanged;
     private bool _operationInProgress;
     private bool _outboxDirty = true;
-    private bool _hasActiveUploads;
+    private bool _hasActiveTransfers;
     private readonly Button _addLoginButton;
     private readonly Button _startServiceButton;
     private readonly Button _stopServiceButton;
@@ -315,8 +315,7 @@ sealed class ManageAccountsForm : Form
         // Activity list view — created here, added to _detailPanel later (always visible)
         _activityListView = new ListView
         {
-            Dock = DockStyle.Bottom,
-            Height = 160,
+            Dock = DockStyle.Fill,
             View = View.Details,
             FullRowSelect = true,
             HeaderStyle = ColumnHeaderStyle.Clickable,
@@ -630,14 +629,14 @@ sealed class ManageAccountsForm : Form
 
     private async void OnOutboxTick(object? sender, EventArgs e)
     {
-        if (!_outboxDirty && !_hasActiveUploads)
+        if (!_outboxDirty && !_hasActiveTransfers)
             return;
 
         _outboxDirty = false;
 
         // Poll all synced accounts concurrently
         var syncedAccounts = _serviceClient.Accounts
-            .Where(a => a.Status != AccountStatus.Idle || a.PendingCount > 0 || _hasActiveUploads)
+            .Where(a => a.Status != AccountStatus.Idle || a.PendingCount > 0 || _hasActiveTransfers)
             .ToList();
 
         // If nothing looks active, still poll all synced accounts (they may have queued items)
@@ -647,7 +646,7 @@ sealed class ManageAccountsForm : Form
         if (syncedAccounts.Count == 0)
         {
             if (_activityListView.Items.Count > 0)
-                RefreshActivityList(new());
+                RefreshActivityList(new(), new());
             return;
         }
 
@@ -657,14 +656,18 @@ sealed class ManageAccountsForm : Form
             var snapshots = await Task.WhenAll(tasks);
 
             var allEntries = new List<(string DisplayName, OutboxEntry Entry)>();
+            var allDownloads = new List<(string DisplayName, ActiveDownloadEntry Download)>();
             for (int i = 0; i < snapshots.Length; i++)
             {
                 var displayName = syncedAccounts[i].DisplayName;
                 foreach (var entry in snapshots[i].Entries)
                     allEntries.Add((displayName, entry));
+                if (snapshots[i].ActiveDownloads is { } dls)
+                    foreach (var dl in dls)
+                        allDownloads.Add((displayName, dl));
             }
 
-            RefreshActivityList(allEntries);
+            RefreshActivityList(allEntries, allDownloads);
         }
         catch
         {
@@ -672,7 +675,9 @@ sealed class ManageAccountsForm : Form
         }
     }
 
-    private void RefreshActivityList(List<(string DisplayName, OutboxEntry Entry)> entries)
+    private void RefreshActivityList(
+        List<(string DisplayName, OutboxEntry Entry)> entries,
+        List<(string DisplayName, ActiveDownloadEntry Download)> downloads)
     {
         var now = DateTime.UtcNow;
 
@@ -725,8 +730,20 @@ sealed class ManageAccountsForm : Form
             _activityListView.Items.Add(item);
         }
 
+        // Add active downloads at the top of the list
+        foreach (var (displayName, dl) in downloads)
+        {
+            var item = new ListViewItem(displayName);
+            item.SubItems.Add(dl.FileName);
+            item.SubItems.Add("Download");
+            item.SubItems.Add("Downloading...");
+            item.SubItems.Add(FormatRelativeTime(dl.StartedAt, now));
+            item.ForeColor = Color.DodgerBlue;
+            _activityListView.Items.Insert(0, item);
+        }
+
         _activityListView.EndUpdate();
-        _hasActiveUploads = entries.Any(e => e.Entry.IsProcessing);
+        _hasActiveTransfers = entries.Any(e => e.Entry.IsProcessing) || downloads.Count > 0;
     }
 
     private void OnDrawActivitySubItem(object? sender, DrawListViewSubItemEventArgs e)

@@ -73,9 +73,15 @@ public class SyncEngine : IDisposable
     public event Action<SyncStatus>? StatusChanged;
     public event Action<string?>? StatusDetailChanged;
     public event Action<int>? PendingCountChanged;
+    public event Action<int>? ActiveDownloadCountChanged;
 
-    private readonly ConcurrentDictionary<long, string> _activeDownloads = new();
+    private readonly ConcurrentDictionary<long, (string FileName, DateTime StartedAt)> _activeDownloads = new();
     private string? _downloadDetail;
+
+    public int ActiveDownloadCount => _activeDownloads.Count;
+
+    public List<(string FileName, DateTime StartedAt)> GetActiveDownloadSnapshot()
+        => _activeDownloads.Values.ToList();
 
     /// <summary>
     /// Unregister a previous sync root for the given account and delete all
@@ -212,30 +218,32 @@ public class SyncEngine : IDisposable
 
     private void OnDownloadStarted(long transferKey, string fileName)
     {
-        _activeDownloads[transferKey] = fileName;
+        _activeDownloads[transferKey] = (fileName, DateTime.UtcNow);
         var count = _activeDownloads.Count;
         _downloadDetail = count > 1
             ? $"Downloading {fileName} (and {count - 1} more)"
             : $"Downloading {fileName}";
         ReportTransferDetail();
+        ActiveDownloadCountChanged?.Invoke(count);
     }
 
     private void OnDownloadCompleted(long transferKey)
     {
         _activeDownloads.TryRemove(transferKey, out _);
-        if (_activeDownloads.IsEmpty)
+        var count = _activeDownloads.Count;
+        if (count == 0)
         {
             _downloadDetail = null;
         }
         else
         {
             var first = _activeDownloads.FirstOrDefault();
-            var count = _activeDownloads.Count;
             _downloadDetail = count > 1
-                ? $"Downloading {first.Value} (and {count - 1} more)"
-                : $"Downloading {first.Value}";
+                ? $"Downloading {first.Value.FileName} (and {count - 1} more)"
+                : $"Downloading {first.Value.FileName}";
         }
         ReportTransferDetail();
+        ActiveDownloadCountChanged?.Invoke(count);
     }
 
     private void ReportTransferDetail()

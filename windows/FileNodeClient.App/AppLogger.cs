@@ -11,6 +11,9 @@ static class AppLogger
 
     public static void Initialize(bool debug)
     {
+        // Touch the ETW EventSource so it registers with the OS immediately
+        _ = FileNodeClientEventSource.Instance;
+
         if (debug)
         {
             _originalConsole = Console.Out;
@@ -21,7 +24,7 @@ static class AppLogger
         {
             var logDir = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "FileNodeClient");
+                "Fastmail", "FileNodeClient");
             Directory.CreateDirectory(logDir);
             var logPath = Path.Combine(logDir, "app.log");
             _fileWriter = new StreamWriter(logPath, append: false, Encoding.UTF8)
@@ -50,15 +53,40 @@ static class AppLogger
             if (debug)
                 _originalConsole?.WriteLine($"{timestamp} [{prefix}] {msg}");
 
-            if (_fileWriter == null) return;
-            lock (_fileLock)
+            if (_fileWriter != null)
             {
-                try
+                lock (_fileLock)
                 {
-                    _fileWriter.WriteLine($"{timestamp} [{prefix}] {msg}");
+                    try
+                    {
+                        _fileWriter.WriteLine($"{timestamp} [{prefix}] {msg}");
+                    }
+                    catch { }
                 }
-                catch { }
             }
+
+            // Write to ETW (appears in Event Viewer under
+            // Applications and Services Logs > Fastmail-FileNodeClient-App > Operational)
+            var etw = FileNodeClientEventSource.Instance;
+            try
+            {
+                switch (level)
+                {
+                    case LogLevel.Debug:
+                        etw.DebugMessage(msg);
+                        break;
+                    case LogLevel.Info:
+                        etw.InfoMessage(msg);
+                        break;
+                    case LogLevel.Warning:
+                        etw.WarningMessage(msg);
+                        break;
+                    case LogLevel.Error:
+                        etw.ErrorMessage(msg);
+                        break;
+                }
+            }
+            catch { /* best-effort ETW */ }
         };
     }
 }

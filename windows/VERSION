@@ -1,4 +1,4 @@
-1.0.0.0  2026-03-09  Initial MSIX release
+1.0.1.0  2026-03-09  First release
   - Two-process architecture (App tray UI + Service background sync)
   - JMAP FileNode sync with SSE push notifications
   - On-demand hydration and dehydration (cfapi cloud files)
@@ -9,3 +9,6 @@
   - Progressive hydration with range requests
   - Recycle bin support (trash role)
   - Auto-start on login via MSIX startup tasks
+  - Active downloads shown in activity pane
+  - Tray icon turns blue during downloads
+  - ETW logging (Event Viewer: Fastmail-FileNodeClient-Service/App)

@@ -209,7 +209,12 @@ sealed class IpcCommandHandler
             processingIds.Contains(e.Id),
             supervisor.Outbox.GetProgress(e.Id))).ToList();
 
-        return new OutboxSnapshotEvent(cmd.AccountId, outboxEntries);
+        var downloadSnapshot = supervisor.GetActiveDownloadSnapshot();
+        var activeDownloads = downloadSnapshot.Count > 0
+            ? downloadSnapshot.Select(d => new ActiveDownloadEntry(d.FileName, d.StartedAt)).ToList()
+            : null;
+
+        return new OutboxSnapshotEvent(cmd.AccountId, outboxEntries, activeDownloads);
     }
 
     private IpcEvent HandleGetLoginAccounts(GetLoginAccountsCommand cmd)
@@ -326,18 +331,26 @@ sealed class IpcCommandHandler
         return new CommandResultEvent("syncNow", true, null);
     }
 
-    private AccountInfo BuildAccountInfo(AccountSupervisor s) => new(
-        s.AccountId,
-        _loginManager.GetLoginIdForAccount(s.AccountId) ?? "",
-        s.DisplayName,
-        s.SyncRootPath,
-        s.Username,
-        MapStatus(s.Status),
-        s.StatusDetail,
-        s.PendingCount,
-        s.QuotaUsed,
-        s.QuotaLimit,
-        s.PauseReason != SyncPauseReason.None ? s.PauseReason.ToString() : null);
+    private AccountInfo BuildAccountInfo(AccountSupervisor s)
+    {
+        // Override Idle → Syncing when downloads are active so tray icon goes blue
+        var status = MapStatus(s.Status);
+        if (status == AccountStatus.Idle && s.ActiveDownloadCount > 0)
+            status = AccountStatus.Syncing;
+
+        return new(
+            s.AccountId,
+            _loginManager.GetLoginIdForAccount(s.AccountId) ?? "",
+            s.DisplayName,
+            s.SyncRootPath,
+            s.Username,
+            status,
+            s.StatusDetail,
+            s.PendingCount,
+            s.QuotaUsed,
+            s.QuotaLimit,
+            s.PauseReason != SyncPauseReason.None ? s.PauseReason.ToString() : null);
+    }
 
     private static AccountStatus MapStatus(SyncStatus status) => status switch
     {
