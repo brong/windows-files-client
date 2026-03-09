@@ -1,11 +1,18 @@
 #!/bin/bash
 # Build a signed MSIX package from WSL2
-# Usage: ./build-msix.sh [commit]
+# Usage: ./build-msix.sh [--install] [commit]
 #   No args: builds from current working tree
-#   With arg: builds from that commit via worktree
+#   --install: install the MSIX after building (stops running app)
+#   With commit arg: builds from that commit via worktree
 # Output: FileNodeClient.Package/bin/Release/FileNodeClient.msix
 
 set -e
+
+INSTALL=false
+if [ "$1" = "--install" ]; then
+    INSTALL=true
+    shift
+fi
 
 SRCDIR="/home/brong/src/files-client"
 BUILDDIR="/mnt/c/Users/brong/AppData/Local/Temp/files-client-msix"
@@ -81,12 +88,21 @@ echo "Using SDK tools from: $SDKBIN"
 SDKBIN_WSL=$(wslpath "$SDKBIN")
 
 echo "=== Creating self-signed cert (if needed) ==="
+# Store cert in a persistent location so it's reused across builds
+# (the build dir is wiped each time, but the cert must stay the same
+# to avoid re-importing into TrustedPeople on every build)
+CERT_STORE="$HOME/.fastmail"
+CERT_PFX_PERSIST="$CERT_STORE/DevCert.pfx"
 CERT_PFX="$BUILDDIR/FileNodeClient.Package/DevCert.pfx"
-if [ ! -f "$CERT_PFX" ]; then
+mkdir -p "$CERT_STORE"
+if [ -f "$CERT_PFX_PERSIST" ]; then
+    cp "$CERT_PFX_PERSIST" "$CERT_PFX"
+else
     powershell.exe -NoProfile -Command "
-        \$cert = New-SelfSignedCertificate -Type Custom -Subject 'CN=Fastmail Pty Ltd' -KeyUsage DigitalSignature -FriendlyName 'FileNodeClient Dev' -CertStoreLocation 'Cert:\CurrentUser\My' -TextExtension @('2.5.29.37={text}1.3.6.1.5.5.7.3.3','2.5.29.19={text}')
+        \$cert = New-SelfSignedCertificate -Type Custom -Subject 'CN=Fastmail Pty Ltd' -KeyUsage DigitalSignature -FriendlyName 'FileNodeClient Dev' -CertStoreLocation 'Cert:\CurrentUser\\My' -TextExtension @('2.5.29.37={text}1.3.6.1.5.5.7.3.3','2.5.29.19={text}')
         Export-PfxCertificate -Cert \$cert -FilePath '$(wslpath -w "$CERT_PFX")' -Password (ConvertTo-SecureString -String 'devpass' -Force -AsPlainText)
     " || echo "WARNING: Certificate creation failed"
+    cp "$CERT_PFX" "$CERT_PFX_PERSIST"
 fi
 
 echo "=== Building mapping file ==="
@@ -125,6 +141,12 @@ fi
 # Copy back to source tree
 mkdir -p "$WINSRC/FileNodeClient.Package/bin/Release"
 cp "$MSIX_OUTPUT" "$WINSRC/FileNodeClient.Package/bin/Release/"
+
+if [ "$INSTALL" = true ]; then
+    echo "=== Installing MSIX ==="
+    powershell.exe -NoProfile -Command "Add-AppxPackage -Path '$(wslpath -w "$WINSRC/FileNodeClient.Package/bin/Release/FileNodeClient.msix")' -ForceUpdateFromAnyVersion -ForceApplicationShutdown"
+    echo "=== Installed ==="
+fi
 
 echo ""
 echo "=== Success: FileNodeClient.Package/bin/Release/FileNodeClient.msix ==="
