@@ -152,7 +152,7 @@ sealed class SyncHostedService : BackgroundService
         {
             var iconDir = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "FileNodeClient");
+                "Fastmail", "FileNodeClient");
             Directory.CreateDirectory(iconDir);
             var iconPath = Path.Combine(iconDir, "icon.ico");
 

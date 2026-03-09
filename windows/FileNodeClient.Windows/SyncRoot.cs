@@ -233,7 +233,7 @@ internal class SyncRoot : IDisposable
     private static string GetConfigDir(string syncRootId) =>
         Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "FileNodeClient", syncRootId);
+            "Fastmail", "FileNodeClient", syncRootId);
 
     private static void WriteAumidIfPackaged(string syncRootId)
     {

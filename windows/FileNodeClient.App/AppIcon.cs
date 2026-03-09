@@ -19,7 +19,7 @@ static class AppIcon
         {
             var path = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "FileNodeClient", "icon.ico");
+                "Fastmail", "FileNodeClient", "icon.ico");
             if (File.Exists(path))
                 _cached = new Icon(path);
         }

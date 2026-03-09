@@ -54,7 +54,7 @@ public static class NodeCache
         var parts = scopeKey.Split('/', '\\');
         var dir = System.IO.Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "FileNodeClient", System.IO.Path.Combine(parts));
+            "Fastmail", "FileNodeClient", System.IO.Path.Combine(parts));
         return System.IO.Path.Combine(dir, "nodecache.json");
     }
 

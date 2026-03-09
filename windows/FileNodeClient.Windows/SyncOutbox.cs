@@ -74,7 +74,7 @@ public class SyncOutbox : IDisposable
         var parts = scopeKey.Split('/', '\\');
         var dir = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "FileNodeClient", Path.Combine(parts));
+            "Fastmail", "FileNodeClient", Path.Combine(parts));
         Directory.CreateDirectory(dir);
         _persistPath = Path.Combine(dir, "outbox.json");
         _saveTimer = new Timer(SaveCallback);
