@@ -703,9 +703,28 @@ sealed class ManageAccountsForm : Form
     {
         var now = DateTime.UtcNow;
 
-        _activityListView.BeginUpdate();
-        _activityListView.Items.Clear();
+        // Build desired items keyed for incremental update
+        var desired = new List<(string Key, string Col0, string Col1, string Col2, string Col3, string Col4,
+            Color ForeColor, string Tooltip, int? ProgressTag)>();
 
+        // Active downloads first
+        foreach (var (displayName, accountId, _, dl) in downloads.Where(d => !d.Download.IsPending))
+        {
+            var statusText = dl.Progress.HasValue ? "" : "Downloading...";
+            var tooltip = dl.Progress.HasValue ? $"Downloading {dl.Progress.Value}%" : dl.FileName;
+            desired.Add(($"dl:{accountId}:{dl.FileName}", displayName, dl.FileName, "Download",
+                statusText, FormatRelativeTime(dl.StartedAt, now),
+                Color.DodgerBlue, tooltip, dl.Progress));
+        }
+
+        // Pending downloads
+        foreach (var (displayName, accountId, _, dl) in downloads.Where(d => d.Download.IsPending))
+        {
+            desired.Add(($"pending:{accountId}:{dl.FileName}", displayName, dl.FileName, "Download",
+                "Queued", "", Color.Gray, dl.FileName, null));
+        }
+
+        // Outbox entries
         var sorted = entries.OrderByDescending(e =>
             e.Entry.IsProcessing ? (e.Entry.UploadProgress ?? -1) : -2)
             .ThenBy(e => e.Entry.CreatedAt);
@@ -729,72 +748,89 @@ sealed class ManageAccountsForm : Form
                 status = DeriveStatus(entry, now);
             }
 
-            var item = new ListViewItem(displayName);
-            item.SubItems.Add(name);
-            item.SubItems.Add(action);
-            var statusSubItem = item.SubItems.Add(status);
-            if (progress.HasValue)
-                statusSubItem.Tag = progress.Value;
-            item.SubItems.Add(FormatRelativeTime(entry.UpdatedAt, now));
-
             var tooltip = entry.LocalPath ?? entry.NodeId ?? "";
             if (progress.HasValue)
                 tooltip += $"\nUploading {progress.Value}%";
             if (entry.LastError != null)
                 tooltip += $"\nError: {entry.LastError}";
-            item.ToolTipText = tooltip;
 
-            if (entry.IsProcessing)
-                item.ForeColor = Color.DodgerBlue;
-            else if (entry.LastError != null)
-                item.ForeColor = Color.Red;
+            var color = entry.IsProcessing ? Color.DodgerBlue
+                : entry.LastError != null ? Color.Red
+                : _activityListView.ForeColor;
 
-            _activityListView.Items.Add(item);
+            desired.Add(($"outbox:{entry.Id}", displayName, name, action,
+                status, FormatRelativeTime(entry.UpdatedAt, now),
+                color, tooltip, progress));
         }
 
-        // Add active downloads at the top, pending downloads after
-        var activeDownloads = downloads.Where(d => !d.Download.IsPending).ToList();
-        var pendingDownloads = downloads.Where(d => d.Download.IsPending).ToList();
-
-        // Insert pending downloads (shown after active, before outbox entries)
-        for (int i = pendingDownloads.Count - 1; i >= 0; i--)
+        // Empty state
+        if (desired.Count == 0)
         {
-            var (displayName, _, _, dl) = pendingDownloads[i];
-            var item = new ListViewItem(displayName);
-            item.SubItems.Add(dl.FileName);
-            item.SubItems.Add("Download");
-            item.SubItems.Add("Queued");
-            item.SubItems.Add("");
-            item.ForeColor = Color.Gray;
-            _activityListView.Items.Insert(0, item);
+            desired.Add(("empty", "", "", "", "No changes to sync", "",
+                Color.Green, "", null));
         }
 
-        // Insert active downloads at the very top (with progress bars)
-        for (int i = activeDownloads.Count - 1; i >= 0; i--)
-        {
-            var (displayName, _, _, dl) = activeDownloads[i];
-            var item = new ListViewItem(displayName);
-            item.SubItems.Add(dl.FileName);
-            item.SubItems.Add("Download");
-            var statusSubItem = item.SubItems.Add(dl.Progress.HasValue ? "" : "Downloading...");
-            if (dl.Progress.HasValue)
-                statusSubItem.Tag = dl.Progress.Value;
-            item.SubItems.Add(FormatRelativeTime(dl.StartedAt, now));
-            item.ForeColor = Color.DodgerBlue;
-            item.ToolTipText = dl.Progress.HasValue ? $"Downloading {dl.Progress.Value}%" : dl.FileName;
-            _activityListView.Items.Insert(0, item);
-        }
+        // Incremental update: match by key to avoid flicker
+        _activityListView.BeginUpdate();
 
-        // Show "no changes" message when activity list is empty
-        if (_activityListView.Items.Count == 0)
+        // Build lookup of existing items by key (stored in Name)
+        var existingByKey = new Dictionary<string, int>();
+        for (int i = 0; i < _activityListView.Items.Count; i++)
+            existingByKey[_activityListView.Items[i].Name] = i;
+
+        // If item count or keys changed, do a full rebuild
+        bool structureChanged = desired.Count != _activityListView.Items.Count
+            || desired.Select(d => d.Key).Zip(
+                Enumerable.Range(0, _activityListView.Items.Count)
+                    .Select(i => _activityListView.Items[i].Name))
+                .Any(pair => pair.First != pair.Second);
+
+        if (structureChanged)
         {
-            var item = new ListViewItem("");
-            item.SubItems.Add("");
-            item.SubItems.Add("");
-            item.SubItems.Add("No changes to sync");
-            item.SubItems.Add("");
-            item.ForeColor = Color.Green;
-            _activityListView.Items.Add(item);
+            _activityListView.Items.Clear();
+            foreach (var d in desired)
+            {
+                var item = new ListViewItem(d.Col0) { Name = d.Key };
+                item.SubItems.Add(d.Col1);
+                item.SubItems.Add(d.Col2);
+                var statusSub = item.SubItems.Add(d.Col3);
+                if (d.ProgressTag.HasValue)
+                    statusSub.Tag = d.ProgressTag.Value;
+                item.SubItems.Add(d.Col4);
+                item.ForeColor = d.ForeColor;
+                item.ToolTipText = d.Tooltip;
+                _activityListView.Items.Add(item);
+            }
+        }
+        else
+        {
+            // Same structure — update in place
+            for (int i = 0; i < desired.Count; i++)
+            {
+                var d = desired[i];
+                var item = _activityListView.Items[i];
+                bool needsRedraw = false;
+
+                if (item.Text != d.Col0) item.Text = d.Col0;
+                if (item.SubItems[1].Text != d.Col1) item.SubItems[1].Text = d.Col1;
+                if (item.SubItems[2].Text != d.Col2) item.SubItems[2].Text = d.Col2;
+                if (item.SubItems[3].Text != d.Col3) item.SubItems[3].Text = d.Col3;
+
+                var oldTag = item.SubItems[3].Tag as int?;
+                if (oldTag != d.ProgressTag)
+                {
+                    item.SubItems[3].Tag = d.ProgressTag.HasValue ? (object)d.ProgressTag.Value : null;
+                    needsRedraw = true;
+                }
+
+                if (item.SubItems[4].Text != d.Col4) item.SubItems[4].Text = d.Col4;
+                if (item.ForeColor != d.ForeColor) item.ForeColor = d.ForeColor;
+                if (item.ToolTipText != d.Tooltip) item.ToolTipText = d.Tooltip;
+
+                // Invalidate only the progress bar cell if tag changed
+                if (needsRedraw)
+                    _activityListView.Invalidate(item.SubItems[3].Bounds);
+            }
         }
 
         _activityListView.EndUpdate();

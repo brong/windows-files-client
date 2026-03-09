@@ -238,9 +238,17 @@ public class SyncEngine : IDisposable
     private void OnDownloadStarted(long transferKey, string fileName, long? totalSize, string? fullPath)
     {
         _activeDownloads[transferKey] = (fileName, DateTime.UtcNow, totalSize);
-        // Remove from pending queue if this file was queued for pin-hydration
+        // Remove from pending queue if this file was queued for pin-hydration.
+        // Try both the exact path and a normalized version since cfapi may use
+        // \\?\ prefix while Directory.EnumerateFiles returns a plain path.
         if (fullPath != null)
-            _pendingHydrations.TryRemove(fullPath, out _);
+        {
+            if (!_pendingHydrations.TryRemove(fullPath, out _))
+            {
+                var normalized = fullPath.StartsWith(@"\\?\") ? fullPath[4..] : @"\\?\" + fullPath;
+                _pendingHydrations.TryRemove(normalized, out _);
+            }
+        }
         var count = _activeDownloads.Count + _pendingHydrations.Count;
         _downloadDetail = count > 1
             ? $"Downloading {fileName} (and {count - 1} more)"
@@ -1865,6 +1873,7 @@ public class SyncEngine : IDisposable
 
                     Log.Info($"{_logPrefix} Hydrating pinned file: {Path.GetFileName(filePath)}");
                     HydratePlaceholder(filePath);
+                    _pendingHydrations.TryRemove(filePath, out _);
                     count++;
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
@@ -1932,6 +1941,16 @@ public class SyncEngine : IDisposable
                     _pinnedDirectories.TryAdd(subDir, parentCts);
                 count += HydrateDehydratedFiles(subDir, ct);
             }
+
+            // Clean up any lingering pending entries for this directory
+            // (path normalization differences may have prevented removal during download)
+            foreach (var key in _pendingHydrations.Keys)
+            {
+                if (key.StartsWith(directoryPath, StringComparison.OrdinalIgnoreCase))
+                    _pendingHydrations.TryRemove(key, out _);
+            }
+            if (_pendingHydrations.IsEmpty && _activeDownloads.IsEmpty)
+                ActiveDownloadCountChanged?.Invoke(0);
 
             return count;
         }
