@@ -103,6 +103,15 @@ sealed class ManageAccountsForm : Form
             if (!_suppressSelectionChanged)
                 OnSelectionChanged();
         };
+        // Click on already-selected node deselects it (show all activity)
+        _treeView.MouseDown += (_, e) =>
+        {
+            var hit = _treeView.HitTest(e.Location);
+            if (hit.Node != null && hit.Node == _treeView.SelectedNode)
+            {
+                _treeView.SelectedNode = null;
+            }
+        };
 
         var splitter = new Splitter { Dock = DockStyle.Left, Width = 4 };
 
@@ -114,7 +123,7 @@ sealed class ManageAccountsForm : Form
         };
 
         // ======= Login detail panel =======
-        _loginPanel = new Panel { Dock = DockStyle.Fill, Visible = false };
+        _loginPanel = new Panel { Dock = DockStyle.Top, AutoSize = true, Visible = false };
 
         var loginLayout = new TableLayoutPanel
         {
@@ -229,7 +238,7 @@ sealed class ManageAccountsForm : Form
         _loginPanel.Controls.Add(loginLayout);
 
         // ======= Synced account detail panel =======
-        _syncedAccountPanel = new Panel { Dock = DockStyle.Fill, Visible = false };
+        _syncedAccountPanel = new Panel { Dock = DockStyle.Top, AutoSize = true, Visible = false };
 
         var syncedTopLayout = new TableLayoutPanel
         {
@@ -334,7 +343,7 @@ sealed class ManageAccountsForm : Form
         _activityListView.DrawSubItem += OnDrawActivitySubItem;
 
         // ======= Available (non-synced) account panel =======
-        _availableAccountPanel = new Panel { Dock = DockStyle.Fill, Visible = false };
+        _availableAccountPanel = new Panel { Dock = DockStyle.Top, AutoSize = true, Visible = false };
 
         var availableLayout = new TableLayoutPanel
         {
@@ -655,16 +664,29 @@ sealed class ManageAccountsForm : Form
             var tasks = syncedAccounts.Select(a => _serviceClient.GetOutboxAsync(a.AccountId)).ToList();
             var snapshots = await Task.WhenAll(tasks);
 
-            var allEntries = new List<(string DisplayName, OutboxEntry Entry)>();
-            var allDownloads = new List<(string DisplayName, ActiveDownloadEntry Download)>();
+            var allEntries = new List<(string DisplayName, string AccountId, string LoginId, OutboxEntry Entry)>();
+            var allDownloads = new List<(string DisplayName, string AccountId, string LoginId, ActiveDownloadEntry Download)>();
             for (int i = 0; i < snapshots.Length; i++)
             {
-                var displayName = syncedAccounts[i].DisplayName;
+                var acct = syncedAccounts[i];
                 foreach (var entry in snapshots[i].Entries)
-                    allEntries.Add((displayName, entry));
+                    allEntries.Add((acct.DisplayName, acct.AccountId, acct.LoginId, entry));
                 if (snapshots[i].ActiveDownloads is { } dls)
                     foreach (var dl in dls)
-                        allDownloads.Add((displayName, dl));
+                        allDownloads.Add((acct.DisplayName, acct.AccountId, acct.LoginId, dl));
+            }
+
+            // Filter by tree selection
+            var node = _treeView.SelectedNode;
+            if (node?.Tag is AccountNode selAccount)
+            {
+                allEntries = allEntries.Where(e => e.AccountId == selAccount.AccountId).ToList();
+                allDownloads = allDownloads.Where(d => d.AccountId == selAccount.AccountId).ToList();
+            }
+            else if (node?.Tag is LoginNode selLogin)
+            {
+                allEntries = allEntries.Where(e => e.LoginId == selLogin.LoginId).ToList();
+                allDownloads = allDownloads.Where(d => d.LoginId == selLogin.LoginId).ToList();
             }
 
             RefreshActivityList(allEntries, allDownloads);
@@ -676,8 +698,8 @@ sealed class ManageAccountsForm : Form
     }
 
     private void RefreshActivityList(
-        List<(string DisplayName, OutboxEntry Entry)> entries,
-        List<(string DisplayName, ActiveDownloadEntry Download)> downloads)
+        List<(string DisplayName, string AccountId, string LoginId, OutboxEntry Entry)> entries,
+        List<(string DisplayName, string AccountId, string LoginId, ActiveDownloadEntry Download)> downloads)
     {
         var now = DateTime.UtcNow;
 
@@ -688,7 +710,7 @@ sealed class ManageAccountsForm : Form
             e.Entry.IsProcessing ? (e.Entry.UploadProgress ?? -1) : -2)
             .ThenBy(e => e.Entry.CreatedAt);
 
-        foreach (var (displayName, entry) in sorted)
+        foreach (var (displayName, _, _, entry) in sorted)
         {
             var name = entry.LocalPath != null
                 ? Path.GetFileName(entry.LocalPath)
@@ -731,7 +753,7 @@ sealed class ManageAccountsForm : Form
         }
 
         // Add active downloads at the top of the list
-        foreach (var (displayName, dl) in downloads)
+        foreach (var (displayName, _, _, dl) in downloads)
         {
             var item = new ListViewItem(displayName);
             item.SubItems.Add(dl.FileName);
@@ -877,6 +899,7 @@ sealed class ManageAccountsForm : Form
         var accounts = _serviceClient.Accounts;
         var connectingIds = _serviceClient.ConnectingLoginIds;
         var failedLogins = _serviceClient.FailedLogins;
+        var connectedLoginIds = _serviceClient.ConnectedLoginIds;
         var serviceConnected = _serviceClient.IsConnected;
 
         // Preserve selection
@@ -913,6 +936,7 @@ sealed class ManageAccountsForm : Form
         var allLoginIds = byLogin.Keys
             .Union(_discoveredAccounts.Keys)
             .Union(connectingIds)
+            .Union(connectedLoginIds)
             .Union(failedLogins.Select(f => f.LoginId))
             .Distinct()
             .OrderBy(id => id)

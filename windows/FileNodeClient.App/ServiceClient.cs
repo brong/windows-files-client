@@ -14,6 +14,7 @@ sealed class ServiceClient : IDisposable
     private List<AccountInfo> _accounts = new();
     private List<string> _connectingLoginIds = new();
     private List<FailedLogin> _failedLogins = new();
+    private List<string> _connectedLoginIds = new();
     private AccountStatus _aggregateStatus = AccountStatus.Idle;
     private int _aggregatePendingCount;
     private bool _connected;
@@ -39,6 +40,11 @@ sealed class ServiceClient : IDisposable
     public IReadOnlyList<FailedLogin> FailedLogins
     {
         get { lock (_lock) return _failedLogins.ToList(); }
+    }
+
+    public IReadOnlyList<string> ConnectedLoginIds
+    {
+        get { lock (_lock) return _connectedLoginIds.ToList(); }
     }
 
     public AccountStatus AggregateStatus
@@ -268,6 +274,7 @@ sealed class ServiceClient : IDisposable
                 _accounts.Clear();
                 _connectingLoginIds.Clear();
                 _failedLogins.Clear();
+                _connectedLoginIds.Clear();
                 _aggregateStatus = AccountStatus.Idle;
                 _aggregatePendingCount = 0;
             }
@@ -288,6 +295,7 @@ sealed class ServiceClient : IDisposable
                     _accounts = snapshot.Accounts;
                     _connectingLoginIds = snapshot.ConnectingLoginIds;
                     _failedLogins = snapshot.FailedLogins;
+                    _connectedLoginIds = snapshot.ConnectedLoginIds ?? new();
                     _aggregateStatus = snapshot.AggregateStatus;
                     _aggregatePendingCount = snapshot.AggregatePendingCount;
                 }
@@ -321,6 +329,7 @@ sealed class ServiceClient : IDisposable
                     _accounts = accountsEvt.Accounts;
                     _connectingLoginIds = accountsEvt.ConnectingLoginIds;
                     _failedLogins = accountsEvt.FailedLogins;
+                    _connectedLoginIds = accountsEvt.ConnectedLoginIds ?? new();
                     RecalcAggregate();
                 }
                 AccountsChanged?.Invoke();

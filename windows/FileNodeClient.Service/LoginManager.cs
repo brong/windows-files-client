@@ -54,6 +54,14 @@ sealed class LoginManager : IDisposable
         get { lock (_lock) return _failedLogins.Select(f => (f.LoginId, f.Error)).ToList(); }
     }
 
+    /// <summary>
+    /// Login IDs with active sessions (connected, regardless of enabled accounts).
+    /// </summary>
+    public IReadOnlyList<string> ConnectedLoginIds
+    {
+        get { lock (_lock) return _sessions.Select(s => s.LoginId).ToList(); }
+    }
+
     public event Action? AccountsChanged;
     public event Action<SyncStatus>? AggregateStatusChanged;
 

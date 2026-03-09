@@ -100,7 +100,8 @@ public sealed record StatusSnapshotEvent(
     List<string> ConnectingLoginIds,
     List<FailedLogin> FailedLogins,
     AccountStatus AggregateStatus,
-    int AggregatePendingCount) : IpcEvent;
+    int AggregatePendingCount,
+    List<string>? ConnectedLoginIds = null) : IpcEvent;
 
 public sealed record AccountStatusChangedEvent(
     string AccountId,
@@ -111,7 +112,8 @@ public sealed record AccountStatusChangedEvent(
 public sealed record AccountsChangedEvent(
     List<AccountInfo> Accounts,
     List<string> ConnectingLoginIds,
-    List<FailedLogin> FailedLogins) : IpcEvent;
+    List<FailedLogin> FailedLogins,
+    List<string>? ConnectedLoginIds = null) : IpcEvent;
 
 public sealed record AddLoginResultEvent(
     bool Success,

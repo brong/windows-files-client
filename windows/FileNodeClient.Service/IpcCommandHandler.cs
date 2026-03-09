@@ -90,7 +90,8 @@ sealed class IpcCommandHandler
             _loginManager.ConnectingLoginIds.ToList(),
             _loginManager.FailedLogins.Select(f => new FailedLogin(f.LoginId, f.Error)).ToList(),
             MapStatus(_loginManager.GetAggregateStatus()),
-            _loginManager.GetAggregatePendingCount());
+            _loginManager.GetAggregatePendingCount(),
+            _loginManager.ConnectedLoginIds.ToList());
     }
 
     public AccountsChangedEvent BuildAccountsChanged()
@@ -101,7 +102,8 @@ sealed class IpcCommandHandler
         return new AccountsChangedEvent(
             accounts,
             _loginManager.ConnectingLoginIds.ToList(),
-            _loginManager.FailedLogins.Select(f => new FailedLogin(f.LoginId, f.Error)).ToList());
+            _loginManager.FailedLogins.Select(f => new FailedLogin(f.LoginId, f.Error)).ToList(),
+            _loginManager.ConnectedLoginIds.ToList());
     }
 
     public AccountStatusChangedEvent BuildAccountStatus(AccountSupervisor supervisor)
