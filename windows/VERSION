@@ -1,0 +1,11 @@
+1.0.0.0  2026-03-09  Initial MSIX release
+  - Two-process architecture (App tray UI + Service background sync)
+  - JMAP FileNode sync with SSE push notifications
+  - On-demand hydration and dehydration (cfapi cloud files)
+  - Thumbnail provider (native C DLL via COM SurrogateServer)
+  - Content URI source for web preview links
+  - Explorer nav pane integration with cloud status icons
+  - OAuth and app password authentication
+  - Progressive hydration with range requests
+  - Recycle bin support (trash role)
+  - Auto-start on login via MSIX startup tasks
