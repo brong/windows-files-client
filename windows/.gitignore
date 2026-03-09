@@ -7,5 +7,11 @@ FileNodeClient.Installer/publish/
 FileNodeClient.Package/publish/
 FileNodeClient.Package/DevCert.pfx
 FileNodeClient.Package/mapping.txt
+FileNodeClient.Package/FileNodeClient.h
+FileNodeClient.Package/FileNodeClient.rc
+FileNodeClient.Package/FileNodeClient.res
+FileNodeClient.Package/FileNodeClientTEMP.BIN
+FileNodeClient.Package/MSG*.bin
+FileNodeClient.Package/*.EventLog.dll
 FileNodeClient.ThumbnailExtension/*.dll
 .claude/

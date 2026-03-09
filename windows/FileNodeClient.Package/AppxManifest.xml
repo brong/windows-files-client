@@ -112,8 +112,8 @@
       <desktop8:EventTracing>
         <desktop8:Provider Id="584b95ba-9994-512f-a63a-bb0e7100084b"
                            Name="Fastmail-FileNodeClient-Service"
-                           ResourceFile="FileNodeClient.Service.exe"
-                           MessageFile="FileNodeClient.Service.exe">
+                           ResourceFile="FileNodeClient.EventLog.dll"
+                           MessageFile="FileNodeClient.EventLog.dll">
           <desktop8:Channels>
             <desktop8:Channel Name="Fastmail-FileNodeClient-Service/Operational"
                               Type="operational"
@@ -122,8 +122,8 @@
         </desktop8:Provider>
         <desktop8:Provider Id="d0379af1-950b-5d91-afba-b6c91473c5b2"
                            Name="Fastmail-FileNodeClient-App"
-                           ResourceFile="FileNodeClient.App.exe"
-                           MessageFile="FileNodeClient.App.exe">
+                           ResourceFile="FileNodeClient.EventLog.dll"
+                           MessageFile="FileNodeClient.EventLog.dll">
           <desktop8:Channels>
             <desktop8:Channel Name="Fastmail-FileNodeClient-App/Operational"
                               Type="operational"
