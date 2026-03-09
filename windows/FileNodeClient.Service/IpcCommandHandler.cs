@@ -85,9 +85,15 @@ sealed class IpcCommandHandler
 
     public AccountStatusPush BuildAccountStatus(AccountSupervisor supervisor)
     {
+        // Apply the same download-count override as BuildAccountInfo so the
+        // tray icon goes blue while downloads are active.
+        var status = MapStatus(supervisor.Status);
+        if (status == AccountStatus.Idle && supervisor.ActiveDownloadCount > 0)
+            status = AccountStatus.Syncing;
+
         return new AccountStatusPush(
             supervisor.AccountId,
-            MapStatus(supervisor.Status),
+            status,
             supervisor.StatusDetail,
             supervisor.PendingCount);
     }

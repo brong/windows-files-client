@@ -53,6 +53,10 @@ public class SyncEngine : IDisposable
     // Directories currently being hydrated by HydrateDehydratedFiles — used to
     // suppress duplicate hydration from OnDirectoryPopulated firing concurrently.
     private readonly ConcurrentDictionary<string, byte> _hydratingDirectories = new(StringComparer.OrdinalIgnoreCase);
+    // Limits concurrent pin-hydration work to prevent thread pool starvation.
+    // CfHydratePlaceholder blocks a thread pool thread while streaming downloads
+    // also need thread pool threads — too many concurrent hydrations = deadlock.
+    private readonly SemaphoreSlim _hydrationGate = new(2);
     // Files recently uploaded — stores the LastWriteTimeUtc at upload time so we
     // can suppress the FileSystemWatcher echo that fires when
     // ConvertToPlaceholder / UpdatePlaceholderIdentity changes file attributes.
@@ -649,11 +653,16 @@ public class SyncEngine : IDisposable
                 {
                     try
                     {
-                        int count = HydrateDehydratedFiles(kvp.Key, kvp.Value.Token);
-                        if (count > 0)
-                            Log.Info($"{_logPrefix} Hydrated {count} files in pinned directory: {kvp.Key}");
-                        try { SetInSync(kvp.Key); }
-                        catch { /* directory might not be a placeholder */ }
+                        _hydrationGate.Wait(kvp.Value.Token);
+                        try
+                        {
+                            int count = HydrateDehydratedFiles(kvp.Key, kvp.Value.Token);
+                            if (count > 0)
+                                Log.Info($"{_logPrefix} Hydrated {count} files in pinned directory: {kvp.Key}");
+                            try { SetInSync(kvp.Key); }
+                            catch { /* directory might not be a placeholder */ }
+                        }
+                        finally { _hydrationGate.Release(); }
                     }
                     catch (OperationCanceledException)
                     {
@@ -1421,11 +1430,16 @@ public class SyncEngine : IDisposable
             {
                 try
                 {
-                    int count = HydrateDehydratedFiles(info.DirectoryPath, cts.Token);
-                    if (count > 0)
-                        Log.Info($"{_logPrefix} Hydrated {count} files after directory populated: {info.DirectoryPath}");
-                    try { SetInSync(info.DirectoryPath); }
-                    catch { /* directory might not be a placeholder */ }
+                    _hydrationGate.Wait(cts.Token);
+                    try
+                    {
+                        int count = HydrateDehydratedFiles(info.DirectoryPath, cts.Token);
+                        if (count > 0)
+                            Log.Info($"{_logPrefix} Hydrated {count} files after directory populated: {info.DirectoryPath}");
+                        try { SetInSync(info.DirectoryPath); }
+                        catch { /* directory might not be a placeholder */ }
+                    }
+                    finally { _hydrationGate.Release(); }
                 }
                 catch (OperationCanceledException)
                 {
@@ -1449,11 +1463,16 @@ public class SyncEngine : IDisposable
             {
                 try
                 {
-                    int count = HydrateDehydratedFiles(directoryPath, cts.Token);
-                    if (count > 0)
-                        Log.Info($"{_logPrefix} Hydrated {count} files in {directoryPath}");
-                    try { SetInSync(directoryPath); }
-                    catch { /* directory might not be a placeholder */ }
+                    _hydrationGate.Wait(cts.Token);
+                    try
+                    {
+                        int count = HydrateDehydratedFiles(directoryPath, cts.Token);
+                        if (count > 0)
+                            Log.Info($"{_logPrefix} Hydrated {count} files in {directoryPath}");
+                        try { SetInSync(directoryPath); }
+                        catch { /* directory might not be a placeholder */ }
+                    }
+                    finally { _hydrationGate.Release(); }
                 }
                 catch (OperationCanceledException)
                 {
@@ -1833,12 +1852,20 @@ public class SyncEngine : IDisposable
                 failed = stillFailed;
             }
 
-            // Mark successfully-hydrated files as in-sync so they don't show "syncing"
-            // (TransferError during a failed FETCH_DATA marks the placeholder not-in-sync)
+            // Mark hydrated files as in-sync so they don't show "syncing"
+            // (TransferError during a failed FETCH_DATA marks the placeholder not-in-sync).
+            // Only mark files that are NOT still dehydrated — failed files should remain
+            // not-in-sync so the next DetectAndHydratePinnedDirectories pass re-attempts them.
             foreach (var filePath in Directory.EnumerateFiles(directoryPath))
             {
-                try { SetInSync(filePath); }
-                catch { /* not a placeholder — ignore */ }
+                try
+                {
+                    var attrs = File.GetAttributes(filePath);
+                    if ((attrs & dehydratedFlag) != 0)
+                        continue; // Still dehydrated — don't mark in-sync
+                    SetInSync(filePath);
+                }
+                catch { /* not a placeholder or file gone — ignore */ }
             }
 
             // Recurse into subdirectories — they inherit the pin from the parent.
@@ -2363,6 +2390,7 @@ public class SyncEngine : IDisposable
         }
         _pinnedDirectories.Clear();
 
+        _hydrationGate.Dispose();
         _outboxProcessor.Dispose();
         _outbox.Dispose();
         _fileChangeWatcher.Dispose();
