@@ -1,4 +1,5 @@
 using FileNodeClient.Logging;
+using System.Collections.Concurrent;
 using System.IO.Pipes;
 using System.Text;
 
@@ -6,7 +7,8 @@ namespace FileNodeClient.Ipc;
 
 /// <summary>
 /// Named pipe client with automatic reconnection.
-/// Sends JSON Lines commands and receives events from the service.
+/// Sends JMAP-style requests with correlation IDs and receives
+/// responses and push events from the service.
 /// </summary>
 public sealed class IpcPipeClient : IDisposable
 {
@@ -20,7 +22,10 @@ public sealed class IpcPipeClient : IDisposable
     private Task? _readTask;
     private bool _disposed;
 
-    public event Action<IpcEvent>? EventReceived;
+    private long _nextId;
+    private readonly ConcurrentDictionary<string, TaskCompletionSource<IpcMessage>> _pending = new();
+
+    public event Action<IpcPush>? PushReceived;
     public event Action<bool>? ConnectionChanged;
 
     public bool IsConnected => _pipe?.IsConnected == true;
@@ -31,7 +36,7 @@ public sealed class IpcPipeClient : IDisposable
     }
 
     /// <summary>
-    /// Start the client: connect to the pipe and begin reading events.
+    /// Start the client: connect to the pipe and begin reading.
     /// Automatically reconnects on disconnection.
     /// </summary>
     public void Start(CancellationToken ct)
@@ -41,11 +46,23 @@ public sealed class IpcPipeClient : IDisposable
     }
 
     /// <summary>
-    /// Send a command to the service and return. Responses come back as events.
+    /// Send a request and wait for its correlated response.
+    /// Returns IpcResponse on success, IpcError on error.
     /// </summary>
-    public async Task SendCommandAsync(IpcCommand command, CancellationToken ct = default)
+    public async Task<IpcMessage> CallAsync(string method, object? @params = null,
+        CancellationToken ct = default)
     {
-        var json = IpcSerializer.Serialize(command);
+        var id = Interlocked.Increment(ref _nextId).ToString();
+        var tcs = new TaskCompletionSource<IpcMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _pending[id] = tcs;
+
+        using var reg = ct.Register(() =>
+        {
+            if (_pending.TryRemove(id, out var removed))
+                removed.TrySetCanceled();
+        });
+
+        var json = IpcSerializer.SerializeRequest(id, method, @params);
 
         await _writeLock.WaitAsync(ct);
         try
@@ -55,10 +72,17 @@ public sealed class IpcPipeClient : IDisposable
 
             await _writer.WriteLineAsync(json.AsMemory(), ct);
         }
+        catch
+        {
+            _pending.TryRemove(id, out _);
+            throw;
+        }
         finally
         {
             _writeLock.Release();
         }
+
+        return await tcs.Task;
     }
 
     public async Task StopAsync()
@@ -68,6 +92,7 @@ public sealed class IpcPipeClient : IDisposable
         {
             try { await _readTask; } catch { }
         }
+        FailAllPending();
         Cleanup();
         _readCts?.Dispose();
     }
@@ -84,6 +109,7 @@ public sealed class IpcPipeClient : IDisposable
                 if (wasConnected)
                 {
                     wasConnected = false;
+                    FailAllPending();
                     ConnectionChanged?.Invoke(false);
                     await Task.Delay(IpcConstants.ReconnectDelayMs, ct);
                 }
@@ -92,8 +118,20 @@ public sealed class IpcPipeClient : IDisposable
                 wasConnected = true;
                 ConnectionChanged?.Invoke(true);
 
-                // Request initial status
-                await SendCommandAsync(new GetStatusCommand(), ct);
+                // Request initial status — fire result as a push so consumers handle it uniformly
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        var result = await CallAsync("getStatus", null, ct);
+                        if (result is IpcResponse response)
+                            PushReceived?.Invoke(new IpcPush("statusSnapshot", response.Result));
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Debug($"[IPC Client] Initial getStatus failed: {ex.Message}");
+                    }
+                }, ct);
 
                 // Use a linked CTS so the keepalive can cancel reads on pipe failure
                 using var readCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -110,7 +148,7 @@ public sealed class IpcPipeClient : IDisposable
                             await Task.Delay(5_000, readCts.Token);
                             try
                             {
-                                await SendCommandAsync(new GetStatusCommand(), readCts.Token);
+                                await CallAsync("ping", null, readCts.Token);
                                 consecutiveFailures = 0;
                             }
                             catch (OperationCanceledException) { throw; }
@@ -130,7 +168,7 @@ public sealed class IpcPipeClient : IDisposable
                     catch (OperationCanceledException) { }
                 }, readCts.Token);
 
-                // Read events until disconnected
+                // Read loop
                 while (!readCts.Token.IsCancellationRequested && _pipe?.IsConnected == true)
                 {
                     string? line;
@@ -149,13 +187,27 @@ public sealed class IpcPipeClient : IDisposable
 
                     try
                     {
-                        var evt = IpcSerializer.DeserializeEvent(line);
-                        if (evt != null)
-                            EventReceived?.Invoke(evt);
+                        var message = IpcSerializer.ParseMessage(line);
+                        switch (message)
+                        {
+                            case IpcResponse response:
+                                if (_pending.TryRemove(response.Id, out var resTcs))
+                                    resTcs.TrySetResult(response);
+                                break;
+
+                            case IpcError error:
+                                if (_pending.TryRemove(error.Id, out var errTcs))
+                                    errTcs.TrySetResult(error);
+                                break;
+
+                            case IpcPush push:
+                                PushReceived?.Invoke(push);
+                                break;
+                        }
                     }
                     catch (Exception ex)
                     {
-                        Log.Error($"[IPC Client] Event parse error: {ex.Message}");
+                        Log.Error($"[IPC Client] Message parse error: {ex.Message}");
                     }
                 }
             }
@@ -177,9 +229,19 @@ public sealed class IpcPipeClient : IDisposable
         }
 
         // Final cleanup on exit
+        FailAllPending();
         Cleanup();
         if (wasConnected)
             ConnectionChanged?.Invoke(false);
+    }
+
+    private void FailAllPending()
+    {
+        foreach (var key in _pending.Keys)
+        {
+            if (_pending.TryRemove(key, out var tcs))
+                tcs.TrySetException(new InvalidOperationException("Disconnected from service"));
+        }
     }
 
     private async Task ConnectAsync(CancellationToken ct)
@@ -224,6 +286,7 @@ public sealed class IpcPipeClient : IDisposable
         _readCts?.Dispose();
         _writeLock.Dispose();
         _connectLock.Dispose();
+        FailAllPending();
         Cleanup();
     }
 }

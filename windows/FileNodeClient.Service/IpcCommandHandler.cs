@@ -1,3 +1,4 @@
+using System.Text.Json;
 using FileNodeClient.Ipc;
 using FileNodeClient.Logging;
 using FileNodeClient.Windows;
@@ -5,8 +6,8 @@ using FileNodeClient.Windows;
 namespace FileNodeClient.Service;
 
 /// <summary>
-/// Dispatches IPC commands from the tray app to the LoginManager,
-/// and converts results back to IPC events.
+/// Dispatches IPC requests from the tray app to the LoginManager,
+/// and converts results back to IPC responses.
 /// </summary>
 sealed class IpcCommandHandler
 {
@@ -19,73 +20,46 @@ sealed class IpcCommandHandler
         IconPath = iconPath;
     }
 
-    public async Task<IpcEvent?> HandleAsync(IpcCommand command, CancellationToken ct)
+    public async Task<string> HandleAsync(IpcRequest request, CancellationToken ct)
     {
-        switch (command)
+        try
         {
-            case GetStatusCommand:
-                return BuildStatusSnapshot();
-
-            case AddLoginCommand cmd:
-                return await HandleAddLoginAsync(cmd, ct);
-
-            case DiscoverAccountsCommand cmd:
-                return await HandleDiscoverAccountsAsync(cmd, ct);
-
-            case RemoveLoginCommand cmd:
-                return await HandleRemoveLoginAsync(cmd);
-
-            case CleanUpAccountCommand cmd:
-                return await HandleCleanUpAccountAsync(cmd);
-
-            case ConfigureLoginCommand cmd:
-                return await HandleConfigureLoginAsync(cmd, ct);
-
-            case GetOutboxCommand cmd:
-                return HandleGetOutbox(cmd);
-
-            case GetLoginAccountsCommand cmd:
-                return HandleGetLoginAccounts(cmd);
-
-            case RefreshLoginAccountsCommand cmd:
-                return await HandleRefreshLoginAccountsAsync(cmd, ct);
-
-            case UpdateLoginCommand cmd:
-                return await HandleUpdateLoginAsync(cmd, ct);
-
-            case DetachAccountCommand cmd:
-                return await HandleDetachAccountAsync(cmd);
-
-            case RefreshAccountCommand cmd:
-                return await HandleRefreshAccountAsync(cmd, ct);
-
-            case CleanAccountCommand cmd:
-                return await HandleCleanAccountAsync(cmd, ct);
-
-            case EnableAccountCommand cmd:
-                return await HandleEnableAccountAsync(cmd, ct);
-
-            case PauseAccountCommand cmd:
-                return HandlePauseAccount(cmd);
-
-            case ResumeAccountCommand cmd:
-                return HandleResumeAccount(cmd);
-
-            case SyncNowCommand cmd:
-                return HandleSyncNow(cmd);
-
-            default:
-                Log.Error($"[IPC] Unknown command type: {command.GetType().Name}");
-                return null;
+            return request.Method switch
+            {
+                "ping" => IpcSerializer.SerializeResponse(request.Id),
+                "getStatus" => IpcSerializer.SerializeResponse(request.Id, BuildStatusSnapshot()),
+                "addLogin" => await HandleAddLoginAsync(request, ct),
+                "discoverAccounts" => await HandleDiscoverAccountsAsync(request, ct),
+                "removeLogin" => await HandleRemoveLoginAsync(request),
+                "cleanUpAccount" => await HandleCleanUpAccountAsync(request),
+                "configureLogin" => await HandleConfigureLoginAsync(request, ct),
+                "getOutbox" => HandleGetOutbox(request),
+                "getLoginAccounts" => HandleGetLoginAccounts(request),
+                "refreshLoginAccounts" => await HandleRefreshLoginAccountsAsync(request, ct),
+                "updateLogin" => await HandleUpdateLoginAsync(request, ct),
+                "detachAccount" => await HandleDetachAccountAsync(request),
+                "refreshAccount" => await HandleRefreshAccountAsync(request, ct),
+                "cleanAccount" => await HandleCleanAccountAsync(request, ct),
+                "enableAccount" => await HandleEnableAccountAsync(request, ct),
+                "pauseAccount" => HandlePauseAccount(request),
+                "resumeAccount" => HandleResumeAccount(request),
+                "syncNow" => HandleSyncNow(request),
+                _ => IpcSerializer.SerializeError(request.Id, $"Unknown method: {request.Method}"),
+            };
+        }
+        catch (Exception ex)
+        {
+            Log.Error($"[IPC] Error handling {request.Method}: {ex.Message}");
+            return IpcSerializer.SerializeError(request.Id, ex.Message);
         }
     }
 
-    public StatusSnapshotEvent BuildStatusSnapshot()
+    public StatusSnapshotResult BuildStatusSnapshot()
     {
         var supervisors = _loginManager.Supervisors;
         var accounts = supervisors.Select(BuildAccountInfo).ToList();
 
-        return new StatusSnapshotEvent(
+        return new StatusSnapshotResult(
             accounts,
             _loginManager.ConnectingLoginIds.ToList(),
             _loginManager.FailedLogins.Select(f => new FailedLogin(f.LoginId, f.Error)).ToList(),
@@ -94,105 +68,77 @@ sealed class IpcCommandHandler
             _loginManager.ConnectedLoginIds.ToList());
     }
 
-    public AccountsChangedEvent BuildAccountsChanged()
+    public AccountsChangedPush BuildAccountsChanged()
     {
         var supervisors = _loginManager.Supervisors;
         var accounts = supervisors.Select(BuildAccountInfo).ToList();
 
-        return new AccountsChangedEvent(
+        return new AccountsChangedPush(
             accounts,
             _loginManager.ConnectingLoginIds.ToList(),
             _loginManager.FailedLogins.Select(f => new FailedLogin(f.LoginId, f.Error)).ToList(),
             _loginManager.ConnectedLoginIds.ToList());
     }
 
-    public AccountStatusChangedEvent BuildAccountStatus(AccountSupervisor supervisor)
+    public AccountStatusPush BuildAccountStatus(AccountSupervisor supervisor)
     {
-        return new AccountStatusChangedEvent(
+        return new AccountStatusPush(
             supervisor.AccountId,
             MapStatus(supervisor.Status),
             supervisor.StatusDetail,
             supervisor.PendingCount);
     }
 
-    private async Task<IpcEvent> HandleAddLoginAsync(AddLoginCommand cmd, CancellationToken ct)
+    private async Task<string> HandleAddLoginAsync(IpcRequest request, CancellationToken ct)
     {
-        try
-        {
-            var loginId = await _loginManager.AddLoginAsync(
-                cmd.SessionUrl, cmd.Token,
-                persist: true, iconPath: IconPath,
-                enabledAccountIds: cmd.EnabledAccountIds, ct: ct,
-                refreshToken: cmd.RefreshToken, tokenEndpoint: cmd.TokenEndpoint,
-                clientId: cmd.ClientId, expiresAtUnixSeconds: cmd.ExpiresAtUnixSeconds);
-            return new AddLoginResultEvent(true, loginId, null);
-        }
-        catch (Exception ex)
-        {
-            return new AddLoginResultEvent(false, null, ex.Message);
-        }
+        var p = Deserialize<AddLoginParams>(request.Params);
+        var loginId = await _loginManager.AddLoginAsync(
+            p.SessionUrl, p.Token,
+            persist: true, iconPath: IconPath,
+            enabledAccountIds: p.EnabledAccountIds, ct: ct,
+            refreshToken: p.RefreshToken, tokenEndpoint: p.TokenEndpoint,
+            clientId: p.ClientId, expiresAtUnixSeconds: p.ExpiresAtUnixSeconds);
+        return IpcSerializer.SerializeResponse(request.Id, new AddLoginResult(loginId));
     }
 
-    private async Task<IpcEvent> HandleDiscoverAccountsAsync(DiscoverAccountsCommand cmd, CancellationToken ct)
+    private async Task<string> HandleDiscoverAccountsAsync(IpcRequest request, CancellationToken ct)
     {
-        try
-        {
-            var accounts = await _loginManager.DiscoverAccountsAsync(cmd.SessionUrl, cmd.Token, ct);
-            var discovered = accounts.Select(a =>
-                new DiscoveredAccount(a.AccountId, a.Name, a.IsPrimary)).ToList();
-            return new DiscoverAccountsResultEvent(true, discovered, null);
-        }
-        catch (Exception ex)
-        {
-            return new DiscoverAccountsResultEvent(false, null, ex.Message);
-        }
+        var p = Deserialize<DiscoverParams>(request.Params);
+        var accounts = await _loginManager.DiscoverAccountsAsync(p.SessionUrl, p.Token, ct);
+        var discovered = accounts.Select(a =>
+            new DiscoveredAccount(a.AccountId, a.Name, a.IsPrimary)).ToList();
+        return IpcSerializer.SerializeResponse(request.Id, new DiscoverAccountsResult(discovered));
     }
 
-    private async Task<IpcEvent> HandleRemoveLoginAsync(RemoveLoginCommand cmd)
+    private async Task<string> HandleRemoveLoginAsync(IpcRequest request)
     {
-        try
-        {
-            await _loginManager.RemoveLoginAsync(cmd.LoginId);
-            return new CommandResultEvent("removeLogin", true, null);
-        }
-        catch (Exception ex)
-        {
-            return new CommandResultEvent("removeLogin", false, ex.Message);
-        }
+        var p = Deserialize<LoginIdParams>(request.Params);
+        await _loginManager.RemoveLoginAsync(p.LoginId);
+        return IpcSerializer.SerializeResponse(request.Id);
     }
 
-    private async Task<IpcEvent> HandleCleanUpAccountAsync(CleanUpAccountCommand cmd)
+    private async Task<string> HandleCleanUpAccountAsync(IpcRequest request)
     {
-        try
-        {
-            await _loginManager.CleanUpAccountAsync(cmd.AccountId);
-            return new CommandResultEvent("cleanUpAccount", true, null);
-        }
-        catch (Exception ex)
-        {
-            return new CommandResultEvent("cleanUpAccount", false, ex.Message);
-        }
+        var p = Deserialize<AccountIdParams>(request.Params);
+        await _loginManager.CleanUpAccountAsync(p.AccountId);
+        return IpcSerializer.SerializeResponse(request.Id);
     }
 
-    private async Task<IpcEvent> HandleConfigureLoginAsync(ConfigureLoginCommand cmd, CancellationToken ct)
+    private async Task<string> HandleConfigureLoginAsync(IpcRequest request, CancellationToken ct)
     {
-        try
-        {
-            await _loginManager.ConfigureLoginAsync(cmd.LoginId, cmd.EnabledAccountIds, IconPath, ct: ct);
-            return new CommandResultEvent("configureLogin", true, null);
-        }
-        catch (Exception ex)
-        {
-            return new CommandResultEvent("configureLogin", false, ex.Message);
-        }
+        var p = Deserialize<ConfigureLoginParams>(request.Params);
+        await _loginManager.ConfigureLoginAsync(p.LoginId, p.EnabledAccountIds, IconPath, ct: ct);
+        return IpcSerializer.SerializeResponse(request.Id);
     }
 
-    private IpcEvent HandleGetOutbox(GetOutboxCommand cmd)
+    private string HandleGetOutbox(IpcRequest request)
     {
+        var p = Deserialize<AccountIdParams>(request.Params);
         var supervisors = _loginManager.Supervisors;
-        var supervisor = supervisors.FirstOrDefault(s => s.AccountId == cmd.AccountId);
+        var supervisor = supervisors.FirstOrDefault(s => s.AccountId == p.AccountId);
         if (supervisor?.Outbox == null)
-            return new OutboxSnapshotEvent(cmd.AccountId, new List<OutboxEntry>());
+            return IpcSerializer.SerializeResponse(request.Id,
+                new OutboxResult(p.AccountId, new List<OutboxEntry>()));
 
         var (entries, processingIds) = supervisor.Outbox.GetSnapshot();
         var outboxEntries = entries.Select(e => new OutboxEntry(
@@ -216,122 +162,94 @@ sealed class IpcCommandHandler
             ? downloadSnapshot.Select(d => new ActiveDownloadEntry(d.FileName, d.StartedAt)).ToList()
             : null;
 
-        return new OutboxSnapshotEvent(cmd.AccountId, outboxEntries, activeDownloads);
+        return IpcSerializer.SerializeResponse(request.Id,
+            new OutboxResult(p.AccountId, outboxEntries, activeDownloads));
     }
 
-    private IpcEvent HandleGetLoginAccounts(GetLoginAccountsCommand cmd)
+    private string HandleGetLoginAccounts(IpcRequest request)
     {
-        var accounts = _loginManager.GetLoginAccounts(cmd.LoginId);
+        var p = Deserialize<LoginIdParams>(request.Params);
+        var accounts = _loginManager.GetLoginAccounts(p.LoginId);
         if (accounts == null)
-            return new LoginAccountsResultEvent(cmd.LoginId, null, null, "Login not found");
+            return IpcSerializer.SerializeError(request.Id, "Login not found");
 
         var discovered = accounts.Select(a =>
             new DiscoveredAccount(a.AccountId, a.Name, a.IsPrimary)).ToList();
-        var active = _loginManager.GetActiveAccountIds(cmd.LoginId);
-        return new LoginAccountsResultEvent(cmd.LoginId, discovered, active, null);
+        var active = _loginManager.GetActiveAccountIds(p.LoginId);
+        return IpcSerializer.SerializeResponse(request.Id,
+            new LoginAccountsResult(p.LoginId, discovered, active));
     }
 
-    private async Task<IpcEvent> HandleRefreshLoginAccountsAsync(
-        RefreshLoginAccountsCommand cmd, CancellationToken ct)
+    private async Task<string> HandleRefreshLoginAccountsAsync(IpcRequest request, CancellationToken ct)
     {
-        try
-        {
-            var accounts = await _loginManager.RefreshLoginAccountsAsync(cmd.LoginId, ct);
-            var discovered = accounts.Select(a =>
-                new DiscoveredAccount(a.AccountId, a.Name, a.IsPrimary)).ToList();
-            var active = _loginManager.GetActiveAccountIds(cmd.LoginId);
-            return new LoginAccountsResultEvent(cmd.LoginId, discovered, active, null);
-        }
-        catch (Exception ex)
-        {
-            return new LoginAccountsResultEvent(cmd.LoginId, null, null, ex.Message);
-        }
+        var p = Deserialize<LoginIdParams>(request.Params);
+        var accounts = await _loginManager.RefreshLoginAccountsAsync(p.LoginId, ct);
+        var discovered = accounts.Select(a =>
+            new DiscoveredAccount(a.AccountId, a.Name, a.IsPrimary)).ToList();
+        var active = _loginManager.GetActiveAccountIds(p.LoginId);
+        return IpcSerializer.SerializeResponse(request.Id,
+            new LoginAccountsResult(p.LoginId, discovered, active));
     }
 
-    private async Task<IpcEvent> HandleUpdateLoginAsync(UpdateLoginCommand cmd, CancellationToken ct)
+    private async Task<string> HandleUpdateLoginAsync(IpcRequest request, CancellationToken ct)
     {
-        try
-        {
-            await _loginManager.UpdateLoginAsync(cmd.LoginId, cmd.SessionUrl, cmd.Token, IconPath, ct,
-                refreshToken: cmd.RefreshToken, tokenEndpoint: cmd.TokenEndpoint,
-                clientId: cmd.ClientId, expiresAtUnixSeconds: cmd.ExpiresAtUnixSeconds);
-            return new CommandResultEvent("updateLogin", true, null);
-        }
-        catch (Exception ex)
-        {
-            return new CommandResultEvent("updateLogin", false, ex.Message);
-        }
+        var p = Deserialize<UpdateLoginParams>(request.Params);
+        await _loginManager.UpdateLoginAsync(p.LoginId, p.SessionUrl, p.Token, IconPath, ct,
+            refreshToken: p.RefreshToken, tokenEndpoint: p.TokenEndpoint,
+            clientId: p.ClientId, expiresAtUnixSeconds: p.ExpiresAtUnixSeconds);
+        return IpcSerializer.SerializeResponse(request.Id);
     }
 
-    private async Task<IpcEvent> HandleDetachAccountAsync(DetachAccountCommand cmd)
+    private async Task<string> HandleDetachAccountAsync(IpcRequest request)
     {
-        try
-        {
-            await _loginManager.DetachAccountAsync(cmd.AccountId);
-            return new CommandResultEvent("detachAccount", true, null);
-        }
-        catch (Exception ex)
-        {
-            return new CommandResultEvent("detachAccount", false, ex.Message);
-        }
+        var p = Deserialize<AccountIdParams>(request.Params);
+        await _loginManager.DetachAccountAsync(p.AccountId);
+        return IpcSerializer.SerializeResponse(request.Id);
     }
 
-    private async Task<IpcEvent> HandleRefreshAccountAsync(RefreshAccountCommand cmd, CancellationToken ct)
+    private async Task<string> HandleRefreshAccountAsync(IpcRequest request, CancellationToken ct)
     {
-        try
-        {
-            await _loginManager.RefreshAccountAsync(cmd.AccountId, IconPath, ct);
-            return new CommandResultEvent("refreshAccount", true, null);
-        }
-        catch (Exception ex)
-        {
-            return new CommandResultEvent("refreshAccount", false, ex.Message);
-        }
+        var p = Deserialize<AccountIdParams>(request.Params);
+        await _loginManager.RefreshAccountAsync(p.AccountId, IconPath, ct);
+        return IpcSerializer.SerializeResponse(request.Id);
     }
 
-    private async Task<IpcEvent> HandleCleanAccountAsync(CleanAccountCommand cmd, CancellationToken ct)
+    private async Task<string> HandleCleanAccountAsync(IpcRequest request, CancellationToken ct)
     {
-        try
-        {
-            await _loginManager.CleanAccountAsync(cmd.AccountId, IconPath, ct);
-            return new CommandResultEvent("cleanAccount", true, null);
-        }
-        catch (Exception ex)
-        {
-            return new CommandResultEvent("cleanAccount", false, ex.Message);
-        }
+        var p = Deserialize<AccountIdParams>(request.Params);
+        await _loginManager.CleanAccountAsync(p.AccountId, IconPath, ct);
+        return IpcSerializer.SerializeResponse(request.Id);
     }
 
-    private async Task<IpcEvent> HandleEnableAccountAsync(EnableAccountCommand cmd, CancellationToken ct)
+    private async Task<string> HandleEnableAccountAsync(IpcRequest request, CancellationToken ct)
     {
-        try
-        {
-            await _loginManager.EnableAccountAsync(cmd.LoginId, cmd.AccountId, IconPath, ct);
-            return new CommandResultEvent("enableAccount", true, null);
-        }
-        catch (Exception ex)
-        {
-            return new CommandResultEvent("enableAccount", false, ex.Message);
-        }
+        var p = Deserialize<EnableAccountParams>(request.Params);
+        await _loginManager.EnableAccountAsync(p.LoginId, p.AccountId, IconPath, ct);
+        return IpcSerializer.SerializeResponse(request.Id);
     }
 
-    private IpcEvent HandlePauseAccount(PauseAccountCommand cmd)
+    private string HandlePauseAccount(IpcRequest request)
     {
-        _loginManager.PauseAccount(cmd.AccountId);
-        return new CommandResultEvent("pauseAccount", true, null);
+        var p = Deserialize<AccountIdParams>(request.Params);
+        _loginManager.PauseAccount(p.AccountId);
+        return IpcSerializer.SerializeResponse(request.Id);
     }
 
-    private IpcEvent HandleResumeAccount(ResumeAccountCommand cmd)
+    private string HandleResumeAccount(IpcRequest request)
     {
-        _loginManager.ResumeAccount(cmd.AccountId);
-        return new CommandResultEvent("resumeAccount", true, null);
+        var p = Deserialize<AccountIdParams>(request.Params);
+        _loginManager.ResumeAccount(p.AccountId);
+        return IpcSerializer.SerializeResponse(request.Id);
     }
 
-    private IpcEvent HandleSyncNow(SyncNowCommand cmd)
+    private string HandleSyncNow(IpcRequest request)
     {
-        _loginManager.SyncNow(cmd.AccountId);
-        return new CommandResultEvent("syncNow", true, null);
+        var p = Deserialize<AccountIdParams>(request.Params);
+        _loginManager.SyncNow(p.AccountId);
+        return IpcSerializer.SerializeResponse(request.Id);
     }
+
+    private static T Deserialize<T>(JsonElement? element) => IpcSerializer.Deserialize<T>(element);
 
     private AccountInfo BuildAccountInfo(AccountSupervisor s)
     {
@@ -363,4 +281,20 @@ sealed class IpcCommandHandler
         SyncStatus.Paused => AccountStatus.Paused,
         _ => AccountStatus.Idle,
     };
+
+    // Internal param records for deserialization
+    private record AddLoginParams(string SessionUrl, string Token,
+        HashSet<string>? EnabledAccountIds = null,
+        string? RefreshToken = null, string? TokenEndpoint = null,
+        string? ClientId = null, long? ExpiresAtUnixSeconds = null);
+
+    private record DiscoverParams(string SessionUrl, string Token);
+    private record LoginIdParams(string LoginId);
+    private record AccountIdParams(string AccountId);
+    private record ConfigureLoginParams(string LoginId, HashSet<string> EnabledAccountIds);
+    private record EnableAccountParams(string LoginId, string AccountId);
+
+    private record UpdateLoginParams(string LoginId, string SessionUrl, string Token,
+        string? RefreshToken = null, string? TokenEndpoint = null,
+        string? ClientId = null, long? ExpiresAtUnixSeconds = null);
 }

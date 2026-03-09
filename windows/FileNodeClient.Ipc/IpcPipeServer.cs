@@ -6,24 +6,24 @@ namespace FileNodeClient.Ipc;
 
 /// <summary>
 /// Multi-client named pipe server. Accepts connections in a loop,
-/// reads JSON Lines commands, and dispatches them to a handler.
-/// Can broadcast events to all connected clients.
+/// reads JSON Lines requests, and dispatches them to a handler.
+/// Can broadcast push events to all connected clients.
 /// </summary>
 public sealed class IpcPipeServer : IDisposable
 {
     private readonly string _pipeName;
-    private readonly Func<IpcCommand, CancellationToken, Task<IpcEvent?>> _commandHandler;
+    private readonly Func<IpcRequest, CancellationToken, Task<string>> _requestHandler;
     private readonly List<ConnectedClient> _clients = new();
     private readonly object _clientsLock = new();
     private CancellationTokenSource? _cts;
     private Task? _acceptTask;
     private bool _disposed;
 
-    public IpcPipeServer(Func<IpcCommand, CancellationToken, Task<IpcEvent?>> commandHandler,
+    public IpcPipeServer(Func<IpcRequest, CancellationToken, Task<string>> requestHandler,
         string? pipeName = null)
     {
         _pipeName = pipeName ?? IpcConstants.PipeName;
-        _commandHandler = commandHandler;
+        _requestHandler = requestHandler;
     }
 
     public void Start(CancellationToken ct)
@@ -54,11 +54,11 @@ public sealed class IpcPipeServer : IDisposable
     }
 
     /// <summary>
-    /// Broadcast an event to all connected clients.
+    /// Broadcast a push event to all connected clients.
     /// </summary>
-    public async Task BroadcastAsync(IpcEvent evt)
+    public async Task BroadcastAsync(string method, object? @params = null)
     {
-        var json = IpcSerializer.Serialize(evt);
+        var json = IpcSerializer.SerializePush(method, @params);
 
         List<ConnectedClient> clients;
         lock (_clientsLock)
@@ -144,19 +144,15 @@ public sealed class IpcPipeServer : IDisposable
 
                 try
                 {
-                    var command = IpcSerializer.DeserializeCommand(line);
-                    if (command == null)
+                    var message = IpcSerializer.ParseMessage(line);
+                    if (message is not IpcRequest request)
                     {
-                        Log.Error($"[IPC] Unknown command: {line}");
+                        Log.Error($"[IPC] Expected request, got: {line}");
                         continue;
                     }
 
-                    var response = await _commandHandler(command, ct);
-                    if (response != null)
-                    {
-                        var json = IpcSerializer.Serialize(response);
-                        await client.WriteLineAsync(json);
-                    }
+                    var responseJson = await _requestHandler(request, ct);
+                    await client.WriteLineAsync(responseJson);
                 }
                 catch (Exception ex)
                 {

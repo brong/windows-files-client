@@ -12,108 +12,124 @@ public static class IpcSerializer
         Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) },
     };
 
-    // Type discriminator field name
-    private const string TypeField = "type";
-
-    private static readonly Dictionary<string, Type> CommandTypes = new()
+    public static string SerializeRequest(string id, string method, object? @params = null)
     {
-        ["getStatus"] = typeof(GetStatusCommand),
-        ["addLogin"] = typeof(AddLoginCommand),
-        ["discoverAccounts"] = typeof(DiscoverAccountsCommand),
-        ["removeLogin"] = typeof(RemoveLoginCommand),
-        ["cleanUpAccount"] = typeof(CleanUpAccountCommand),
-        ["configureLogin"] = typeof(ConfigureLoginCommand),
-        ["getOutbox"] = typeof(GetOutboxCommand),
-        ["getLoginAccounts"] = typeof(GetLoginAccountsCommand),
-        ["refreshLoginAccounts"] = typeof(RefreshLoginAccountsCommand),
-        ["updateLogin"] = typeof(UpdateLoginCommand),
-        ["detachAccount"] = typeof(DetachAccountCommand),
-        ["refreshAccount"] = typeof(RefreshAccountCommand),
-        ["cleanAccount"] = typeof(CleanAccountCommand),
-        ["enableAccount"] = typeof(EnableAccountCommand),
-        ["pauseAccount"] = typeof(PauseAccountCommand),
-        ["resumeAccount"] = typeof(ResumeAccountCommand),
-        ["syncNow"] = typeof(SyncNowCommand),
-    };
-
-    private static readonly Dictionary<string, Type> EventTypes = new()
-    {
-        ["statusSnapshot"] = typeof(StatusSnapshotEvent),
-        ["accountStatusChanged"] = typeof(AccountStatusChangedEvent),
-        ["accountsChanged"] = typeof(AccountsChangedEvent),
-        ["addLoginResult"] = typeof(AddLoginResultEvent),
-        ["discoverAccountsResult"] = typeof(DiscoverAccountsResultEvent),
-        ["commandResult"] = typeof(CommandResultEvent),
-        ["outboxSnapshot"] = typeof(OutboxSnapshotEvent),
-        ["loginAccountsResult"] = typeof(LoginAccountsResultEvent),
-    };
-
-    private static readonly Dictionary<Type, string> TypeToName;
-
-    static IpcSerializer()
-    {
-        TypeToName = new Dictionary<Type, string>();
-        foreach (var (name, type) in CommandTypes)
-            TypeToName[type] = name;
-        foreach (var (name, type) in EventTypes)
-            TypeToName[type] = name;
-    }
-
-    public static string Serialize(object message)
-    {
-        if (!TypeToName.TryGetValue(message.GetType(), out var typeName))
-            throw new ArgumentException($"Unknown message type: {message.GetType().Name}");
-
         using var stream = new MemoryStream();
         using var writer = new Utf8JsonWriter(stream);
-
         writer.WriteStartObject();
-        writer.WriteString(TypeField, typeName);
-
-        // Serialize the message body as a nested "data" object
-        var dataJson = JsonSerializer.SerializeToElement(message, message.GetType(), Options);
-        writer.WritePropertyName("data");
-        dataJson.WriteTo(writer);
-
+        writer.WriteString("id", id);
+        writer.WriteString("method", method);
+        if (@params != null)
+        {
+            writer.WritePropertyName("params");
+            JsonSerializer.SerializeToElement(@params, @params.GetType(), Options).WriteTo(writer);
+        }
         writer.WriteEndObject();
         writer.Flush();
-
         return System.Text.Encoding.UTF8.GetString(stream.ToArray());
     }
 
-    public static IpcCommand? DeserializeCommand(string json)
+    public static string SerializeResponse(string id, object? result = null)
     {
-        using var doc = JsonDocument.Parse(json);
-        var root = doc.RootElement;
-
-        if (!root.TryGetProperty(TypeField, out var typeProp))
-            return null;
-
-        var typeName = typeProp.GetString();
-        if (typeName == null || !CommandTypes.TryGetValue(typeName, out var type))
-            return null;
-
-        if (!root.TryGetProperty("data", out var dataProp))
-            return null;
-
-        return JsonSerializer.Deserialize(dataProp.GetRawText(), type, Options) as IpcCommand;
+        using var stream = new MemoryStream();
+        using var writer = new Utf8JsonWriter(stream);
+        writer.WriteStartObject();
+        writer.WriteString("id", id);
+        writer.WritePropertyName("result");
+        if (result != null)
+            JsonSerializer.SerializeToElement(result, result.GetType(), Options).WriteTo(writer);
+        else
+        {
+            writer.WriteStartObject();
+            writer.WriteEndObject();
+        }
+        writer.WriteEndObject();
+        writer.Flush();
+        return System.Text.Encoding.UTF8.GetString(stream.ToArray());
     }
 
-    public static IpcEvent? DeserializeEvent(string json)
+    public static string SerializeError(string id, string message)
+    {
+        using var stream = new MemoryStream();
+        using var writer = new Utf8JsonWriter(stream);
+        writer.WriteStartObject();
+        writer.WriteString("id", id);
+        writer.WritePropertyName("error");
+        writer.WriteStartObject();
+        writer.WriteString("message", message);
+        writer.WriteEndObject();
+        writer.WriteEndObject();
+        writer.Flush();
+        return System.Text.Encoding.UTF8.GetString(stream.ToArray());
+    }
+
+    public static string SerializePush(string method, object? @params = null)
+    {
+        using var stream = new MemoryStream();
+        using var writer = new Utf8JsonWriter(stream);
+        writer.WriteStartObject();
+        writer.WriteString("method", method);
+        if (@params != null)
+        {
+            writer.WritePropertyName("params");
+            JsonSerializer.SerializeToElement(@params, @params.GetType(), Options).WriteTo(writer);
+        }
+        writer.WriteEndObject();
+        writer.Flush();
+        return System.Text.Encoding.UTF8.GetString(stream.ToArray());
+    }
+
+    public static IpcMessage? ParseMessage(string json)
     {
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
-        if (!root.TryGetProperty(TypeField, out var typeProp))
-            return null;
+        var hasId = root.TryGetProperty("id", out var idProp);
+        var hasMethod = root.TryGetProperty("method", out var methodProp);
+        var hasResult = root.TryGetProperty("result", out var resultProp);
+        var hasError = root.TryGetProperty("error", out var errorProp);
 
-        var typeName = typeProp.GetString();
-        if (typeName == null || !EventTypes.TryGetValue(typeName, out var type))
-            return null;
+        if (hasId && hasMethod)
+        {
+            // Request
+            var id = idProp.GetString()!;
+            var method = methodProp.GetString()!;
+            JsonElement? @params = root.TryGetProperty("params", out var p) ? p.Clone() : null;
+            return new IpcRequest(id, method, @params);
+        }
 
-        if (!root.TryGetProperty("data", out var dataProp))
-            return null;
+        if (hasId && hasResult)
+        {
+            // Response
+            var id = idProp.GetString()!;
+            return new IpcResponse(id, resultProp.Clone());
+        }
 
-        return JsonSerializer.Deserialize(dataProp.GetRawText(), type, Options) as IpcEvent;
+        if (hasId && hasError)
+        {
+            // Error
+            var id = idProp.GetString()!;
+            var message = errorProp.TryGetProperty("message", out var msgProp)
+                ? msgProp.GetString() ?? "Unknown error"
+                : "Unknown error";
+            return new IpcError(id, message);
+        }
+
+        if (hasMethod && !hasId)
+        {
+            // Push
+            var method = methodProp.GetString()!;
+            JsonElement? @params = root.TryGetProperty("params", out var p) ? p.Clone() : null;
+            return new IpcPush(method, @params);
+        }
+
+        return null;
+    }
+
+    public static T Deserialize<T>(JsonElement? element)
+    {
+        if (element == null)
+            return JsonSerializer.Deserialize<T>("{}", Options)!;
+        return JsonSerializer.Deserialize<T>(element.Value.GetRawText(), Options)!;
     }
 }

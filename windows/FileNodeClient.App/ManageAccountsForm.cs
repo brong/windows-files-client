@@ -69,7 +69,7 @@ sealed class ManageAccountsForm : Form
 
     // Discovered accounts per login (populated async on form open)
     private readonly Dictionary<string, List<DiscoveredAccount>> _discoveredAccounts = new();
-    private readonly Dictionary<string, LoginAccountsResultEvent> _loginAccountResults = new();
+    private readonly Dictionary<string, LoginAccountsResult> _loginAccountResults = new();
     private readonly HashSet<string> _refreshedLogins = new();
 
     public ManageAccountsForm(ServiceClient serviceClient, CancellationTokenSource appCts)
@@ -854,7 +854,7 @@ sealed class ManageAccountsForm : Form
                 var result = await _serviceClient.GetLoginAccountsAsync(loginId);
                 return (loginId, result, (Exception?)null);
             }
-            catch (Exception ex) { return (loginId, (LoginAccountsResultEvent?)null, (Exception?)ex); }
+            catch (Exception ex) { return (loginId, (LoginAccountsResult?)null, (Exception?)ex); }
         }).ToList();
 
         foreach (var (loginId, result, _) in await Task.WhenAll(cachedTasks))
@@ -874,7 +874,7 @@ sealed class ManageAccountsForm : Form
                 var result = await _serviceClient.RefreshLoginAccountsAsync(loginId);
                 return (loginId, result, (Exception?)null);
             }
-            catch (Exception ex) { return (loginId, (LoginAccountsResultEvent?)null, (Exception?)ex); }
+            catch (Exception ex) { return (loginId, (LoginAccountsResult?)null, (Exception?)ex); }
         }).ToList();
 
         foreach (var (loginId, result, ex) in await Task.WhenAll(refreshTasks))
@@ -1342,15 +1342,9 @@ sealed class ManageAccountsForm : Form
         SetAllButtonsEnabled(false);
         try
         {
-            var result = await _serviceClient.UpdateLoginAsync(loginNode.LoginId, sessionUrl, token);
-            if (!result.Success)
-                MessageBox.Show($"Failed to update credentials: {result.Error}", "Error",
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
-            else
-            {
-                _tokenBox.Text = "";
-                _ = RefreshAllLoginAccountsAsync();
-            }
+            await _serviceClient.UpdateLoginAsync(loginNode.LoginId, sessionUrl, token);
+            _tokenBox.Text = "";
+            _ = RefreshAllLoginAccountsAsync();
         }
         catch (Exception ex)
         {
@@ -1387,23 +1381,15 @@ sealed class ManageAccountsForm : Form
             var cred = await flow.SignInAsync(progress);
 
             _reauthStatusLabel.Text = "Updating credentials...";
-            var result = await _serviceClient.UpdateLoginAsync(
+            await _serviceClient.UpdateLoginAsync(
                 loginNode.LoginId, cred.SessionUrl, cred.AccessToken,
                 cred.RefreshToken, cred.TokenEndpoint, cred.ClientId,
                 cred.ExpiresAt.ToUnixTimeSeconds());
 
-            if (!result.Success)
-            {
-                _reauthStatusLabel.Text = $"Failed: {result.Error}";
-                _reauthStatusLabel.ForeColor = Color.Red;
-            }
-            else
-            {
-                _reauthStatusLabel.Text = "Re-authenticated successfully.";
-                _reauthStatusLabel.ForeColor = Color.Green;
-                _tokenBox.Text = "";
-                _ = RefreshAllLoginAccountsAsync();
-            }
+            _reauthStatusLabel.Text = "Re-authenticated successfully.";
+            _reauthStatusLabel.ForeColor = Color.Green;
+            _tokenBox.Text = "";
+            _ = RefreshAllLoginAccountsAsync();
         }
         catch (Exception ex)
         {
@@ -1456,17 +1442,10 @@ sealed class ManageAccountsForm : Form
 
         try
         {
-            var cmdResult = await _serviceClient.RemoveLoginAsync(loginNode.LoginId);
-            if (!cmdResult.Success)
-                MessageBox.Show($"Failed to remove login: {cmdResult.Error}", "Error",
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
-            else
-            {
-                _discoveredAccounts.Remove(loginNode.LoginId);
-                _loginAccountResults.Remove(loginNode.LoginId);
-                _refreshedLogins.Remove(loginNode.LoginId);
-            }
-
+            await _serviceClient.RemoveLoginAsync(loginNode.LoginId);
+            _discoveredAccounts.Remove(loginNode.LoginId);
+            _loginAccountResults.Remove(loginNode.LoginId);
+            _refreshedLogins.Remove(loginNode.LoginId);
             RefreshTree();
         }
         catch (Exception ex)
@@ -1510,10 +1489,7 @@ sealed class ManageAccountsForm : Form
         }
         try
         {
-            var cmdResult = await _serviceClient.DetachAccountAsync(accountNode.AccountId);
-            if (!cmdResult.Success)
-                MessageBox.Show($"Failed to detach account: {cmdResult.Error}", "Error",
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+            await _serviceClient.DetachAccountAsync(accountNode.AccountId);
         }
         catch (Exception ex)
         {
@@ -1555,10 +1531,7 @@ sealed class ManageAccountsForm : Form
         }
         try
         {
-            var cmdResult = await _serviceClient.CleanUpAccountAsync(accountNode.AccountId);
-            if (!cmdResult.Success)
-                MessageBox.Show($"Failed to remove account: {cmdResult.Error}", "Error",
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+            await _serviceClient.CleanUpAccountAsync(accountNode.AccountId);
         }
         catch (Exception ex)
         {
@@ -1598,10 +1571,7 @@ sealed class ManageAccountsForm : Form
         }
         try
         {
-            var cmdResult = await _serviceClient.RefreshAccountAsync(accountNode.AccountId);
-            if (!cmdResult.Success)
-                MessageBox.Show($"Failed to refresh account: {cmdResult.Error}", "Error",
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+            await _serviceClient.RefreshAccountAsync(accountNode.AccountId);
         }
         catch (Exception ex)
         {
@@ -1646,10 +1616,7 @@ sealed class ManageAccountsForm : Form
 
         try
         {
-            var cmdResult = await _serviceClient.CleanAccountAsync(accountNode.AccountId);
-            if (!cmdResult.Success)
-                MessageBox.Show($"Failed to clean account: {cmdResult.Error}", "Error",
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+            await _serviceClient.CleanAccountAsync(accountNode.AccountId);
         }
         catch (Exception ex)
         {
@@ -1671,12 +1638,8 @@ sealed class ManageAccountsForm : Form
         SetAllButtonsEnabled(false);
         try
         {
-            var cmdResult = await _serviceClient.EnableAccountAsync(accountNode.LoginId, accountNode.AccountId);
-            if (!cmdResult.Success)
-                MessageBox.Show($"Failed to add account: {cmdResult.Error}", "Error",
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
-            else
-                await RefreshAllLoginAccountsAsync();
+            await _serviceClient.EnableAccountAsync(accountNode.LoginId, accountNode.AccountId);
+            await RefreshAllLoginAccountsAsync();
         }
         catch (Exception ex)
         {

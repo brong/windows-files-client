@@ -120,29 +120,29 @@ sealed class SyncHostedService : BackgroundService
     private void OnAccountsChanged()
     {
         if (_handler == null || _ipcServer == null) return;
-        var evt = _handler.BuildAccountsChanged();
-        _ = _ipcServer.BroadcastAsync(evt);
+        var payload = _handler.BuildAccountsChanged();
+        _ = _ipcServer.BroadcastAsync("accountsChanged", payload);
     }
 
     private void OnAggregateStatusChanged(SyncStatus status)
     {
         if (_handler == null || _ipcServer == null) return;
         var snapshot = _handler.BuildStatusSnapshot();
-        _ = _ipcServer.BroadcastAsync(snapshot);
+        _ = _ipcServer.BroadcastAsync("statusSnapshot", snapshot);
     }
 
     private void OnSupervisorStatusChanged(AccountSupervisor supervisor)
     {
         if (_handler == null || _ipcServer == null) return;
-        var evt = _handler.BuildAccountStatus(supervisor);
-        _ = _ipcServer.BroadcastAsync(evt);
+        var payload = _handler.BuildAccountStatus(supervisor);
+        _ = _ipcServer.BroadcastAsync("accountStatusChanged", payload);
     }
 
     private void OnSupervisorPendingCountChanged(AccountSupervisor supervisor)
     {
         if (_handler == null || _ipcServer == null) return;
-        var evt = _handler.BuildAccountStatus(supervisor);
-        _ = _ipcServer.BroadcastAsync(evt);
+        var payload = _handler.BuildAccountStatus(supervisor);
+        _ = _ipcServer.BroadcastAsync("accountStatusChanged", payload);
     }
 
     private static async Task<string?> DownloadIconAsync(CancellationToken ct)

@@ -20,13 +20,6 @@ sealed class ServiceClient : IDisposable
     private bool _connected;
     private bool _disposed;
 
-    // Pending response waiters (one at a time per command type)
-    private TaskCompletionSource<AddLoginResultEvent>? _addLoginTcs;
-    private TaskCompletionSource<DiscoverAccountsResultEvent>? _discoverTcs;
-    private TaskCompletionSource<CommandResultEvent>? _commandTcs;
-    private readonly Dictionary<string, TaskCompletionSource<OutboxSnapshotEvent>> _outboxTcs = new();
-    private readonly Dictionary<string, TaskCompletionSource<LoginAccountsResultEvent>> _loginAccountsTcs = new();
-
     public IReadOnlyList<AccountInfo> Accounts
     {
         get { lock (_lock) return _accounts.ToList(); }
@@ -69,7 +62,7 @@ sealed class ServiceClient : IDisposable
     public ServiceClient()
     {
         _client = new IpcPipeClient();
-        _client.EventReceived += OnEventReceived;
+        _client.PushReceived += OnPushReceived;
         _client.ConnectionChanged += OnConnectionChanged;
     }
 
@@ -88,7 +81,7 @@ sealed class ServiceClient : IDisposable
         try
         {
             if (_connected)
-                await _client.SendCommandAsync(new GetStatusCommand());
+                await _client.CallAsync("ping");
         }
         catch
         {
@@ -105,163 +98,124 @@ sealed class ServiceClient : IDisposable
         await _client.StopAsync();
     }
 
-    public async Task<AddLoginResultEvent> AddLoginAsync(string sessionUrl, string token,
+    public async Task<AddLoginResult> AddLoginAsync(string sessionUrl, string token,
         HashSet<string>? enabledAccountIds = null,
         string? refreshToken = null, string? tokenEndpoint = null,
         string? clientId = null, long? expiresAtUnixSeconds = null,
         CancellationToken ct = default)
     {
-        var tcs = new TaskCompletionSource<AddLoginResultEvent>();
-        lock (_lock) _addLoginTcs = tcs;
-
-        using var reg = ct.Register(() => tcs.TrySetCanceled());
-        await _client.SendCommandAsync(new AddLoginCommand(sessionUrl, token, enabledAccountIds,
-            refreshToken, tokenEndpoint, clientId, expiresAtUnixSeconds), ct);
-        return await tcs.Task;
+        return await CallAsync<AddLoginResult>("addLogin", new
+        {
+            sessionUrl, token, enabledAccountIds,
+            refreshToken, tokenEndpoint, clientId, expiresAtUnixSeconds,
+        }, ct);
     }
 
-    public async Task<DiscoverAccountsResultEvent> DiscoverAccountsAsync(string sessionUrl, string token,
+    public async Task<DiscoverAccountsResult> DiscoverAccountsAsync(string sessionUrl, string token,
         CancellationToken ct = default)
     {
-        var tcs = new TaskCompletionSource<DiscoverAccountsResultEvent>();
-        lock (_lock) _discoverTcs = tcs;
-
-        using var reg = ct.Register(() => tcs.TrySetCanceled());
-        await _client.SendCommandAsync(new DiscoverAccountsCommand(sessionUrl, token), ct);
-        return await tcs.Task;
+        return await CallAsync<DiscoverAccountsResult>("discoverAccounts", new
+        {
+            sessionUrl, token,
+        }, ct);
     }
 
-    public async Task<CommandResultEvent> RemoveLoginAsync(string loginId, CancellationToken ct = default)
+    public async Task RemoveLoginAsync(string loginId, CancellationToken ct = default)
     {
-        var tcs = new TaskCompletionSource<CommandResultEvent>();
-        lock (_lock) _commandTcs = tcs;
-
-        using var reg = ct.Register(() => tcs.TrySetCanceled());
-        await _client.SendCommandAsync(new RemoveLoginCommand(loginId), ct);
-        return await tcs.Task;
+        await CallVoidAsync("removeLogin", new { loginId }, ct);
     }
 
-    public async Task<CommandResultEvent> CleanUpAccountAsync(string accountId, CancellationToken ct = default)
+    public async Task CleanUpAccountAsync(string accountId, CancellationToken ct = default)
     {
-        var tcs = new TaskCompletionSource<CommandResultEvent>();
-        lock (_lock) _commandTcs = tcs;
-
-        using var reg = ct.Register(() => tcs.TrySetCanceled());
-        await _client.SendCommandAsync(new CleanUpAccountCommand(accountId), ct);
-        return await tcs.Task;
+        await CallVoidAsync("cleanUpAccount", new { accountId }, ct);
     }
 
-    public async Task<CommandResultEvent> ConfigureLoginAsync(string loginId,
+    public async Task ConfigureLoginAsync(string loginId,
         HashSet<string> enabledAccountIds, CancellationToken ct = default)
     {
-        var tcs = new TaskCompletionSource<CommandResultEvent>();
-        lock (_lock) _commandTcs = tcs;
-
-        using var reg = ct.Register(() => tcs.TrySetCanceled());
-        await _client.SendCommandAsync(new ConfigureLoginCommand(loginId, enabledAccountIds), ct);
-        return await tcs.Task;
+        await CallVoidAsync("configureLogin", new { loginId, enabledAccountIds }, ct);
     }
 
-    public async Task<OutboxSnapshotEvent> GetOutboxAsync(string accountId, CancellationToken ct = default)
+    public async Task<OutboxResult> GetOutboxAsync(string accountId, CancellationToken ct = default)
     {
-        var tcs = new TaskCompletionSource<OutboxSnapshotEvent>();
-        lock (_lock) _outboxTcs[accountId] = tcs;
-
-        using var reg = ct.Register(() => tcs.TrySetCanceled());
-        await _client.SendCommandAsync(new GetOutboxCommand(accountId), ct);
-        return await tcs.Task;
+        return await CallAsync<OutboxResult>("getOutbox", new { accountId }, ct);
     }
 
-    public async Task<CommandResultEvent> UpdateLoginAsync(string loginId, string sessionUrl,
+    public async Task UpdateLoginAsync(string loginId, string sessionUrl,
         string token, string? refreshToken = null, string? tokenEndpoint = null,
         string? clientId = null, long? expiresAtUnixSeconds = null,
         CancellationToken ct = default)
     {
-        var tcs = new TaskCompletionSource<CommandResultEvent>();
-        lock (_lock) _commandTcs = tcs;
-
-        using var reg = ct.Register(() => tcs.TrySetCanceled());
-        await _client.SendCommandAsync(new UpdateLoginCommand(loginId, sessionUrl, token,
-            refreshToken, tokenEndpoint, clientId, expiresAtUnixSeconds), ct);
-        return await tcs.Task;
+        await CallVoidAsync("updateLogin", new
+        {
+            loginId, sessionUrl, token,
+            refreshToken, tokenEndpoint, clientId, expiresAtUnixSeconds,
+        }, ct);
     }
 
-    public async Task<CommandResultEvent> DetachAccountAsync(string accountId, CancellationToken ct = default)
+    public async Task DetachAccountAsync(string accountId, CancellationToken ct = default)
     {
-        var tcs = new TaskCompletionSource<CommandResultEvent>();
-        lock (_lock) _commandTcs = tcs;
-
-        using var reg = ct.Register(() => tcs.TrySetCanceled());
-        await _client.SendCommandAsync(new DetachAccountCommand(accountId), ct);
-        return await tcs.Task;
+        await CallVoidAsync("detachAccount", new { accountId }, ct);
     }
 
-    public async Task<CommandResultEvent> RefreshAccountAsync(string accountId, CancellationToken ct = default)
+    public async Task RefreshAccountAsync(string accountId, CancellationToken ct = default)
     {
-        var tcs = new TaskCompletionSource<CommandResultEvent>();
-        lock (_lock) _commandTcs = tcs;
-
-        using var reg = ct.Register(() => tcs.TrySetCanceled());
-        await _client.SendCommandAsync(new RefreshAccountCommand(accountId), ct);
-        return await tcs.Task;
+        await CallVoidAsync("refreshAccount", new { accountId }, ct);
     }
 
-    public async Task<CommandResultEvent> CleanAccountAsync(string accountId, CancellationToken ct = default)
+    public async Task CleanAccountAsync(string accountId, CancellationToken ct = default)
     {
-        var tcs = new TaskCompletionSource<CommandResultEvent>();
-        lock (_lock) _commandTcs = tcs;
-
-        using var reg = ct.Register(() => tcs.TrySetCanceled());
-        await _client.SendCommandAsync(new CleanAccountCommand(accountId), ct);
-        return await tcs.Task;
+        await CallVoidAsync("cleanAccount", new { accountId }, ct);
     }
 
-    public async Task<CommandResultEvent> EnableAccountAsync(string loginId, string accountId,
+    public async Task EnableAccountAsync(string loginId, string accountId,
         CancellationToken ct = default)
     {
-        var tcs = new TaskCompletionSource<CommandResultEvent>();
-        lock (_lock) _commandTcs = tcs;
-
-        using var reg = ct.Register(() => tcs.TrySetCanceled());
-        await _client.SendCommandAsync(new EnableAccountCommand(loginId, accountId), ct);
-        return await tcs.Task;
+        await CallVoidAsync("enableAccount", new { loginId, accountId }, ct);
     }
 
-    public async Task<LoginAccountsResultEvent> RefreshLoginAccountsAsync(string loginId,
+    public async Task<LoginAccountsResult> RefreshLoginAccountsAsync(string loginId,
         CancellationToken ct = default)
     {
-        var tcs = new TaskCompletionSource<LoginAccountsResultEvent>();
-        lock (_lock) _loginAccountsTcs[loginId] = tcs;
-
-        using var reg = ct.Register(() => tcs.TrySetCanceled());
-        await _client.SendCommandAsync(new RefreshLoginAccountsCommand(loginId), ct);
-        return await tcs.Task;
+        return await CallAsync<LoginAccountsResult>("refreshLoginAccounts", new { loginId }, ct);
     }
 
     public async Task PauseAccountAsync(string accountId, CancellationToken ct = default)
     {
-        await _client.SendCommandAsync(new PauseAccountCommand(accountId), ct);
+        await CallVoidAsync("pauseAccount", new { accountId }, ct);
     }
 
     public async Task ResumeAccountAsync(string accountId, CancellationToken ct = default)
     {
-        await _client.SendCommandAsync(new ResumeAccountCommand(accountId), ct);
+        await CallVoidAsync("resumeAccount", new { accountId }, ct);
     }
 
     public async Task SyncNowAsync(string accountId, CancellationToken ct = default)
     {
-        await _client.SendCommandAsync(new SyncNowCommand(accountId), ct);
+        await CallVoidAsync("syncNow", new { accountId }, ct);
     }
 
-    public async Task<LoginAccountsResultEvent> GetLoginAccountsAsync(string loginId,
+    public async Task<LoginAccountsResult> GetLoginAccountsAsync(string loginId,
         CancellationToken ct = default)
     {
-        var tcs = new TaskCompletionSource<LoginAccountsResultEvent>();
-        lock (_lock) _loginAccountsTcs[loginId] = tcs;
+        return await CallAsync<LoginAccountsResult>("getLoginAccounts", new { loginId }, ct);
+    }
 
-        using var reg = ct.Register(() => tcs.TrySetCanceled());
-        await _client.SendCommandAsync(new GetLoginAccountsCommand(loginId), ct);
-        return await tcs.Task;
+    private async Task<T> CallAsync<T>(string method, object? @params, CancellationToken ct)
+    {
+        var response = await _client.CallAsync(method, @params, ct);
+        if (response is IpcError error)
+            throw new IpcCallException(error.Message);
+        if (response is IpcResponse success)
+            return IpcSerializer.Deserialize<T>(success.Result);
+        throw new IpcCallException("Unexpected response type");
+    }
+
+    private async Task CallVoidAsync(string method, object? @params, CancellationToken ct)
+    {
+        var response = await _client.CallAsync(method, @params, ct);
+        if (response is IpcError error)
+            throw new IpcCallException(error.Message);
     }
 
     private void OnConnectionChanged(bool connected)
@@ -285,11 +239,13 @@ sealed class ServiceClient : IDisposable
         StatusChanged?.Invoke();
     }
 
-    private void OnEventReceived(IpcEvent evt)
+    private void OnPushReceived(IpcPush push)
     {
-        switch (evt)
+        switch (push.Method)
         {
-            case StatusSnapshotEvent snapshot:
+            case "statusSnapshot":
+            {
+                var snapshot = IpcSerializer.Deserialize<StatusSnapshotResult>(push.Params);
                 lock (_lock)
                 {
                     _accounts = snapshot.Accounts;
@@ -302,8 +258,11 @@ sealed class ServiceClient : IDisposable
                 AccountsChanged?.Invoke();
                 StatusChanged?.Invoke();
                 break;
+            }
 
-            case AccountStatusChangedEvent statusEvt:
+            case "accountStatusChanged":
+            {
+                var statusEvt = IpcSerializer.Deserialize<AccountStatusPush>(push.Params);
                 lock (_lock)
                 {
                     var idx = _accounts.FindIndex(a => a.AccountId == statusEvt.AccountId);
@@ -317,13 +276,15 @@ sealed class ServiceClient : IDisposable
                             PendingCount = statusEvt.PendingCount,
                         };
                     }
-                    // Recalculate aggregate
                     RecalcAggregate();
                 }
                 StatusChanged?.Invoke();
                 break;
+            }
 
-            case AccountsChangedEvent accountsEvt:
+            case "accountsChanged":
+            {
+                var accountsEvt = IpcSerializer.Deserialize<AccountsChangedPush>(push.Params);
                 lock (_lock)
                 {
                     _accounts = accountsEvt.Accounts;
@@ -335,52 +296,7 @@ sealed class ServiceClient : IDisposable
                 AccountsChanged?.Invoke();
                 StatusChanged?.Invoke();
                 break;
-
-            case AddLoginResultEvent result:
-                lock (_lock)
-                {
-                    _addLoginTcs?.TrySetResult(result);
-                    _addLoginTcs = null;
-                }
-                break;
-
-            case DiscoverAccountsResultEvent result:
-                lock (_lock)
-                {
-                    _discoverTcs?.TrySetResult(result);
-                    _discoverTcs = null;
-                }
-                break;
-
-            case CommandResultEvent result:
-                lock (_lock)
-                {
-                    _commandTcs?.TrySetResult(result);
-                    _commandTcs = null;
-                }
-                break;
-
-            case OutboxSnapshotEvent result:
-                lock (_lock)
-                {
-                    if (_outboxTcs.TryGetValue(result.AccountId, out var outboxTcs))
-                    {
-                        outboxTcs.TrySetResult(result);
-                        _outboxTcs.Remove(result.AccountId);
-                    }
-                }
-                break;
-
-            case LoginAccountsResultEvent result:
-                lock (_lock)
-                {
-                    if (_loginAccountsTcs.TryGetValue(result.LoginId, out var loginTcs))
-                    {
-                        loginTcs.TrySetResult(result);
-                        _loginAccountsTcs.Remove(result.LoginId);
-                    }
-                }
-                break;
+            }
         }
     }
 

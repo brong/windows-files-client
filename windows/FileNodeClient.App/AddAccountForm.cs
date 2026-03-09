@@ -206,14 +206,6 @@ sealed class AddAccountForm : Form
             _statusLabel.Text = "Discovering accounts...";
             var discoverResult = await _serviceClient.DiscoverAccountsAsync(cred.SessionUrl, cred.AccessToken);
 
-            if (!discoverResult.Success || discoverResult.Accounts == null)
-            {
-                _statusLabel.Text = discoverResult.Error ?? "Discovery failed";
-                _statusLabel.ForeColor = Color.Red;
-                _signInButton.Enabled = true;
-                return;
-            }
-
             if (discoverResult.Accounts.Count == 0)
             {
                 _statusLabel.Text = "No FileNode accounts found";
@@ -297,14 +289,6 @@ sealed class AddAccountForm : Form
             // Phase 1: Discover accounts
             var discoverResult = await _serviceClient.DiscoverAccountsAsync(sessionUrl, token);
 
-            if (!discoverResult.Success || discoverResult.Accounts == null)
-            {
-                _statusLabel.Text = discoverResult.Error ?? "Discovery failed";
-                _statusLabel.ForeColor = Color.Red;
-                _connectButton.Enabled = true;
-                return;
-            }
-
             if (discoverResult.Accounts.Count == 0)
             {
                 _statusLabel.Text = "No FileNode accounts found";
@@ -341,14 +325,6 @@ sealed class AddAccountForm : Form
             // Phase 3: Add login via service (no OAuth fields — manual token)
             _statusLabel.Text = "Starting sync...";
             var addResult = await _serviceClient.AddLoginAsync(sessionUrl, token, enabledAccountIds);
-
-            if (!addResult.Success)
-            {
-                _statusLabel.Text = $"Error: {addResult.Error}";
-                _statusLabel.ForeColor = Color.Red;
-                _connectButton.Enabled = true;
-                return;
-            }
 
             _statusLabel.Text = $"Connected: {addResult.LoginId}";
             _statusLabel.ForeColor = Color.Green;
