@@ -27,11 +27,6 @@ dotnet publish "%BUILDDIR%\FileNodeClient.App\FileNodeClient.App.csproj" -c Rele
 if errorlevel 1 goto :error
 
 echo.
-echo Building ETW EventLog resource DLL...
-call :build_eventlog_dll
-if errorlevel 1 goto :error
-
-echo.
 echo Building native ThumbnailExtension DLL...
 call :build_thumbnail_dll
 if errorlevel 1 goto :error
@@ -105,64 +100,6 @@ echo.
 echo Success: bin\Release\FileNodeClient.msix
 popd
 goto :eof
-
-:build_eventlog_dll
-:: Compile ETW instrumentation manifest into a resource-only DLL
-:: This DLL lets Event Viewer format messages even when the app isn't running
-set "MAN_SRC=%BUILDDIR%\FileNodeClient.Package\FileNodeClient.man"
-set "EVENTLOG_OUT=%BUILDDIR%\FileNodeClient.Package\publish\FileNodeClient.EventLog.dll"
-
-:: Find mc.exe from Windows SDK
-set "MC_EXE="
-for /f "usebackq tokens=*" %%i in (`dir /b /o-n "%ProgramFiles(x86)%\Windows Kits\10\bin\10.*" 2^>nul`) do (
-    if exist "%ProgramFiles(x86)%\Windows Kits\10\bin\%%i\x64\mc.exe" (
-        if not defined MC_EXE set "MC_EXE=%ProgramFiles(x86)%\Windows Kits\10\bin\%%i\x64\mc.exe"
-    )
-)
-if not defined MC_EXE (
-    echo WARNING: mc.exe not found - EventLog resource DLL not built
-    exit /b 0
-)
-
-:: Find rc.exe from same SDK
-set "RC_EXE="
-for /f "usebackq tokens=*" %%i in (`dir /b /o-n "%ProgramFiles(x86)%\Windows Kits\10\bin\10.*" 2^>nul`) do (
-    if exist "%ProgramFiles(x86)%\Windows Kits\10\bin\%%i\x64\rc.exe" (
-        if not defined RC_EXE set "RC_EXE=%ProgramFiles(x86)%\Windows Kits\10\bin\%%i\x64\rc.exe"
-    )
-)
-
-:: Find link.exe via Visual Studio
-set "VSWHERE_EVT=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
-if not exist "%VSWHERE_EVT%" (
-    echo WARNING: Visual Studio not found - EventLog resource DLL not built
-    exit /b 0
-)
-for /f "usebackq tokens=*" %%i in (`"%VSWHERE_EVT%" -latest -property installationPath`) do set "VSDIR_EVT=%%i"
-set "VCVARS_EVT=%VSDIR_EVT%\VC\Auxiliary\Build\vcvarsall.bat"
-
-pushd "%BUILDDIR%\FileNodeClient.Package"
-"%MC_EXE%" -um FileNodeClient.man
-if errorlevel 1 (
-    echo WARNING: mc.exe failed - EventLog resource DLL not built
-    popd
-    exit /b 0
-)
-"%RC_EXE%" FileNodeClient.rc
-if errorlevel 1 (
-    echo WARNING: rc.exe failed - EventLog resource DLL not built
-    popd
-    exit /b 0
-)
-cmd /c "call "%VCVARS_EVT%" x64 >nul 2>&1 && link /NOENTRY /DLL /MACHINE:X64 /OUT:"%EVENTLOG_OUT%" FileNodeClient.res"
-if errorlevel 1 (
-    echo WARNING: link.exe failed - EventLog resource DLL not built
-    popd
-    exit /b 0
-)
-popd
-echo EventLog resource DLL built successfully
-exit /b 0
 
 :build_thumbnail_dll
 :: Compile native C thumbnail handler DLL using MSVC

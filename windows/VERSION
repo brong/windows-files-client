@@ -15,5 +15,4 @@
   - Auto-start on login via MSIX startup tasks
   - Active downloads shown in activity pane
   - Tray icon turns blue during downloads
-  - ETW logging (Event Viewer: Fastmail-FileNodeClient-Service/App)
-  - All local data under %LOCALAPPDATA%\Fastmail\FileNodeClient\
+  - File logging to %LOCALAPPDATA%\Fastmail\FileNodeClient\

@@ -40,20 +40,6 @@ dotnet.exe publish FileNodeClient.Service/FileNodeClient.Service.csproj -c Relea
 echo "=== Publishing App ==="
 dotnet.exe publish FileNodeClient.App/FileNodeClient.App.csproj -c Release -r win-x64 --self-contained -o FileNodeClient.Package/publish 2>&1 | tail -3
 
-echo "=== Building ETW EventLog resource DLL ==="
-MANFILE="$BUILDDIR/FileNodeClient.Package/FileNodeClient.man"
-if [ -f "$MANFILE" ]; then
-    cd "$BUILDDIR/FileNodeClient.Package"
-    MC="/mnt/c/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64/mc.exe"
-    "$MC" -um FileNodeClient.man
-    x86_64-w64-mingw32-windres -i FileNodeClient.rc -o FileNodeClient_res.o
-    x86_64-w64-mingw32-gcc -shared -nostdlib -o "$BUILDDIR/FileNodeClient.Package/publish/FileNodeClient.EventLog.dll" FileNodeClient_res.o -lkernel32 -e 0
-    echo "EventLog resource DLL built"
-    cd "$BUILDDIR"
-else
-    echo "No FileNodeClient.man found, skipping EventLog DLL"
-fi
-
 echo "=== Building native thumbnail DLL ==="
 if [ -f "$WINSRC/FileNodeClient.ThumbnailExtension/ThumbnailHandler.c" ]; then
     x86_64-w64-mingw32-gcc -shared -O2 \

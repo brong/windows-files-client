@@ -11,9 +11,6 @@ static class AppLogger
 
     public static void Initialize(bool debug)
     {
-        // Touch the ETW EventSource so it registers with the OS immediately
-        _ = FileNodeClientEventSource.Instance;
-
         if (debug)
         {
             _originalConsole = Console.Out;
@@ -64,29 +61,6 @@ static class AppLogger
                     catch { }
                 }
             }
-
-            // Write to ETW (appears in Event Viewer under
-            // Applications and Services Logs > Fastmail-FileNodeClient-App > Operational)
-            var etw = FileNodeClientEventSource.Instance;
-            try
-            {
-                switch (level)
-                {
-                    case LogLevel.Debug:
-                        etw.DebugMessage(msg);
-                        break;
-                    case LogLevel.Info:
-                        etw.InfoMessage(msg);
-                        break;
-                    case LogLevel.Warning:
-                        etw.WarningMessage(msg);
-                        break;
-                    case LogLevel.Error:
-                        etw.ErrorMessage(msg);
-                        break;
-                }
-            }
-            catch { /* best-effort ETW */ }
         };
     }
 }

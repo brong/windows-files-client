@@ -2,16 +2,13 @@
 <Package
   xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
-  xmlns:uap4="http://schemas.microsoft.com/appx/manifest/uap/windows10/4"
   xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
   xmlns:com="http://schemas.microsoft.com/appx/manifest/com/windows10"
   xmlns:desktop3="http://schemas.microsoft.com/appx/manifest/desktop/windows10/3"
   xmlns:desktop4="http://schemas.microsoft.com/appx/manifest/desktop/windows10/4"
-  xmlns:desktop7="http://schemas.microsoft.com/appx/manifest/desktop/windows10/7"
-  xmlns:desktop8="http://schemas.microsoft.com/appx/manifest/desktop/windows10/8"
   xmlns:cloudFiles="http://schemas.microsoft.com/appx/manifest/cloudstorage/windows10"
-  IgnorableNamespaces="uap uap4 desktop desktop3 desktop4 desktop7 desktop8 rescap com cloudFiles">
+  IgnorableNamespaces="uap desktop desktop3 desktop4 rescap com cloudFiles">
 
   <Identity
     Name="Fastmail.FileNodeClient"
@@ -99,38 +96,6 @@
 
   <Capabilities>
     <rescap:Capability Name="runFullTrust" />
-    <uap4:CustomCapability Name="Microsoft.classicAppCompat_8wekyb3d8bbwe" />
-    <uap4:CustomCapability Name="Microsoft.classicAppCompatElevated_8wekyb3d8bbwe" />
   </Capabilities>
 
-  <Extensions>
-    <!-- ETW providers: events appear in Event Viewer under
-         Applications and Services Logs > Fastmail-FileNodeClient-Service/App > Operational -->
-    <desktop8:Extension Category="windows.eventTracing"
-                        desktop7:Scope="machine"
-                        desktop7:CompatMode="classic">
-      <desktop8:EventTracing>
-        <desktop8:Provider Id="584b95ba-9994-512f-a63a-bb0e7100084b"
-                           Name="Fastmail-FileNodeClient-Service"
-                           ResourceFile="FileNodeClient.EventLog.dll"
-                           MessageFile="FileNodeClient.EventLog.dll">
-          <desktop8:Channels>
-            <desktop8:Channel Name="Fastmail-FileNodeClient-Service/Operational"
-                              Type="operational"
-                              Enabled="true" />
-          </desktop8:Channels>
-        </desktop8:Provider>
-        <desktop8:Provider Id="d0379af1-950b-5d91-afba-b6c91473c5b2"
-                           Name="Fastmail-FileNodeClient-App"
-                           ResourceFile="FileNodeClient.EventLog.dll"
-                           MessageFile="FileNodeClient.EventLog.dll">
-          <desktop8:Channels>
-            <desktop8:Channel Name="Fastmail-FileNodeClient-App/Operational"
-                              Type="operational"
-                              Enabled="true" />
-          </desktop8:Channels>
-        </desktop8:Provider>
-      </desktop8:EventTracing>
-    </desktop8:Extension>
-  </Extensions>
 </Package>
