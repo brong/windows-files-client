@@ -82,9 +82,9 @@ Native "Share" button in Explorer creates a Fastmail sharing link.
 
 ~~COM handler that provides a URL for "View in browser" on cloud files.~~ ✓ Done — `IStorageProviderUriSource` COM handler reads `webUrlTemplate` from the FileNode account capability, replaces `{nodeId}` with the placeholder's FileIdentity. Registered via MSIX manifest as an ExeServer on FileNodeClient.Service.exe.
 
-### 17. CfGetPlatformInfo
+### ~~17. CfGetPlatformInfo~~ ✅
 
-Feature detection for version-specific capabilities (integration number check).
+~~Feature detection for version-specific capabilities (integration number check).~~ Implemented via `Environment.OSVersion.Version.Build` instead — `CfGetPlatformInfo` itself requires build 19041+ so it can't be used for backward compatibility. `CfApiCapabilities` static class provides `HasBlockSelfHydration` (≥18362), `HasSyncStatus` (≥19041), and `HasProgressiveHydration` (≥19041) with graceful degradation for all guarded features.
 
 ### ~~18. Progressive hydration policy~~ ✓ Done
 

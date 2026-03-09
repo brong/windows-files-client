@@ -1004,7 +1004,7 @@ internal class SyncCallbacks
         opParams.Anonymous.TransferData.Offset = 0;
         opParams.Anonymous.TransferData.Length = 0;
 
-        if (message != null)
+        if (message != null && CfApiCapabilities.HasSyncStatus)
         {
             if (message.Length > 200)
                 message = message[..200];

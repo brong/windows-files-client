@@ -74,7 +74,9 @@ internal class SyncRoot : IDisposable
         info.Path = folder;
         info.DisplayNameResource = displayName;
         info.IconResource = iconResource;
-        info.HydrationPolicy = StorageProviderHydrationPolicy.Progressive;
+        info.HydrationPolicy = CfApiCapabilities.HasProgressiveHydration
+            ? StorageProviderHydrationPolicy.Progressive
+            : StorageProviderHydrationPolicy.Full;
         info.HydrationPolicyModifier = StorageProviderHydrationPolicyModifier.AutoDehydrationAllowed;
         info.PopulationPolicy = StorageProviderPopulationPolicy.AlwaysFull;
         info.InSyncPolicy = StorageProviderInSyncPolicy.FileLastWriteTime
@@ -111,7 +113,9 @@ internal class SyncRoot : IDisposable
             null,
             CF_CONNECT_FLAGS.CF_CONNECT_FLAG_REQUIRE_PROCESS_INFO
                 | CF_CONNECT_FLAGS.CF_CONNECT_FLAG_REQUIRE_FULL_FILE_PATH
-                | CF_CONNECT_FLAGS.CF_CONNECT_FLAG_BLOCK_SELF_IMPLICIT_HYDRATION,
+                | (CfApiCapabilities.HasBlockSelfHydration
+                    ? CF_CONNECT_FLAGS.CF_CONNECT_FLAG_BLOCK_SELF_IMPLICIT_HYDRATION
+                    : 0),
             &key).ThrowOnFailure();
 
         _connectionKey = key;
@@ -160,6 +164,9 @@ internal class SyncRoot : IDisposable
 
     internal unsafe void ReportSyncStatus(uint code, string? message)
     {
+        if (!CfApiCapabilities.HasSyncStatus)
+            return;
+
         try
         {
             if (message == null)

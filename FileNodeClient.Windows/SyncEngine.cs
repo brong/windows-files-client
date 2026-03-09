@@ -394,6 +394,7 @@ public class SyncEngine : IDisposable
 
     public void Connect()
     {
+        CfApiCapabilities.LogCapabilities();
         var (registrations, delegates) = _syncCallbacks.CreateCallbackRegistrations();
         _syncRoot.Connect(registrations, delegates);
 

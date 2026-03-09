@@ -525,25 +525,29 @@ public class OutboxProcessor : IDisposable
     /// </summary>
     private FileStream OpenFileForUpload(string path)
     {
-        try
+        if (CfApiCapabilities.HasBlockSelfHydration)
         {
-            PInvoke.CfOpenFileWithOplock(
-                path,
-                CF_OPEN_FILE_FLAGS.CF_OPEN_FILE_FLAG_NONE,
-                out var handle).ThrowOnFailure();
+            try
+            {
+                PInvoke.CfOpenFileWithOplock(
+                    path,
+                    CF_OPEN_FILE_FLAGS.CF_OPEN_FILE_FLAG_NONE,
+                    out var handle).ThrowOnFailure();
 
-            // CsWin32 returns CfCloseHandleSafeHandle — wrap in FileStream for reading.
-            // Transfer ownership: create a non-owning SafeFileHandle so FileStream
-            // disposes it, then dispose the CfCloseHandleSafeHandle separately.
-            var safeHandle = new SafeFileHandle(handle.DangerousGetHandle(), ownsHandle: false);
-            return new CfOplockFileStream(safeHandle, handle);
+                // CsWin32 returns CfCloseHandleSafeHandle — wrap in FileStream for reading.
+                // Transfer ownership: create a non-owning SafeFileHandle so FileStream
+                // disposes it, then dispose the CfCloseHandleSafeHandle separately.
+                var safeHandle = new SafeFileHandle(handle.DangerousGetHandle(), ownsHandle: false);
+                return new CfOplockFileStream(safeHandle, handle);
+            }
+            catch (Exception ex)
+            {
+                Log.Info($"{_logPrefix} CfOpenFileWithOplock failed for {Path.GetFileName(path)}, using FileStream: {ex.Message}");
+            }
         }
-        catch (Exception ex)
-        {
-            Log.Info($"{_logPrefix} CfOpenFileWithOplock failed for {Path.GetFileName(path)}, using FileStream: {ex.Message}");
-            return new FileStream(path, FileMode.Open, FileAccess.Read,
-                FileShare.ReadWrite | FileShare.Delete);
-        }
+
+        return new FileStream(path, FileMode.Open, FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
     }
 
     /// <summary>
