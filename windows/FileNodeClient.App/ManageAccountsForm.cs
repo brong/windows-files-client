@@ -62,6 +62,7 @@ sealed class ManageAccountsForm : Form
     private bool _operationInProgress;
     private bool _outboxDirty = true;
     private bool _hasActiveUploads;
+    private readonly Button _addLoginButton;
     private readonly Button _startServiceButton;
     private readonly Button _stopServiceButton;
     private readonly Button _restartServiceButton;
@@ -384,14 +385,15 @@ sealed class ManageAccountsForm : Form
             Height = 48,
         };
 
-        var addLoginButton = new Button
+        _addLoginButton = new Button
         {
             Text = "Add Login...",
             AutoSize = true,
             Height = 30,
             Margin = new Padding(0, 0, 4, 0),
+            Enabled = _serviceClient.IsConnected,
         };
-        addLoginButton.Click += OnAddLoginClicked;
+        _addLoginButton.Click += OnAddLoginClicked;
 
         _startServiceButton = new Button
         {
@@ -431,7 +433,7 @@ sealed class ManageAccountsForm : Form
             WrapContents = false,
             Location = new Point(10, 9),
         };
-        leftButtons.Controls.AddRange([addLoginButton, _startServiceButton, _stopServiceButton, _restartServiceButton]);
+        leftButtons.Controls.AddRange([_addLoginButton, _startServiceButton, _stopServiceButton, _restartServiceButton]);
 
         var exitButton = new Button
         {
@@ -536,6 +538,7 @@ sealed class ManageAccountsForm : Form
     private void UpdateServiceButtons()
     {
         var connected = _serviceClient.IsConnected;
+        _addLoginButton.Enabled = connected;
         _startServiceButton.Visible = !connected;
         _startServiceButton.Enabled = true;
         _startServiceButton.Text = "Start Service";
@@ -1144,6 +1147,10 @@ sealed class ManageAccountsForm : Form
 
         if (node == null)
         {
+            if (!_serviceClient.IsConnected)
+                _noSelectionLabel.Text = "Service is not running. Click \"Start Service\" to connect.";
+            else
+                _noSelectionLabel.Text = "Select a login or account from the tree.";
             _noSelectionLabel.Visible = true;
             return;
         }

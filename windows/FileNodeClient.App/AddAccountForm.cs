@@ -195,6 +195,14 @@ sealed class AddAccountForm : Form
             var cred = await flow.SignInAsync(progress);
 
             // Discover accounts
+            if (!_serviceClient.IsConnected)
+            {
+                _statusLabel.Text = "Service is not running. Start the service first.";
+                _statusLabel.ForeColor = Color.Red;
+                _signInButton.Enabled = true;
+                return;
+            }
+
             _statusLabel.Text = "Discovering accounts...";
             var discoverResult = await _serviceClient.DiscoverAccountsAsync(cred.SessionUrl, cred.AccessToken);
 
@@ -250,7 +258,8 @@ sealed class AddAccountForm : Form
         }
         catch (Exception ex)
         {
-            _statusLabel.Text = $"Error: {ex.Message}";
+            var msg = string.IsNullOrWhiteSpace(ex.Message) ? ex.GetType().Name : ex.Message;
+            _statusLabel.Text = $"Error: {msg}";
             _statusLabel.ForeColor = Color.Red;
             _signInButton.Enabled = true;
         }
@@ -271,6 +280,13 @@ sealed class AddAccountForm : Form
 
         if (string.IsNullOrEmpty(sessionUrl))
             sessionUrl = DefaultSessionUrl;
+
+        if (!_serviceClient.IsConnected)
+        {
+            _statusLabel.Text = "Service is not running. Start the service first.";
+            _statusLabel.ForeColor = Color.Red;
+            return;
+        }
 
         _connectButton.Enabled = false;
         _statusLabel.Text = "Connecting...";
@@ -344,7 +360,8 @@ sealed class AddAccountForm : Form
         }
         catch (Exception ex)
         {
-            _statusLabel.Text = $"Error: {ex.Message}";
+            var msg = string.IsNullOrWhiteSpace(ex.Message) ? ex.GetType().Name : ex.Message;
+            _statusLabel.Text = $"Error: {msg}";
             _statusLabel.ForeColor = Color.Red;
             _connectButton.Enabled = true;
         }
