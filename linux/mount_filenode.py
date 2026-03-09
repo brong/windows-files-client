@@ -20,6 +20,38 @@ from fusefs import FileNodeFS
 log = logging.getLogger("mount")
 
 
+SYNC_INTERVAL = 30  # seconds between change polls
+
+
+async def sync_loop(jmap, fs):
+    """Background task: poll FileNode/changes and apply to the FUSE tree."""
+    while True:
+        await trio.sleep(SYNC_INTERVAL)
+        if not jmap.state:
+            continue
+        try:
+            while True:
+                created, updated, destroyed, new_state, has_more = \
+                    await jmap.get_changes(jmap.state)
+                if not created and not updated and not destroyed:
+                    jmap.state = new_state
+                    break
+                await fs.apply_changes(created, updated, destroyed)
+                jmap.state = new_state
+                if not has_more:
+                    break
+        except RuntimeError as e:
+            if "cannotCalculateChanges" in str(e):
+                log.warning("State too old, doing full resync")
+                nodes, state = await jmap.get_all_nodes()
+                home_id, trash_id = await jmap.find_home_and_trash()
+                fs.populate(nodes, home_id, trash_id)
+            else:
+                log.error("Sync error: %s", e)
+        except Exception as e:
+            log.error("Sync error: %s", e)
+
+
 async def main_async(args):
     # Connect to JMAP
     jmap = JmapClient(args.session_url, args.token)
@@ -33,7 +65,8 @@ async def main_async(args):
     log.info("Fetched %d nodes, state=%s", len(nodes), state)
 
     # Build the FUSE filesystem
-    fs = FileNodeFS(jmap)
+    cache_dir = args.cache_dir or os.path.expanduser("~/.cache/filenode")
+    fs = FileNodeFS(jmap, cache_dir=cache_dir)
     fs.populate(nodes, home_id, trash_id)
 
     # Mount
@@ -56,7 +89,10 @@ async def main_async(args):
              sum(1 for n in nodes if not n.is_folder))
 
     try:
-        await pyfuse3.main()
+        async with trio.open_nursery() as nursery:
+            nursery.start_soon(sync_loop, jmap, fs)
+            await pyfuse3.main()
+            nursery.cancel_scope.cancel()
     finally:
         pyfuse3.close()
         await jmap.close()
@@ -69,6 +105,7 @@ def main():
     parser.add_argument("--token", help="JMAP bearer token")
     parser.add_argument("--token-file", help="File containing JMAP bearer token")
     parser.add_argument("--session-url", required=True, help="JMAP session URL")
+    parser.add_argument("--cache-dir", help="Directory for blob disk cache (default: ~/.cache/filenode)")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     args = parser.parse_args()
 

@@ -9,6 +9,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 
 import pyfuse3
+import trio
 
 from jmap_client import FileNode
 
@@ -22,7 +23,7 @@ ROOT_INODE = pyfuse3.ROOT_INODE  # 1
 class FileNodeFS(pyfuse3.Operations):
     """FUSE filesystem backed by JMAP FileNode."""
 
-    def __init__(self, jmap_client):
+    def __init__(self, jmap_client, cache_dir: str | None = None):
         super().__init__()
         self._jmap = jmap_client
 
@@ -37,8 +38,13 @@ class FileNodeFS(pyfuse3.Operations):
         # Children: parent_id → [node_id, ...]
         self._children: dict[str, list[str]] = defaultdict(list)
 
-        # Blob cache: node_id → bytes (in-memory, simple LRU would be better)
+        # In-memory blob cache: node_id → bytes
         self._blob_cache: dict[str, bytes] = {}
+
+        # On-disk blob cache directory (keyed by blob_id)
+        self._cache_dir = cache_dir
+        if cache_dir:
+            os.makedirs(cache_dir, exist_ok=True)
 
         # Write buffers: inode → bytearray (accumulated writes before flush)
         self._write_buffers: dict[int, bytearray] = {}
@@ -78,6 +84,50 @@ class FileNodeFS(pyfuse3.Operations):
                  len(self._nodes),
                  sum(1 for n in self._nodes.values() if n.is_folder))
 
+    async def apply_changes(self, created_ids: list[str], updated_ids: list[str],
+                            destroyed_ids: list[str]):
+        """Apply incremental changes from FileNode/changes to the in-memory tree."""
+        # Remove destroyed nodes
+        for node_id in destroyed_ids:
+            ino = self._node_id_to_inode.get(node_id)
+            self._remove_node(node_id)
+            if ino is not None:
+                try:
+                    pyfuse3.invalidate_inode(ino)
+                except Exception:
+                    pass
+            log.debug("Destroyed node: %s", node_id)
+
+        # Fetch created + updated nodes from server
+        fetch_ids = list(set(created_ids + updated_ids))
+        if fetch_ids:
+            new_nodes = await self._jmap.get_nodes_by_id(fetch_ids)
+            for node in new_nodes:
+                old_node = self._nodes.get(node.id)
+                if old_node:
+                    # Updated — remove from old parent's children if parent changed
+                    if old_node.parent_id != node.parent_id and old_node.parent_id:
+                        children = self._children.get(old_node.parent_id, [])
+                        if node.id in children:
+                            children.remove(node.id)
+                    # Invalidate blob cache if blob changed
+                    if old_node.blob_id != node.blob_id:
+                        self._blob_cache.pop(node.id, None)
+                    ino = self._node_id_to_inode.get(node.id)
+                    if ino is not None:
+                        try:
+                            pyfuse3.invalidate_inode(ino)
+                        except Exception:
+                            pass
+
+                # Add/update the node
+                self._add_node(node)
+                log.debug("Added/updated node: %s (%s)", node.name, node.id)
+
+        log.info("Applied changes: +%d ~%d -%d (total: %d nodes)",
+                 len(created_ids), len(updated_ids), len(destroyed_ids),
+                 len(self._nodes))
+
     def _get_or_assign_inode(self, node_id: str) -> int:
         ino = self._node_id_to_inode.get(node_id)
         if ino is not None:
@@ -116,6 +166,29 @@ class FileNodeFS(pyfuse3.Operations):
             self._inode_to_node_id.pop(ino, None)
         # Clean up caches
         self._blob_cache.pop(node_id, None)
+
+    def _cache_path(self, blob_id: str) -> str | None:
+        """Return the on-disk cache path for a blob, or None if no cache dir."""
+        if not self._cache_dir:
+            return None
+        # blob_id may contain characters like / or : so use a safe filename
+        safe = blob_id.replace("/", "_").replace(":", "_")
+        return os.path.join(self._cache_dir, safe)
+
+    def _cache_read(self, blob_id: str) -> bytes | None:
+        """Read a blob from the disk cache, or None if not cached."""
+        path = self._cache_path(blob_id)
+        if path and os.path.exists(path):
+            with open(path, "rb") as f:
+                return f.read()
+        return None
+
+    def _cache_write(self, blob_id: str, data: bytes):
+        """Write a blob to the disk cache."""
+        path = self._cache_path(blob_id)
+        if path:
+            with open(path, "wb") as f:
+                f.write(data)
 
     def _make_entry(self, node: FileNode) -> pyfuse3.EntryAttributes:
         """Build an EntryAttributes struct from a FileNode."""
@@ -242,15 +315,21 @@ class FileNodeFS(pyfuse3.Operations):
         if not node.blob_id:
             return b""
 
-        # Hydrate on demand
+        # Hydrate on demand: memory cache → disk cache → server
         if node.id not in self._blob_cache:
-            log.info("Hydrating: %s (%s, %d bytes)", node.name, node.id, node.size)
-            try:
-                data = await self._jmap.download_blob(node.blob_id)
-                self._blob_cache[node.id] = data
-            except Exception as e:
-                log.error("Download failed for %s: %s", node.name, e)
-                raise pyfuse3.FUSEError(errno.EIO)
+            cached = self._cache_read(node.blob_id)
+            if cached is not None:
+                log.debug("Disk cache hit: %s (%s)", node.name, node.blob_id)
+                self._blob_cache[node.id] = cached
+            else:
+                log.info("Hydrating: %s (%s, %d bytes)", node.name, node.id, node.size)
+                try:
+                    data = await self._jmap.download_blob(node.blob_id)
+                    self._blob_cache[node.id] = data
+                    self._cache_write(node.blob_id, data)
+                except Exception as e:
+                    log.error("Download failed for %s: %s", node.name, e)
+                    raise pyfuse3.FUSEError(errno.EIO)
 
         data = self._blob_cache[node.id]
         return data[offset:offset + length]
@@ -328,6 +407,8 @@ class FileNodeFS(pyfuse3.Operations):
                 self._inode_to_node_id[fh] = new_node.id
                 self._node_id_to_inode[new_node.id] = fh
                 self._blob_cache[new_node.id] = data
+                if new_node.blob_id:
+                    self._cache_write(new_node.blob_id, data)
             else:
                 # Existing file — replace on server
                 log.info("Replacing file: %s (%d bytes)", name, len(data))
@@ -338,6 +419,8 @@ class FileNodeFS(pyfuse3.Operations):
                 self._inode_to_node_id[fh] = new_node.id
                 self._node_id_to_inode[new_node.id] = fh
                 self._blob_cache[new_node.id] = data
+                if new_node.blob_id:
+                    self._cache_write(new_node.blob_id, data)
         except Exception as e:
             log.error("Failed to upload %s: %s", name, e)
             # Keep the local state so the user doesn't lose data
