@@ -1,42 +1,60 @@
-## Building
+## Project: Fastmail Files Client
 
-Development runs in WSL2 — use `dotnet.exe` (Windows binary) for all build/run commands.
+Multi-platform cloud filesystem client for the JMAP FileNode API (draft-ietf-jmap-filenode).
 
-### Debug build (all projects)
-
-```
-dotnet.exe build FileNodeClient.sln
-```
-
-The solution contains 7 projects: Logging (cross-platform, Log static class), Jmap (cross-platform, JMAP protocol), Ipc (App↔Service IPC messages and pipes), Windows (cfapi sync engine), App (tray UI), Service (background sync), Package (MSIX). The native ThumbnailExtension DLL is built separately with MinGW (not in the .sln).
-
-### Dev testing
+### Repository Structure
 
 ```
-dotnet.exe run --project FileNodeClient.App -- --debug --token <token> --session-url <url> --clean
+files-client/
+├── DESIGN.md              # Cross-platform design document (architecture, protocol, pitfalls)
+├── CLAUDE.md              # This file
+├── windows/               # Windows client (C#/.NET, cfapi cloud files)
+│   ├── CLAUDE.md          # Windows-specific build instructions
+│   ├── ROADMAP.md         # Windows cfapi feature roadmap
+│   ├── FileNodeClient.sln # .NET solution (7 projects)
+│   └── ...
+└── linux/                 # Linux FUSE client (Python, pyfuse3)
+    └── ...
 ```
 
-### MSIX Package (primary installer)
+### Design Document
 
-The MSIX package provides package identity required for cloud files extensions (Explorer columns, thumbnails, context menus).
+Read `DESIGN.md` before working on any platform. It contains:
+- JMAP FileNode protocol details (session, auth, methods, blob operations, SSE push)
+- Sync engine architecture (populate, incremental sync, outbox, concurrency)
+- Echo suppression strategy (mtime-based, never key-presence-only)
+- Timestamp preservation (always pass local created/modified to server)
+- 21 documented pitfalls from the Windows implementation
+- Platform integration comparison table
 
-**Build from Windows (or WSL2 via `powershell.exe`):**
-```
-FileNodeClient.Package\build.cmd
-```
+### Shared Protocol Concepts
 
-This publishes App + Service + ThumbnailExtension, creates a self-signed dev cert, and produces `FileNodeClient.Package\bin\Release\FileNodeClient.msix`.
+All platforms implement the same JMAP protocol. Key invariants:
+- **blobId is immutable**: Update file content via destroy+create with `onExists: "replace"`
+- **Preserve timestamps**: Always pass local `created` and `modified` to the server on upload
+- **Echo suppression**: Compare mtime, never suppress on key presence alone
+- **State tokens**: Use `FileNode/changes` for incremental sync, handle `cannotCalculateChanges`
+- **Capability checks**: Verify server capabilities before using optional features (Blob, BlobExt, Quota)
 
-**Dev inner loop (no .msix rebuild needed):**
-```powershell
-# Publish all into shared dir so ServiceLauncher finds Service.exe
-dotnet publish FileNodeClient.Service -c Release -r win-x64 --self-contained -o FileNodeClient.Package\publish
-dotnet publish FileNodeClient.App -c Release -r win-x64 --self-contained -o FileNodeClient.Package\publish
-# Register from publish dir — SurrogateServer DLL paths resolve relative to AppxManifest.xml
-copy FileNodeClient.Package\AppxManifest.xml FileNodeClient.Package\publish\
-xcopy /s /y FileNodeClient.Package\Assets FileNodeClient.Package\publish\Assets\
-Add-AppxPackage -Register FileNodeClient.Package\publish\AppxManifest.xml
-```
+### Platform Clients
 
-This publishes into a flat layout and registers the package identity from the publish directory. The manifest must be alongside the published files so SurrogateServer `Path` attributes resolve correctly (dllhost.exe loads comhost.dll relative to the package root). Both executables must be in the same directory for stop/start/restart to work (ServiceLauncher finds Service.exe via AppContext.BaseDirectory).
+#### Windows (`windows/`)
+- **Language**: C# / .NET 9
+- **File system**: Windows Cloud Files API (cfapi) — native placeholder/hydration support
+- **Build**: `dotnet.exe build windows/FileNodeClient.sln` (from WSL2)
+- **Status**: Feature-complete (sync, thumbnails, URI source, recycle bin, progressive hydration)
+- See `windows/CLAUDE.md` for detailed build/test instructions
 
+#### Linux (`linux/`)
+- **Language**: Python 3
+- **File system**: FUSE3 via pyfuse3 — userspace filesystem
+- **Dependencies**: `pyfuse3`, `aiohttp` (install via venv)
+- **Status**: In development
+- Target: Mount JMAP FileNode tree as a local filesystem with on-demand hydration
+
+### Development Notes
+
+- The Windows client was built first; lessons are captured in `DESIGN.md`
+- Each platform directory has its own `.gitignore` and build instructions
+- The JMAP protocol layer should be reimplemented per-platform (not shared across languages)
+- Focus on getting the sync engine right first, then add shell integration (thumbnails, etc.)

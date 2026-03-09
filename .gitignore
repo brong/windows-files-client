@@ -1,11 +1,12 @@
-bin/
-obj/
+# IDE / editor
 .vs/
 *.user
 *.suo
-FileNodeClient.Installer/publish/
-FileNodeClient.Package/publish/
-FileNodeClient.Package/DevCert.pfx
-FileNodeClient.Package/mapping.txt
-FileNodeClient.ThumbnailExtension/*.dll
+.vscode/
+__pycache__/
+*.pyc
+
+# Claude
 .claude/
+
+# Platform-specific ignores are in each subdirectory
