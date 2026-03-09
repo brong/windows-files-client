@@ -50,6 +50,9 @@ sealed class ManageAccountsForm : Form
     // No selection panel
     private readonly Label _noSelectionLabel;
 
+    // Empty activity state
+    private readonly Label _activityEmptyLabel;
+
     // Data model
     private record LoginNode(string LoginId);
     private record AccountNode(string LoginId, string AccountId, string Name,
@@ -321,7 +324,7 @@ sealed class ManageAccountsForm : Form
 
         _syncedAccountPanel.Controls.Add(syncedTopLayout);
 
-        // Activity list view — created here, added to _detailPanel later (always visible)
+        // Activity list view — created here, added to _detailPanel later
         _activityListView = new ListView
         {
             Dock = DockStyle.Fill,
@@ -329,6 +332,7 @@ sealed class ManageAccountsForm : Form
             FullRowSelect = true,
             HeaderStyle = ColumnHeaderStyle.Clickable,
             ShowItemToolTips = true,
+            Visible = false,
             OwnerDraw = true,
         };
         var em = Font.Height;
@@ -341,6 +345,17 @@ sealed class ManageAccountsForm : Form
         _activityListView.DrawColumnHeader += (_, e) => e.DrawDefault = true;
         _activityListView.DrawItem += (_, _) => { };
         _activityListView.DrawSubItem += OnDrawActivitySubItem;
+
+        // Empty activity label — shown when nothing to sync
+        _activityEmptyLabel = new Label
+        {
+            Text = "Nothing to sync",
+            Dock = DockStyle.Fill,
+            ForeColor = Color.Green,
+            TextAlign = ContentAlignment.MiddleCenter,
+            Font = new Font(Font.FontFamily, Font.Size * 1.2f),
+            Visible = true,
+        };
 
         // ======= Available (non-synced) account panel =======
         _availableAccountPanel = new Panel { Dock = DockStyle.Top, AutoSize = true, Visible = false };
@@ -384,7 +399,7 @@ sealed class ManageAccountsForm : Form
             Padding = new Padding(0, 8, 0, 0),
         };
 
-        _detailPanel.Controls.AddRange([_loginPanel, _syncedAccountPanel, _availableAccountPanel, _noSelectionLabel, _activityListView]);
+        _detailPanel.Controls.AddRange([_loginPanel, _syncedAccountPanel, _availableAccountPanel, _noSelectionLabel, _activityEmptyLabel, _activityListView]);
 
         // --- Bottom bar ---
         var bottomPanel = new Panel
@@ -643,6 +658,16 @@ sealed class ManageAccountsForm : Form
 
         _outboxDirty = false;
 
+        // When disconnected, hide activity pane entirely
+        if (!_serviceClient.IsConnected)
+        {
+            _activityListView.Visible = false;
+            _activityEmptyLabel.Visible = false;
+            _activityListView.Items.Clear();
+            _hasActiveTransfers = false;
+            return;
+        }
+
         // Poll all synced accounts concurrently
         var syncedAccounts = _serviceClient.Accounts
             .Where(a => a.Status != AccountStatus.Idle || a.PendingCount > 0 || _hasActiveTransfers)
@@ -703,33 +728,30 @@ sealed class ManageAccountsForm : Form
     {
         var now = DateTime.UtcNow;
 
-        // Build desired items keyed for incremental update
+        // Build all items into a flat list, then sort by progress descending
         var desired = new List<(string Key, string Col0, string Col1, string Col2, string Col3, string Col4,
-            Color ForeColor, string Tooltip, int? ProgressTag)>();
+            Color ForeColor, string Tooltip, int? ProgressTag, int SortProgress)>();
 
-        // Active downloads first
-        foreach (var (displayName, accountId, _, dl) in downloads.Where(d => !d.Download.IsPending))
+        // Downloads (active and pending)
+        foreach (var (displayName, accountId, _, dl) in downloads)
         {
-            var statusText = dl.Progress.HasValue ? "" : "Downloading...";
-            var tooltip = dl.Progress.HasValue ? $"Downloading {dl.Progress.Value}%" : dl.FileName;
-            desired.Add(($"dl:{accountId}:{dl.FileName}", displayName, dl.FileName, "Download",
-                statusText, FormatRelativeTime(dl.StartedAt, now),
-                Color.DodgerBlue, tooltip, dl.Progress));
-        }
-
-        // Pending downloads
-        foreach (var (displayName, accountId, _, dl) in downloads.Where(d => d.Download.IsPending))
-        {
-            desired.Add(($"pending:{accountId}:{dl.FileName}", displayName, dl.FileName, "Download",
-                "Queued", "", Color.Gray, dl.FileName, null));
+            if (dl.IsPending)
+            {
+                desired.Add(($"pending:{accountId}:{dl.FileName}", displayName, dl.FileName, "Download",
+                    "Queued", "", Color.Gray, dl.FileName, null, -2));
+            }
+            else
+            {
+                var statusText = dl.Progress.HasValue ? "" : "Downloading...";
+                var tooltip = dl.Progress.HasValue ? $"Downloading {dl.Progress.Value}%" : dl.FileName;
+                desired.Add(($"dl:{accountId}:{dl.FileName}", displayName, dl.FileName, "Download",
+                    statusText, FormatRelativeTime(dl.StartedAt, now),
+                    Color.DodgerBlue, tooltip, dl.Progress, dl.Progress ?? -1));
+            }
         }
 
         // Outbox entries
-        var sorted = entries.OrderByDescending(e =>
-            e.Entry.IsProcessing ? (e.Entry.UploadProgress ?? -1) : -2)
-            .ThenBy(e => e.Entry.CreatedAt);
-
-        foreach (var (displayName, _, _, entry) in sorted)
+        foreach (var (displayName, _, _, entry) in entries)
         {
             var name = entry.LocalPath != null
                 ? Path.GetFileName(entry.LocalPath)
@@ -738,10 +760,12 @@ sealed class ManageAccountsForm : Form
             var action = DeriveAction(entry);
             string status;
             int? progress = null;
+            int sortProgress = -2;
             if (entry.IsProcessing)
             {
                 progress = entry.UploadProgress;
                 status = progress.HasValue ? "" : "Syncing...";
+                sortProgress = progress ?? -1;
             }
             else
             {
@@ -760,81 +784,102 @@ sealed class ManageAccountsForm : Form
 
             desired.Add(($"outbox:{entry.Id}", displayName, name, action,
                 status, FormatRelativeTime(entry.UpdatedAt, now),
-                color, tooltip, progress));
+                color, tooltip, progress, sortProgress));
         }
 
-        // Empty state
+        // Sort: highest progress first, then in-progress without %, then queued/waiting
+        desired.Sort((a, b) => b.SortProgress.CompareTo(a.SortProgress));
+
+        // Toggle between empty label and list view
         if (desired.Count == 0)
         {
-            desired.Add(("empty", "", "", "", "No changes to sync", "",
-                Color.Green, "", null));
+            _activityListView.Visible = false;
+            _activityEmptyLabel.Visible = true;
+            _activityListView.Items.Clear();
+            _hasActiveTransfers = false;
+            return;
         }
 
-        // Incremental update: match by key to avoid flicker
+        _activityEmptyLabel.Visible = false;
+        _activityListView.Visible = true;
+
+        // Minimal diff: match by key, move existing rows, only touch what changed
         _activityListView.BeginUpdate();
 
-        // Build lookup of existing items by key (stored in Name)
-        var existingByKey = new Dictionary<string, int>();
-        for (int i = 0; i < _activityListView.Items.Count; i++)
-            existingByKey[_activityListView.Items[i].Name] = i;
-
-        // If item count or keys changed, do a full rebuild
-        bool structureChanged = desired.Count != _activityListView.Items.Count
-            || desired.Select(d => d.Key).Zip(
-                Enumerable.Range(0, _activityListView.Items.Count)
-                    .Select(i => _activityListView.Items[i].Name))
-                .Any(pair => pair.First != pair.Second);
-
-        if (structureChanged)
+        for (int i = 0; i < desired.Count; i++)
         {
-            _activityListView.Items.Clear();
-            foreach (var d in desired)
+            var d = desired[i];
+
+            if (i < _activityListView.Items.Count && _activityListView.Items[i].Name == d.Key)
             {
-                var item = new ListViewItem(d.Col0) { Name = d.Key };
-                item.SubItems.Add(d.Col1);
-                item.SubItems.Add(d.Col2);
-                var statusSub = item.SubItems.Add(d.Col3);
-                if (d.ProgressTag.HasValue)
-                    statusSub.Tag = d.ProgressTag.Value;
-                item.SubItems.Add(d.Col4);
-                item.ForeColor = d.ForeColor;
-                item.ToolTipText = d.Tooltip;
-                _activityListView.Items.Add(item);
+                // Key already in the right position — update fields only if changed
+                UpdateItemFields(_activityListView.Items[i], d);
             }
-        }
-        else
-        {
-            // Same structure — update in place
-            for (int i = 0; i < desired.Count; i++)
+            else
             {
-                var d = desired[i];
-                var item = _activityListView.Items[i];
-                bool needsRedraw = false;
-
-                if (item.Text != d.Col0) item.Text = d.Col0;
-                if (item.SubItems[1].Text != d.Col1) item.SubItems[1].Text = d.Col1;
-                if (item.SubItems[2].Text != d.Col2) item.SubItems[2].Text = d.Col2;
-                if (item.SubItems[3].Text != d.Col3) item.SubItems[3].Text = d.Col3;
-
-                var oldTag = item.SubItems[3].Tag as int?;
-                if (oldTag != d.ProgressTag)
+                // Look for this key later in the current list
+                int foundAt = -1;
+                for (int j = i + 1; j < _activityListView.Items.Count; j++)
                 {
-                    item.SubItems[3].Tag = d.ProgressTag.HasValue ? (object)d.ProgressTag.Value : null;
-                    needsRedraw = true;
+                    if (_activityListView.Items[j].Name == d.Key)
+                    {
+                        foundAt = j;
+                        break;
+                    }
                 }
 
-                if (item.SubItems[4].Text != d.Col4) item.SubItems[4].Text = d.Col4;
-                if (item.ForeColor != d.ForeColor) item.ForeColor = d.ForeColor;
-                if (item.ToolTipText != d.Tooltip) item.ToolTipText = d.Tooltip;
-
-                // Invalidate only the progress bar cell if tag changed
-                if (needsRedraw)
-                    _activityListView.Invalidate(item.SubItems[3].Bounds);
+                if (foundAt >= 0)
+                {
+                    // Move existing item from foundAt to position i
+                    var item = _activityListView.Items[foundAt];
+                    _activityListView.Items.RemoveAt(foundAt);
+                    _activityListView.Items.Insert(i, item);
+                    UpdateItemFields(item, d);
+                }
+                else
+                {
+                    // New item — insert at position i
+                    var item = new ListViewItem(d.Col0) { Name = d.Key };
+                    item.SubItems.Add(d.Col1);
+                    item.SubItems.Add(d.Col2);
+                    var statusSub = item.SubItems.Add(d.Col3);
+                    if (d.ProgressTag.HasValue)
+                        statusSub.Tag = d.ProgressTag.Value;
+                    item.SubItems.Add(d.Col4);
+                    item.ForeColor = d.ForeColor;
+                    item.ToolTipText = d.Tooltip;
+                    _activityListView.Items.Insert(i, item);
+                }
             }
         }
+
+        // Remove any trailing items no longer in the desired list
+        while (_activityListView.Items.Count > desired.Count)
+            _activityListView.Items.RemoveAt(_activityListView.Items.Count - 1);
 
         _activityListView.EndUpdate();
         _hasActiveTransfers = entries.Any(e => e.Entry.IsProcessing) || downloads.Count > 0;
+    }
+
+    private void UpdateItemFields(ListViewItem item,
+        (string Key, string Col0, string Col1, string Col2, string Col3, string Col4,
+         Color ForeColor, string Tooltip, int? ProgressTag, int SortProgress) d)
+    {
+        if (item.Text != d.Col0) item.Text = d.Col0;
+        if (item.SubItems[1].Text != d.Col1) item.SubItems[1].Text = d.Col1;
+        if (item.SubItems[2].Text != d.Col2) item.SubItems[2].Text = d.Col2;
+        if (item.SubItems[3].Text != d.Col3) item.SubItems[3].Text = d.Col3;
+
+        var oldTag = item.SubItems[3].Tag as int?;
+        if (oldTag != d.ProgressTag)
+        {
+            item.SubItems[3].Tag = d.ProgressTag.HasValue ? (object)d.ProgressTag.Value : null;
+            _activityListView.Invalidate(item.SubItems[3].Bounds);
+        }
+
+        if (item.SubItems[4].Text != d.Col4) item.SubItems[4].Text = d.Col4;
+        if (item.ForeColor != d.ForeColor) item.ForeColor = d.ForeColor;
+        if (item.ToolTipText != d.Tooltip) item.ToolTipText = d.Tooltip;
     }
 
     private void OnDrawActivitySubItem(object? sender, DrawListViewSubItemEventArgs e)
@@ -1258,10 +1303,16 @@ sealed class ManageAccountsForm : Form
         if (node == null)
         {
             if (!_serviceClient.IsConnected)
+            {
                 _noSelectionLabel.Text = "Service is not running. Click \"Start Service\" to connect.";
+                _noSelectionLabel.Visible = true;
+            }
             else
-                _noSelectionLabel.Text = "Select a login or account from the tree.";
-            _noSelectionLabel.Visible = true;
+            {
+                // No selection — show all activity (unfiltered)
+                _noSelectionLabel.Visible = false;
+            }
+            _outboxDirty = true;
             return;
         }
 

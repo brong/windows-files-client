@@ -2,6 +2,8 @@
 #   1. This file (VERSION)
 #   2. windows/FileNodeClient.Package/AppxManifest.xml  (<Identity Version="...">)
 
+1.0.8.0  2026-03-09  Minimal-diff activity list, unified progress sorting, upload echo fix
+1.0.7.0  2026-03-09  Fix streaming crash (use-after-free PCWSTR), hide activity when disconnected
 1.0.5.0  2026-03-09  Fix pending cleanup, incremental activity list updates
 1.0.4.0  2026-03-09  Download progress tracking, pending queue, activity pane improvements
 1.0.3.0  2026-03-09  Fix pin-hydration status, crash recovery, thread safety

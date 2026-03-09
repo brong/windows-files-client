@@ -238,17 +238,6 @@ public class SyncEngine : IDisposable
     private void OnDownloadStarted(long transferKey, string fileName, long? totalSize, string? fullPath)
     {
         _activeDownloads[transferKey] = (fileName, DateTime.UtcNow, totalSize);
-        // Remove from pending queue if this file was queued for pin-hydration.
-        // Try both the exact path and a normalized version since cfapi may use
-        // \\?\ prefix while Directory.EnumerateFiles returns a plain path.
-        if (fullPath != null)
-        {
-            if (!_pendingHydrations.TryRemove(fullPath, out _))
-            {
-                var normalized = fullPath.StartsWith(@"\\?\") ? fullPath[4..] : @"\\?\" + fullPath;
-                _pendingHydrations.TryRemove(normalized, out _);
-            }
-        }
         var count = _activeDownloads.Count + _pendingHydrations.Count;
         _downloadDetail = count > 1
             ? $"Downloading {fileName} (and {count - 1} more)"
@@ -1285,18 +1274,26 @@ public class SyncEngine : IDisposable
             if (isDirectory && _pathToNodeId.ContainsKey(change.FullPath))
                 continue;
 
-            // Skip re-enqueue if this file was just hydrated by cfapi and mtime hasn't changed
-            if (!isDirectory && _pathToNodeId.TryGetValue(change.FullPath, out var existingNodeId)
-                && _syncCallbacks.RecentlyHydrated.TryRemove(existingNodeId, out var hydratedWriteTime))
+            // Skip re-enqueue if this file is currently being hydrated (streaming
+            // downloads can take longer than the FSW debounce interval, so the
+            // Changed event arrives before RecentlyHydrated is set)
+            if (!isDirectory && _pathToNodeId.TryGetValue(change.FullPath, out var existingNodeId))
             {
-                try
+                if (_syncCallbacks.IsHydrating(existingNodeId))
+                    continue;
+
+                // Also check if it was JUST hydrated and mtime hasn't changed
+                if (_syncCallbacks.RecentlyHydrated.TryRemove(existingNodeId, out var hydratedWriteTime))
                 {
-                    if (File.GetLastWriteTimeUtc(change.FullPath) == hydratedWriteTime)
-                        continue;
-                }
-                catch
-                {
-                    continue; // File gone
+                    try
+                    {
+                        if (File.GetLastWriteTimeUtc(change.FullPath) == hydratedWriteTime)
+                            continue;
+                    }
+                    catch
+                    {
+                        continue; // File gone
+                    }
                 }
             }
 
@@ -1872,8 +1869,10 @@ public class SyncEngine : IDisposable
                     }
 
                     Log.Info($"{_logPrefix} Hydrating pinned file: {Path.GetFileName(filePath)}");
-                    HydratePlaceholder(filePath);
+                    // Remove from pending BEFORE hydrating — the transition is
+                    // pending → active (tracked by _activeDownloads via FETCH_DATA)
                     _pendingHydrations.TryRemove(filePath, out _);
+                    HydratePlaceholder(filePath);
                     count++;
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)

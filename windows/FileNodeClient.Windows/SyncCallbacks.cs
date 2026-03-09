@@ -64,6 +64,20 @@ internal class SyncCallbacks
     public event Action<long>? OnDownloadCompleted;          // transferKey
 
     /// <summary>
+    /// Returns true if a FETCH_DATA is currently in flight for the given node ID.
+    /// Used to suppress FSW echo during streaming hydration.
+    /// </summary>
+    public bool IsHydrating(string nodeId)
+    {
+        foreach (var (_, (_, nid)) in _inFlightFetches)
+        {
+            if (nid == nodeId)
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>
     /// Tracks open file state: open count and LastWriteTimeUtc at first open.
     /// Used to detect whether the file was actually modified between open and close.
     /// </summary>
@@ -278,7 +292,7 @@ internal class SyncCallbacks
                 // transferred via CfExecute (which works from any thread).
                 var cbInfo = *callbackInfo;
                 cleanupHere = false;
-                StreamBlobAsync(cbInfo, node, transferKey, nodeId, cts);
+                StreamBlobAsync(cbInfo, node, transferKey, nodeId, fullPath, cts);
                 return;
             }
 
@@ -811,7 +825,7 @@ internal class SyncCallbacks
     /// </summary>
     private void StreamBlobAsync(
         CF_CALLBACK_INFO callbackInfo, FileNode node,
-        long transferKey, string nodeId, CancellationTokenSource cts)
+        long transferKey, string nodeId, string fullPath, CancellationTokenSource cts)
     {
         Task.Run(async () =>
         {
@@ -901,8 +915,7 @@ internal class SyncCallbacks
 
                 if (nodeId != null)
                 {
-                    var hydratedPath = callbackInfo.NormalizedPath.ToString();
-                    RecentlyHydrated[nodeId] = GetLastWriteTimeSafe(hydratedPath);
+                    RecentlyHydrated[nodeId] = GetLastWriteTimeSafe(fullPath);
                 }
             }
             catch (OperationCanceledException)
