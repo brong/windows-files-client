@@ -752,16 +752,49 @@ sealed class ManageAccountsForm : Form
             _activityListView.Items.Add(item);
         }
 
-        // Add active downloads at the top of the list
-        foreach (var (displayName, _, _, dl) in downloads)
+        // Add active downloads at the top, pending downloads after
+        var activeDownloads = downloads.Where(d => !d.Download.IsPending).ToList();
+        var pendingDownloads = downloads.Where(d => d.Download.IsPending).ToList();
+
+        // Insert pending downloads (shown after active, before outbox entries)
+        for (int i = pendingDownloads.Count - 1; i >= 0; i--)
         {
+            var (displayName, _, _, dl) = pendingDownloads[i];
             var item = new ListViewItem(displayName);
             item.SubItems.Add(dl.FileName);
             item.SubItems.Add("Download");
-            item.SubItems.Add("Downloading...");
+            item.SubItems.Add("Queued");
+            item.SubItems.Add("");
+            item.ForeColor = Color.Gray;
+            _activityListView.Items.Insert(0, item);
+        }
+
+        // Insert active downloads at the very top (with progress bars)
+        for (int i = activeDownloads.Count - 1; i >= 0; i--)
+        {
+            var (displayName, _, _, dl) = activeDownloads[i];
+            var item = new ListViewItem(displayName);
+            item.SubItems.Add(dl.FileName);
+            item.SubItems.Add("Download");
+            var statusSubItem = item.SubItems.Add(dl.Progress.HasValue ? "" : "Downloading...");
+            if (dl.Progress.HasValue)
+                statusSubItem.Tag = dl.Progress.Value;
             item.SubItems.Add(FormatRelativeTime(dl.StartedAt, now));
             item.ForeColor = Color.DodgerBlue;
+            item.ToolTipText = dl.Progress.HasValue ? $"Downloading {dl.Progress.Value}%" : dl.FileName;
             _activityListView.Items.Insert(0, item);
+        }
+
+        // Show "no changes" message when activity list is empty
+        if (_activityListView.Items.Count == 0)
+        {
+            var item = new ListViewItem("");
+            item.SubItems.Add("");
+            item.SubItems.Add("");
+            item.SubItems.Add("No changes to sync");
+            item.SubItems.Add("");
+            item.ForeColor = Color.Green;
+            _activityListView.Items.Add(item);
         }
 
         _activityListView.EndUpdate();

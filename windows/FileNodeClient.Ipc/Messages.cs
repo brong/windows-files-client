@@ -39,7 +39,8 @@ public record DiscoveredAccount(string AccountId, string Name, bool IsPrimary);
 
 public record FailedLogin(string LoginId, string Error);
 
-public record ActiveDownloadEntry(string FileName, DateTime StartedAt);
+public record ActiveDownloadEntry(string FileName, DateTime StartedAt,
+    int? Progress = null, long? TotalSize = null, bool IsPending = false);
 
 // ---- Wire-format envelope types ----
 

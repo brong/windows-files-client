@@ -168,7 +168,8 @@ sealed class IpcCommandHandler
 
         var downloadSnapshot = supervisor.GetActiveDownloadSnapshot();
         var activeDownloads = downloadSnapshot.Count > 0
-            ? downloadSnapshot.Select(d => new ActiveDownloadEntry(d.FileName, d.StartedAt)).ToList()
+            ? downloadSnapshot.Select(d => new ActiveDownloadEntry(
+                d.FileName, d.StartedAt, d.Progress, d.TotalSize, d.IsPending)).ToList()
             : null;
 
         return IpcSerializer.SerializeResponse(request.Id,

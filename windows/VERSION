@@ -2,6 +2,7 @@
 #   1. This file (VERSION)
 #   2. windows/FileNodeClient.Package/AppxManifest.xml  (<Identity Version="...">)
 
+1.0.4.0  2026-03-09  Download progress tracking, pending queue, activity pane improvements
 1.0.3.0  2026-03-09  Fix pin-hydration status, crash recovery, thread safety
 1.0.2.0  2026-03-09  First release
   - Two-process architecture (App tray UI + Service background sync)

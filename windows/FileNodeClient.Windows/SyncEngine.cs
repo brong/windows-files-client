@@ -79,13 +79,28 @@ public class SyncEngine : IDisposable
     public event Action<int>? PendingCountChanged;
     public event Action<int>? ActiveDownloadCountChanged;
 
-    private readonly ConcurrentDictionary<long, (string FileName, DateTime StartedAt)> _activeDownloads = new();
+    private readonly ConcurrentDictionary<long, (string FileName, DateTime StartedAt, long? TotalSize)> _activeDownloads = new();
+    private readonly ConcurrentDictionary<long, int> _downloadProgress = new();
+    // Files queued for pin-hydration (not yet started). Keyed by file path.
+    private readonly ConcurrentDictionary<string, (string FileName, long? Size)> _pendingHydrations = new(StringComparer.OrdinalIgnoreCase);
     private string? _downloadDetail;
 
-    public int ActiveDownloadCount => _activeDownloads.Count;
+    public int ActiveDownloadCount => _activeDownloads.Count + _pendingHydrations.Count;
 
-    public List<(string FileName, DateTime StartedAt)> GetActiveDownloadSnapshot()
-        => _activeDownloads.Values.ToList();
+    public List<(string FileName, DateTime StartedAt, int? Progress, long? TotalSize, bool IsPending)> GetActiveDownloadSnapshot()
+    {
+        var result = new List<(string, DateTime, int?, long?, bool)>();
+        foreach (var kvp in _activeDownloads)
+        {
+            _downloadProgress.TryGetValue(kvp.Key, out var progress);
+            result.Add((kvp.Value.FileName, kvp.Value.StartedAt, progress > 0 ? progress : null, kvp.Value.TotalSize, false));
+        }
+        foreach (var kvp in _pendingHydrations)
+        {
+            result.Add((kvp.Value.FileName, DateTime.UtcNow, null, kvp.Value.Size, true));
+        }
+        return result;
+    }
 
     /// <summary>
     /// Unregister a previous sync root for the given account and delete all
@@ -220,10 +235,13 @@ public class SyncEngine : IDisposable
         return null;
     }
 
-    private void OnDownloadStarted(long transferKey, string fileName)
+    private void OnDownloadStarted(long transferKey, string fileName, long? totalSize, string? fullPath)
     {
-        _activeDownloads[transferKey] = (fileName, DateTime.UtcNow);
-        var count = _activeDownloads.Count;
+        _activeDownloads[transferKey] = (fileName, DateTime.UtcNow, totalSize);
+        // Remove from pending queue if this file was queued for pin-hydration
+        if (fullPath != null)
+            _pendingHydrations.TryRemove(fullPath, out _);
+        var count = _activeDownloads.Count + _pendingHydrations.Count;
         _downloadDetail = count > 1
             ? $"Downloading {fileName} (and {count - 1} more)"
             : $"Downloading {fileName}";
@@ -231,10 +249,16 @@ public class SyncEngine : IDisposable
         ActiveDownloadCountChanged?.Invoke(count);
     }
 
+    private void OnDownloadProgress(long transferKey, int percent)
+    {
+        _downloadProgress[transferKey] = percent;
+    }
+
     private void OnDownloadCompleted(long transferKey)
     {
         _activeDownloads.TryRemove(transferKey, out _);
-        var count = _activeDownloads.Count;
+        _downloadProgress.TryRemove(transferKey, out _);
+        var count = _activeDownloads.Count + _pendingHydrations.Count;
         if (count == 0)
         {
             _downloadDetail = null;
@@ -325,6 +349,7 @@ public class SyncEngine : IDisposable
         _syncCallbacks.OnDehydrateRequested = HandleDehydrateRequestAsync;
         _syncCallbacks.HydrationBlockedReason = GetHydrationBlockedReason;
         _syncCallbacks.OnDownloadStarted += OnDownloadStarted;
+        _syncCallbacks.OnDownloadProgress += OnDownloadProgress;
         _syncCallbacks.OnDownloadCompleted += OnDownloadCompleted;
         _syncCallbacks.OnDirectoryPopulated += OnDirectoryPopulated;
         _syncCallbacks.OnFileCloseCompleted += OnFileCloseCompleted;
@@ -1801,14 +1826,42 @@ public class SyncEngine : IDisposable
             int count = 0;
             var failed = new List<string>();
 
+            // Pre-scan: collect all dehydrated files and add to pending queue
+            // so the activity pane can show what's queued for download.
+            var dehydratedFiles = new List<string>();
             foreach (var filePath in Directory.EnumerateFiles(directoryPath))
+            {
+                try
+                {
+                    var attrs = File.GetAttributes(filePath);
+                    if ((attrs & dehydratedFlag) != 0)
+                    {
+                        dehydratedFiles.Add(filePath);
+                        long? fileSize = null;
+                        try { fileSize = new FileInfo(filePath).Length; } catch { }
+                        _pendingHydrations[filePath] = (Path.GetFileName(filePath), fileSize);
+                    }
+                }
+                catch { }
+            }
+            if (dehydratedFiles.Count > 0)
+            {
+                Log.Info($"{_logPrefix} Queued {dehydratedFiles.Count} files for hydration in {directoryPath}");
+                ActiveDownloadCountChanged?.Invoke(ActiveDownloadCount);
+            }
+
+            foreach (var filePath in dehydratedFiles)
             {
                 ct.ThrowIfCancellationRequested();
                 try
                 {
+                    // Re-check in case another path hydrated it
                     var attrs = File.GetAttributes(filePath);
                     if ((attrs & dehydratedFlag) == 0)
-                        continue; // Already hydrated
+                    {
+                        _pendingHydrations.TryRemove(filePath, out _);
+                        continue;
+                    }
 
                     Log.Info($"{_logPrefix} Hydrating pinned file: {Path.GetFileName(filePath)}");
                     HydratePlaceholder(filePath);
@@ -1817,6 +1870,7 @@ public class SyncEngine : IDisposable
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
                     Log.Error($"{_logPrefix}  Hydration failed for {Path.GetFileName(filePath)}: {ex.Message}");
+                    _pendingHydrations.TryRemove(filePath, out _);
                     failed.Add(filePath);
                 }
             }

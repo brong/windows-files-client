@@ -59,7 +59,8 @@ internal class SyncCallbacks
     /// </summary>
     public Func<string?, string, Task<bool>>? OnDehydrateRequested;
 
-    public event Action<long, string>? OnDownloadStarted;   // transferKey, fileName
+    public event Action<long, string, long?, string?>? OnDownloadStarted;   // transferKey, fileName, totalSize, fullPath
+    public event Action<long, int>? OnDownloadProgress;     // transferKey, percent
     public event Action<long>? OnDownloadCompleted;          // transferKey
 
     /// <summary>
@@ -208,9 +209,8 @@ internal class SyncCallbacks
         var cts = new CancellationTokenSource();
         _inFlightFetches[transferKey] = (cts, null);
 
-        var fileName = Path.GetFileName(callbackInfo->NormalizedPath.ToString());
-        try { OnDownloadStarted?.Invoke(transferKey, fileName); }
-        catch (Exception ex) { Log.Error($"{_logPrefix} OnDownloadStarted handler error: {ex.Message}"); }
+        var fullPath = callbackInfo->NormalizedPath.ToString();
+        var fileName = Path.GetFileName(fullPath);
 
         // Set to false when the async streaming path takes ownership of cleanup.
         bool cleanupHere = true;
@@ -263,6 +263,10 @@ internal class SyncCallbacks
             var node = FetchNodeAsync(nodeId, cts.Token).GetAwaiter().GetResult();
             var nodeSize = node.Size ?? 0;
             bool isFullHydration = requiredOffset == 0 && requiredLength >= nodeSize;
+
+            // Now that we have size, notify SyncEngine of the download
+            try { OnDownloadStarted?.Invoke(transferKey, fileName, nodeSize, fullPath); }
+            catch (Exception ex) { Log.Error($"{_logPrefix} OnDownloadStarted handler error: {ex.Message}"); }
 
             Log.Info($"{_logPrefix} FETCH_DATA: node={nodeId}, size={nodeSize}, isFullHydration={isFullHydration}, path={((isFullHydration && nodeSize > BlobGetMaxSize) ? "streaming" : "buffered")}");
 
@@ -851,6 +855,10 @@ internal class SyncCallbacks
 
                         if (totalSize > 0)
                         {
+                            var percent = (int)(totalTransferred * 100 / totalSize);
+                            try { OnDownloadProgress?.Invoke(transferKey, percent); }
+                            catch { /* progress is best-effort */ }
+
                             try
                             {
                                 PInvoke.CfReportProviderProgress(

@@ -43,7 +43,7 @@ sealed class AccountSupervisor : IDisposable
     public SyncPauseReason PauseReason => _engine?.PauseReason ?? SyncPauseReason.None;
     public int ActiveDownloadCount => _engine?.ActiveDownloadCount ?? 0;
 
-    public List<(string FileName, DateTime StartedAt)> GetActiveDownloadSnapshot()
+    public List<(string FileName, DateTime StartedAt, int? Progress, long? TotalSize, bool IsPending)> GetActiveDownloadSnapshot()
         => _engine?.GetActiveDownloadSnapshot() ?? new();
 
     public event Action<AccountSupervisor>? StatusChanged;
