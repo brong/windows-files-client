@@ -63,6 +63,8 @@ public class AccountScopedJmapClient : IJmapClient
         }
     }
 
+    public bool HasBlobConvert => ChunkSize != null;
+
     public string? TrashUrl
     {
         get

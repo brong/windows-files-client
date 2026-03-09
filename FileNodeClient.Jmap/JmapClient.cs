@@ -73,6 +73,8 @@ public class JmapClient : IJmapClient
         }
     }
 
+    public bool HasBlobConvert => ChunkSize != null;
+
     public string? TrashUrl
     {
         get

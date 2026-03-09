@@ -55,6 +55,11 @@ public static class ThumbnailService
     public static void Register(string syncRootPath, IJmapClient client,
         Func<string, string?> getBlobId)
     {
+        if (!client.HasBlobConvert)
+        {
+            Log.Info($"ThumbnailService: skipping {syncRootPath} (server has no Blob/convert support)");
+            return;
+        }
         _registrations[syncRootPath] = new Registration(client, getBlobId);
         Log.Info($"ThumbnailService: registered {syncRootPath}");
     }

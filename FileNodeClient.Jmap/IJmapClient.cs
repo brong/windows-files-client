@@ -18,6 +18,10 @@ public interface IJmapClient : IDisposable
     /// </summary>
     long? ChunkSize { get; }
     /// <summary>
+    /// Whether the server supports Blob/convert (blobext capability).
+    /// </summary>
+    bool HasBlobConvert { get; }
+    /// <summary>
     /// URL to the provider's trash view on the web, or null if not available.
     /// </summary>
     string? TrashUrl { get; }
