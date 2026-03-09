@@ -1,7 +1,8 @@
 """JMAP client for FileNode API, using httpx (works with trio and asyncio)."""
 
 import logging
-from datetime import datetime
+import mimetypes
+from datetime import datetime, timezone
 
 import httpx
 
@@ -242,6 +243,138 @@ class JmapClient:
         resp = await self._http.get(url, headers=headers)
         resp.raise_for_status()
         return resp.content
+
+    async def upload_blob(self, data: bytes, content_type: str = "application/octet-stream") -> str:
+        """Upload a blob. Returns the blobId."""
+        url = self.upload_url.replace("{accountId}", self.account_id)
+        resp = await self._http.post(url, content=data, headers={"Content-Type": content_type})
+        resp.raise_for_status()
+        result = resp.json()
+        return result["blobId"]
+
+    async def create_file(self, parent_id: str, name: str, data: bytes,
+                          content_type: str | None = None) -> FileNode:
+        """Upload blob and create a file node. Returns the new FileNode."""
+        if content_type is None:
+            content_type = mimetypes.guess_type(name)[0] or "application/octet-stream"
+        blob_id = await self.upload_blob(data, content_type)
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        responses = await self._call([
+            ["FileNode/set", {
+                "accountId": self.account_id,
+                "create": {
+                    "c0": {
+                        "parentId": parent_id,
+                        "name": name,
+                        "blobId": blob_id,
+                        "type": content_type,
+                    }
+                },
+            }, "s0"],
+        ])
+        _, result, _ = responses[0]
+        created = result.get("created", {}).get("c0")
+        if not created:
+            err = result.get("notCreated", {}).get("c0", {})
+            raise RuntimeError(f"FileNode/set create failed: {err}")
+        # Merge the server response with what we sent
+        created.setdefault("parentId", parent_id)
+        created.setdefault("name", name)
+        created.setdefault("blobId", blob_id)
+        created.setdefault("type", content_type)
+        created.setdefault("size", len(data))
+        self.state = result.get("newState", self.state)
+        return FileNode(created)
+
+    async def create_folder(self, parent_id: str, name: str) -> FileNode:
+        """Create a folder node. Returns the new FileNode."""
+        responses = await self._call([
+            ["FileNode/set", {
+                "accountId": self.account_id,
+                "create": {
+                    "c0": {
+                        "parentId": parent_id,
+                        "name": name,
+                    }
+                },
+            }, "s0"],
+        ])
+        _, result, _ = responses[0]
+        created = result.get("created", {}).get("c0")
+        if not created:
+            err = result.get("notCreated", {}).get("c0", {})
+            raise RuntimeError(f"FileNode/set create folder failed: {err}")
+        created.setdefault("parentId", parent_id)
+        created.setdefault("name", name)
+        self.state = result.get("newState", self.state)
+        return FileNode(created)
+
+    async def update_node(self, node_id: str, **updates) -> None:
+        """Update a FileNode (e.g. name, parentId)."""
+        responses = await self._call([
+            ["FileNode/set", {
+                "accountId": self.account_id,
+                "update": {
+                    node_id: updates,
+                },
+            }, "s0"],
+        ])
+        _, result, _ = responses[0]
+        if node_id in result.get("notUpdated", {}):
+            err = result["notUpdated"][node_id]
+            raise RuntimeError(f"FileNode/set update failed: {err}")
+        self.state = result.get("newState", self.state)
+
+    async def destroy_node(self, node_id: str, remove_children: bool = False) -> None:
+        """Destroy a FileNode."""
+        args = {
+            "accountId": self.account_id,
+            "destroy": [node_id],
+        }
+        if remove_children:
+            args["onDestroyRemoveChildren"] = True
+        responses = await self._call([
+            ["FileNode/set", args, "s0"],
+        ])
+        _, result, _ = responses[0]
+        if result.get("notDestroyed", {}).get(node_id):
+            err = result["notDestroyed"][node_id]
+            raise RuntimeError(f"FileNode/set destroy failed: {err}")
+        self.state = result.get("newState", self.state)
+
+    async def replace_file(self, node_id: str, parent_id: str, name: str,
+                           data: bytes, content_type: str | None = None) -> FileNode:
+        """Replace a file's content by destroying and re-creating with onExists:'replace'."""
+        if content_type is None:
+            content_type = mimetypes.guess_type(name)[0] or "application/octet-stream"
+        blob_id = await self.upload_blob(data, content_type)
+        responses = await self._call([
+            ["FileNode/set", {
+                "accountId": self.account_id,
+                "onExists": "replace",
+                "destroy": [node_id],
+                "create": {
+                    "c0": {
+                        "parentId": parent_id,
+                        "name": name,
+                        "blobId": blob_id,
+                        "type": content_type,
+                    }
+                },
+            }, "s0"],
+        ])
+        _, result, _ = responses[0]
+        created = result.get("created", {}).get("c0")
+        if not created:
+            err = result.get("notCreated", {}).get("c0", {})
+            raise RuntimeError(f"FileNode/set replace failed: {err}")
+        created.setdefault("parentId", parent_id)
+        created.setdefault("name", name)
+        created.setdefault("blobId", blob_id)
+        created.setdefault("type", content_type)
+        created.setdefault("size", len(data))
+        self.state = result.get("newState", self.state)
+        return FileNode(created)
 
     def _blob_url(self, blob_id: str) -> str:
         return (self.download_url

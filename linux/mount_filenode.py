@@ -39,6 +39,8 @@ async def main_async(args):
     # Mount
     fuse_options = set(pyfuse3.default_options)
     fuse_options.add("fsname=filenode")
+    if os.getuid() == 0:
+        fuse_options.add("allow_other")
     if args.debug:
         fuse_options.add("debug")
 

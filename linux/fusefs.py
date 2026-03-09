@@ -40,6 +40,12 @@ class FileNodeFS(pyfuse3.Operations):
         # Blob cache: node_id → bytes (in-memory, simple LRU would be better)
         self._blob_cache: dict[str, bytes] = {}
 
+        # Write buffers: inode → bytearray (accumulated writes before flush)
+        self._write_buffers: dict[int, bytearray] = {}
+
+        # Track which inodes are open for writing (inode → node_id or None for new files)
+        self._open_writes: dict[int, str | None] = {}
+
         # Home/trash node IDs
         self.home_id: str = ""
         self.trash_id: str | None = None
@@ -88,6 +94,29 @@ class FileNodeFS(pyfuse3.Operations):
             return None
         return self._nodes.get(node_id)
 
+    def _add_node(self, node: FileNode):
+        """Add a node to the tree indexes."""
+        self._nodes[node.id] = node
+        self._get_or_assign_inode(node.id)
+        if node.parent_id:
+            children = self._children[node.parent_id]
+            if node.id not in children:
+                children.append(node.id)
+
+    def _remove_node(self, node_id: str):
+        """Remove a node from the tree indexes."""
+        node = self._nodes.pop(node_id, None)
+        if node and node.parent_id:
+            children = self._children.get(node.parent_id, [])
+            if node_id in children:
+                children.remove(node_id)
+        # Clean up inode mapping
+        ino = self._node_id_to_inode.pop(node_id, None)
+        if ino is not None:
+            self._inode_to_node_id.pop(ino, None)
+        # Clean up caches
+        self._blob_cache.pop(node_id, None)
+
     def _make_entry(self, node: FileNode) -> pyfuse3.EntryAttributes:
         """Build an EntryAttributes struct from a FileNode."""
         ino = self._get_or_assign_inode(node.id)
@@ -120,9 +149,17 @@ class FileNodeFS(pyfuse3.Operations):
 
         return entry
 
-    # -- FUSE operations --
+    # -- FUSE read operations --
 
     async def getattr(self, inode, ctx=None):
+        # For inodes with pending writes, report the buffer size
+        if inode in self._write_buffers:
+            node = self._get_node(inode)
+            if node is None:
+                raise pyfuse3.FUSEError(errno.ENOENT)
+            entry = self._make_entry(node)
+            entry.st_size = len(self._write_buffers[inode])
+            return entry
         node = self._get_node(inode)
         if node is None:
             raise pyfuse3.FUSEError(errno.ENOENT)
@@ -170,13 +207,34 @@ class FileNodeFS(pyfuse3.Operations):
         if node.is_folder:
             raise pyfuse3.FUSEError(errno.EISDIR)
 
-        # Read-only for now
-        if (flags & os.O_ACCMODE) != os.O_RDONLY:
-            raise pyfuse3.FUSEError(errno.EROFS)
+        accmode = flags & os.O_ACCMODE
+        if accmode == os.O_RDONLY:
+            return pyfuse3.FileInfo(fh=inode)
 
+        # Writing to existing file — load current content into write buffer
+        if node.blob_id and node.id not in self._blob_cache:
+            try:
+                data = await self._jmap.download_blob(node.blob_id)
+                self._blob_cache[node.id] = data
+            except Exception as e:
+                log.error("Download failed for %s: %s", node.name, e)
+                raise pyfuse3.FUSEError(errno.EIO)
+
+        if flags & os.O_TRUNC:
+            self._write_buffers[inode] = bytearray()
+        else:
+            existing = self._blob_cache.get(node.id, b"")
+            self._write_buffers[inode] = bytearray(existing)
+
+        self._open_writes[inode] = node.id
         return pyfuse3.FileInfo(fh=inode)
 
     async def read(self, fh, offset, length):
+        # If there's a write buffer, read from it
+        if fh in self._write_buffers:
+            data = self._write_buffers[fh]
+            return bytes(data[offset:offset + length])
+
         node = self._get_node(fh)
         if node is None:
             raise pyfuse3.FUSEError(errno.ENOENT)
@@ -197,8 +255,253 @@ class FileNodeFS(pyfuse3.Operations):
         data = self._blob_cache[node.id]
         return data[offset:offset + length]
 
+    # -- FUSE write operations --
+
+    async def write(self, fh, offset, buf):
+        if fh not in self._write_buffers:
+            raise pyfuse3.FUSEError(errno.EBADF)
+        wbuf = self._write_buffers[fh]
+        end = offset + len(buf)
+        if end > len(wbuf):
+            wbuf.extend(b"\x00" * (end - len(wbuf)))
+        wbuf[offset:end] = buf
+        return len(buf)
+
+    async def create(self, parent_inode, name, mode, flags, ctx):
+        """Create a new file."""
+        name_str = name.decode("utf-8") if isinstance(name, bytes) else name
+        parent_node_id = self._inode_to_node_id.get(parent_inode)
+        if parent_node_id is None:
+            raise pyfuse3.FUSEError(errno.ENOENT)
+
+        # Check for duplicate name
+        for child_id in self._children.get(parent_node_id, []):
+            child = self._nodes.get(child_id)
+            if child and child.name == name_str:
+                raise pyfuse3.FUSEError(errno.EEXIST)
+
+        # Create a placeholder node locally; we'll upload on release
+        # Use a temporary ID until the server assigns a real one
+        temp_id = f"_tmp_{self._next_inode}"
+        placeholder = FileNode({
+            "id": temp_id,
+            "parentId": parent_node_id,
+            "name": name_str,
+            "blobId": "",  # non-None so is_folder returns False
+            "size": 0,
+        })
+        self._add_node(placeholder)
+        ino = self._get_or_assign_inode(temp_id)
+
+        self._write_buffers[ino] = bytearray()
+        self._open_writes[ino] = None  # None = new file, not yet on server
+
+        entry = self._make_entry(placeholder)
+        return pyfuse3.FileInfo(fh=ino), entry
+
     async def release(self, fh):
-        pass
+        """Flush writes to the server on file close."""
+        if fh not in self._write_buffers:
+            return
+
+        wbuf = self._write_buffers.pop(fh)
+        existing_node_id = self._open_writes.pop(fh, None)
+        node = self._get_node(fh)
+
+        if node is None:
+            log.error("release: no node for inode %d", fh)
+            return
+
+        data = bytes(wbuf)
+        parent_id = node.parent_id
+        name = node.name
+
+        try:
+            if existing_node_id is None:
+                # New file — create on server
+                log.info("Uploading new file: %s (%d bytes)", name, len(data))
+                new_node = await self._jmap.create_file(parent_id, name, data)
+                # Replace the temp node with the real one
+                self._remove_node(node.id)
+                self._add_node(new_node)
+                # Re-map the inode to the new real node_id
+                self._inode_to_node_id[fh] = new_node.id
+                self._node_id_to_inode[new_node.id] = fh
+                self._blob_cache[new_node.id] = data
+            else:
+                # Existing file — replace on server
+                log.info("Replacing file: %s (%d bytes)", name, len(data))
+                new_node = await self._jmap.replace_file(
+                    existing_node_id, parent_id, name, data)
+                self._remove_node(existing_node_id)
+                self._add_node(new_node)
+                self._inode_to_node_id[fh] = new_node.id
+                self._node_id_to_inode[new_node.id] = fh
+                self._blob_cache[new_node.id] = data
+        except Exception as e:
+            log.error("Failed to upload %s: %s", name, e)
+            # Keep the local state so the user doesn't lose data
+            # but the file won't be on the server
+
+    async def mkdir(self, parent_inode, name, mode, ctx):
+        """Create a new directory."""
+        name_str = name.decode("utf-8") if isinstance(name, bytes) else name
+        parent_node_id = self._inode_to_node_id.get(parent_inode)
+        if parent_node_id is None:
+            raise pyfuse3.FUSEError(errno.ENOENT)
+
+        # Check for duplicate
+        for child_id in self._children.get(parent_node_id, []):
+            child = self._nodes.get(child_id)
+            if child and child.name == name_str:
+                raise pyfuse3.FUSEError(errno.EEXIST)
+
+        try:
+            new_node = await self._jmap.create_folder(parent_node_id, name_str)
+            log.info("Created folder: %s (id=%s)", name_str, new_node.id)
+        except Exception as e:
+            log.error("Failed to create folder %s: %s", name_str, e)
+            raise pyfuse3.FUSEError(errno.EIO)
+
+        self._add_node(new_node)
+        return self._make_entry(new_node)
+
+    async def unlink(self, parent_inode, name, ctx):
+        """Delete a file."""
+        name_str = name.decode("utf-8") if isinstance(name, bytes) else name
+        parent_node_id = self._inode_to_node_id.get(parent_inode)
+        if parent_node_id is None:
+            raise pyfuse3.FUSEError(errno.ENOENT)
+
+        target = None
+        for child_id in self._children.get(parent_node_id, []):
+            child = self._nodes.get(child_id)
+            if child and child.name == name_str:
+                target = child
+                break
+        if target is None:
+            raise pyfuse3.FUSEError(errno.ENOENT)
+        if target.is_folder:
+            raise pyfuse3.FUSEError(errno.EISDIR)
+
+        try:
+            await self._jmap.destroy_node(target.id)
+            log.info("Deleted file: %s (id=%s)", name_str, target.id)
+        except Exception as e:
+            log.error("Failed to delete %s: %s", name_str, e)
+            raise pyfuse3.FUSEError(errno.EIO)
+
+        self._remove_node(target.id)
+
+    async def rmdir(self, parent_inode, name, ctx):
+        """Delete a directory."""
+        name_str = name.decode("utf-8") if isinstance(name, bytes) else name
+        parent_node_id = self._inode_to_node_id.get(parent_inode)
+        if parent_node_id is None:
+            raise pyfuse3.FUSEError(errno.ENOENT)
+
+        target = None
+        for child_id in self._children.get(parent_node_id, []):
+            child = self._nodes.get(child_id)
+            if child and child.name == name_str:
+                target = child
+                break
+        if target is None:
+            raise pyfuse3.FUSEError(errno.ENOENT)
+        if not target.is_folder:
+            raise pyfuse3.FUSEError(errno.ENOTDIR)
+
+        # Check if empty (POSIX rmdir requires empty)
+        if self._children.get(target.id):
+            raise pyfuse3.FUSEError(errno.ENOTEMPTY)
+
+        try:
+            await self._jmap.destroy_node(target.id)
+            log.info("Deleted folder: %s (id=%s)", name_str, target.id)
+        except Exception as e:
+            log.error("Failed to delete folder %s: %s", name_str, e)
+            raise pyfuse3.FUSEError(errno.EIO)
+
+        self._remove_node(target.id)
+
+    async def rename(self, old_parent_inode, old_name, new_parent_inode, new_name, flags, ctx):
+        """Rename/move a file or directory."""
+        old_name_str = old_name.decode("utf-8") if isinstance(old_name, bytes) else old_name
+        new_name_str = new_name.decode("utf-8") if isinstance(new_name, bytes) else new_name
+
+        old_parent_id = self._inode_to_node_id.get(old_parent_inode)
+        new_parent_id = self._inode_to_node_id.get(new_parent_inode)
+        if old_parent_id is None or new_parent_id is None:
+            raise pyfuse3.FUSEError(errno.ENOENT)
+
+        # Find source
+        source = None
+        for child_id in self._children.get(old_parent_id, []):
+            child = self._nodes.get(child_id)
+            if child and child.name == old_name_str:
+                source = child
+                break
+        if source is None:
+            raise pyfuse3.FUSEError(errno.ENOENT)
+
+        # Check if target exists — if so, remove it (POSIX rename replaces)
+        for child_id in self._children.get(new_parent_id, []):
+            child = self._nodes.get(child_id)
+            if child and child.name == new_name_str and child.id != source.id:
+                try:
+                    await self._jmap.destroy_node(child.id, remove_children=child.is_folder)
+                except Exception as e:
+                    log.error("Failed to remove target %s: %s", new_name_str, e)
+                    raise pyfuse3.FUSEError(errno.EIO)
+                self._remove_node(child.id)
+                break
+
+        # Build update
+        updates = {}
+        if new_name_str != old_name_str:
+            updates["name"] = new_name_str
+        if new_parent_id != old_parent_id:
+            updates["parentId"] = new_parent_id
+
+        if updates:
+            try:
+                await self._jmap.update_node(source.id, **updates)
+                log.info("Renamed: %s → %s (id=%s)", old_name_str, new_name_str, source.id)
+            except Exception as e:
+                log.error("Failed to rename %s: %s", old_name_str, e)
+                raise pyfuse3.FUSEError(errno.EIO)
+
+            # Update local tree
+            if old_parent_id != new_parent_id:
+                children = self._children.get(old_parent_id, [])
+                if source.id in children:
+                    children.remove(source.id)
+                self._children[new_parent_id].append(source.id)
+                source.parent_id = new_parent_id
+            if new_name_str != old_name_str:
+                source.name = new_name_str
+
+    async def setattr(self, inode, attr, fields, fh, ctx):
+        """Handle truncate and other attribute changes."""
+        node = self._get_node(inode)
+        if node is None:
+            raise pyfuse3.FUSEError(errno.ENOENT)
+
+        # Handle truncate (e.g. open with O_TRUNC or ftruncate)
+        if fields.update_size:
+            new_size = attr.st_size
+            if inode in self._write_buffers:
+                wbuf = self._write_buffers[inode]
+                if new_size < len(wbuf):
+                    del wbuf[new_size:]
+                else:
+                    wbuf.extend(b"\x00" * (new_size - len(wbuf)))
+            elif new_size == 0 and not node.is_folder:
+                # Truncate to zero — start a write buffer
+                self._write_buffers[inode] = bytearray()
+                self._open_writes[inode] = node.id
+
+        return self._make_entry(node)
 
     async def releasedir(self, fh):
         pass
