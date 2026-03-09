@@ -288,7 +288,7 @@ public class OutboxProcessor : IDisposable
 
         Log.Info($"{_logPrefix} Outbox: creating folder {folderName}");
         var node = await _queue.EnqueueAsync(QueuePriority.Background,
-            () => _jmapClient.CreateFileNodeAsync(parentId, null, folderName, null, null, ct), ct);
+            () => _jmapClient.CreateFileNodeAsync(parentId, null, folderName, ct: ct), ct);
 
         SyncEngine.EnsurePlaceholder(change.LocalPath, node.Id, isDirectory: true);
         _engine.UpdateMappings(change.LocalPath, null, node.Id);
@@ -343,10 +343,12 @@ public class OutboxProcessor : IDisposable
             }
 
             Log.Info($"{_logPrefix} Outbox: uploading modified file {fileName}");
+            var localCtime = File.GetCreationTimeUtc(change.LocalPath);
+            var localMtime = File.GetLastWriteTimeUtc(change.LocalPath);
             using var fileStream = OpenFileForUpload(change.LocalPath);
             var blobId = await UploadFileContentAsync(change, fileStream, contentType, ct);
             var newNode = await _queue.EnqueueAsync(QueuePriority.Background,
-                () => _jmapClient.ReplaceFileNodeBlobAsync(change.NodeId, parentId, fileName, blobId, contentType, ct), ct);
+                () => _jmapClient.ReplaceFileNodeBlobAsync(change.NodeId, parentId, fileName, blobId, contentType, localCtime, localMtime, ct), ct);
 
             SyncEngine.UpdatePlaceholderIdentity(change.LocalPath, newNode.Id);
             _engine.RecordRecentUpload(change.LocalPath);
@@ -416,8 +418,10 @@ public class OutboxProcessor : IDisposable
                 {
                     try
                     {
+                        var restoreCtime = File.GetCreationTimeUtc(change.LocalPath);
+                        var restoreMtime = File.GetLastWriteTimeUtc(change.LocalPath);
                         var restoredNode = await _queue.EnqueueAsync(QueuePriority.Background,
-                            () => _jmapClient.CreateFileNodeAsync(restoreParentId, trashedInfo.BlobId, fileName, contentType, "replace", ct), ct);
+                            () => _jmapClient.CreateFileNodeAsync(restoreParentId, trashedInfo.BlobId, fileName, contentType, "replace", restoreCtime, restoreMtime, ct), ct);
                         Log.Info($"{_logPrefix} Outbox: recreated {fileName} with existing blobId → node {restoredNode.Id}");
                         SyncEngine.EnsurePlaceholder(change.LocalPath, restoredNode.Id);
                         _engine.UpdateMappings(change.LocalPath, null, restoredNode.Id);
@@ -444,10 +448,12 @@ public class OutboxProcessor : IDisposable
             }
 
             Log.Info($"{_logPrefix} Outbox: uploading new file {fileName}");
+            var localCtime = File.GetCreationTimeUtc(change.LocalPath);
+            var localMtime = File.GetLastWriteTimeUtc(change.LocalPath);
             using var fileStream = OpenFileForUpload(change.LocalPath);
             var blobId = await UploadFileContentAsync(change, fileStream, contentType, ct);
             var node = await _queue.EnqueueAsync(QueuePriority.Background,
-                () => _jmapClient.CreateFileNodeAsync(parentId, blobId, fileName, contentType, "replace", ct), ct);
+                () => _jmapClient.CreateFileNodeAsync(parentId, blobId, fileName, contentType, "replace", localCtime, localMtime, ct), ct);
 
             Log.Info($"{_logPrefix} Outbox: EnsurePlaceholder {change.LocalPath} nodeId={node.Id}");
             SyncEngine.EnsurePlaceholder(change.LocalPath, node.Id);

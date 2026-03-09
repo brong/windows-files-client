@@ -45,8 +45,8 @@ public interface IJmapClient : IDisposable
     Task<string> UploadBlobAsync(Stream data, string contentType, CancellationToken ct = default);
     Task<string> UploadBlobChunkedAsync(Stream data, string contentType, long totalSize,
         Action<int>? onProgress = null, CancellationToken ct = default);
-    Task<FileNode> CreateFileNodeAsync(string parentId, string? blobId, string name, string? type = null, string? onExists = null, CancellationToken ct = default);
-    Task<FileNode> ReplaceFileNodeBlobAsync(string nodeId, string parentId, string name, string blobId, string? type = null, CancellationToken ct = default);
+    Task<FileNode> CreateFileNodeAsync(string parentId, string? blobId, string name, string? type = null, string? onExists = null, DateTime? createdAt = null, DateTime? modifiedAt = null, CancellationToken ct = default);
+    Task<FileNode> ReplaceFileNodeBlobAsync(string nodeId, string parentId, string name, string blobId, string? type = null, DateTime? createdAt = null, DateTime? modifiedAt = null, CancellationToken ct = default);
     Task MoveFileNodeAsync(string nodeId, string parentId, string newName, string? onExists = null, CancellationToken ct = default);
     Task DestroyFileNodeAsync(string nodeId, CancellationToken ct = default);
     IAsyncEnumerable<string> WatchForChangesAsync(CancellationToken ct = default);

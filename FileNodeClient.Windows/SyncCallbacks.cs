@@ -18,10 +18,12 @@ internal class SyncCallbacks
     private readonly string _logPrefix;
 
     /// <summary>
-    /// Node IDs that were recently hydrated by cfapi. SyncEngine checks this
-    /// to avoid re-uploading a file that was just downloaded.
+    /// Node IDs that were recently hydrated by cfapi → LastWriteTimeUtc at
+    /// hydration completion. SyncEngine checks this (with mtime comparison)
+    /// to avoid re-uploading a file that was just downloaded while still
+    /// detecting real edits.
     /// </summary>
-    public ConcurrentDictionary<string, byte> RecentlyHydrated { get; } = new();
+    public ConcurrentDictionary<string, DateTime> RecentlyHydrated { get; } = new();
 
     /// <summary>
     /// In-flight hydration requests keyed by TransferKey, so CANCEL_FETCH_DATA
@@ -289,8 +291,12 @@ internal class SyncCallbacks
 
             // Record that we just hydrated this file so SyncEngine doesn't
             // re-upload it when FileSystemWatcher fires a Changed event.
+            // Store the post-hydration mtime so real edits can be distinguished.
             if (nodeId != null)
-                RecentlyHydrated[nodeId] = 0;
+            {
+                var hydratedPath = callbackInfo->NormalizedPath.ToString();
+                RecentlyHydrated[nodeId] = GetLastWriteTimeSafe(hydratedPath);
+            }
         }
         catch (OperationCanceledException)
         {
@@ -886,7 +892,10 @@ internal class SyncCallbacks
                 }
 
                 if (nodeId != null)
-                    RecentlyHydrated[nodeId] = 0;
+                {
+                    var hydratedPath = callbackInfo.NormalizedPath.ToString();
+                    RecentlyHydrated[nodeId] = GetLastWriteTimeSafe(hydratedPath);
+                }
             }
             catch (OperationCanceledException)
             {

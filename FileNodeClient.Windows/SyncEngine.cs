@@ -246,12 +246,25 @@ public class SyncEngine : IDisposable
     private void OnFileCloseCompleted(string? nodeId, string fullPath)
     {
         // SyncCallbacks already filters to only fire when LastWriteTimeUtc changed.
-        // Skip files we just uploaded or just hydrated — not user edits.
-        if (nodeId != null && _syncCallbacks.RecentlyHydrated.ContainsKey(nodeId))
-            return;
+        // Skip files we just uploaded or just hydrated — but only if mtime hasn't
+        // changed since (a changed mtime means a real user edit).
+        try
+        {
+            var currentMtime = File.GetLastWriteTimeUtc(fullPath);
 
-        if (_recentlyUploaded.ContainsKey(fullPath))
-            return;
+            if (nodeId != null
+                && _syncCallbacks.RecentlyHydrated.TryGetValue(nodeId, out var hydratedMtime)
+                && currentMtime == hydratedMtime)
+                return;
+
+            if (_recentlyUploaded.TryGetValue(fullPath, out var uploadedMtime)
+                && currentMtime == uploadedMtime)
+                return;
+        }
+        catch
+        {
+            return; // File gone
+        }
 
         // Only act on tracked files (existing placeholders)
         if (!_pathToNodeId.TryGetValue(fullPath, out var existingNodeId))
@@ -1222,10 +1235,20 @@ public class SyncEngine : IDisposable
             if (isDirectory && _pathToNodeId.ContainsKey(change.FullPath))
                 continue;
 
-            // Skip re-enqueue if this file was just hydrated by cfapi
+            // Skip re-enqueue if this file was just hydrated by cfapi and mtime hasn't changed
             if (!isDirectory && _pathToNodeId.TryGetValue(change.FullPath, out var existingNodeId)
-                && _syncCallbacks.RecentlyHydrated.TryRemove(existingNodeId, out _))
-                continue;
+                && _syncCallbacks.RecentlyHydrated.TryRemove(existingNodeId, out var hydratedWriteTime))
+            {
+                try
+                {
+                    if (File.GetLastWriteTimeUtc(change.FullPath) == hydratedWriteTime)
+                        continue;
+                }
+                catch
+                {
+                    continue; // File gone
+                }
+            }
 
             var nodeId = _pathToNodeId.TryGetValue(change.FullPath, out var nid) ? nid : null;
 

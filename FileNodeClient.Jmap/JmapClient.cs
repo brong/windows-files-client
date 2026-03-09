@@ -571,15 +571,21 @@ public class JmapClient : IJmapClient
         }
     }
 
-    public async Task<FileNode> CreateFileNodeAsync(string parentId, string? blobId, string name, string? type = null, string? onExists = null, CancellationToken ct = default)
+    public async Task<FileNode> CreateFileNodeAsync(string parentId, string? blobId, string name, string? type = null, string? onExists = null, DateTime? createdAt = null, DateTime? modifiedAt = null, CancellationToken ct = default)
     {
+        var createObj = new Dictionary<string, object?>
+        {
+            ["parentId"] = parentId, ["blobId"] = blobId, ["name"] = name, ["type"] = type,
+        };
+        if (createdAt.HasValue)
+            createObj["created"] = createdAt.Value.ToUniversalTime();
+        if (modifiedAt.HasValue)
+            createObj["modified"] = modifiedAt.Value.ToUniversalTime();
+
         var args = new Dictionary<string, object?>
         {
             ["accountId"] = AccountId,
-            ["create"] = new Dictionary<string, object>
-            {
-                ["c0"] = new { parentId, blobId, name, type },
-            },
+            ["create"] = new Dictionary<string, object?> { ["c0"] = createObj },
         };
         if (onExists != null)
             args["onExists"] = onExists;
@@ -596,19 +602,25 @@ public class JmapClient : IJmapClient
         return created;
     }
 
-    public async Task<FileNode> ReplaceFileNodeBlobAsync(string nodeId, string parentId, string name, string blobId, string? type = null, CancellationToken ct = default)
+    public async Task<FileNode> ReplaceFileNodeBlobAsync(string nodeId, string parentId, string name, string blobId, string? type = null, DateTime? createdAt = null, DateTime? modifiedAt = null, CancellationToken ct = default)
     {
         // Content (blobId) is immutable — create a replacement with onExists:"replace"
         // so the server atomically replaces the existing node.
+        var createObj = new Dictionary<string, object?>
+        {
+            ["parentId"] = parentId, ["blobId"] = blobId, ["name"] = name, ["type"] = type,
+        };
+        if (createdAt.HasValue)
+            createObj["created"] = createdAt.Value.ToUniversalTime();
+        if (modifiedAt.HasValue)
+            createObj["modified"] = modifiedAt.Value.ToUniversalTime();
+
         var setResponse = await CallAsync<SetResponse>(
             FileNodeUsing, "FileNode/set", new
             {
                 accountId = AccountId,
                 onExists = "replace",
-                create = new Dictionary<string, object>
-                {
-                    ["c0"] = new { parentId, blobId, name, type },
-                },
+                create = new Dictionary<string, object?> { ["c0"] = createObj },
             }, ct);
 
         if (setResponse.NotCreated != null && setResponse.NotCreated.TryGetValue("c0", out var createError))
