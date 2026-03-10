@@ -792,13 +792,16 @@ sealed class ManageAccountsForm : Form
 
             var action = DeriveAction(entry);
             string status;
-            int? progress = null;
+            int? progressPercent = null;
             int sortProgress = -2;
             if (entry.IsProcessing)
             {
-                progress = entry.UploadProgress;
-                status = progress.HasValue ? "" : "Syncing...";
-                sortProgress = progress ?? -1;
+                if (entry.UploadedBytes.HasValue && entry.FileSize.HasValue && entry.FileSize.Value > 0)
+                    progressPercent = (int)(entry.UploadedBytes.Value * 100 / entry.FileSize.Value);
+                else if (entry.UploadedBytes.HasValue)
+                    progressPercent = 0;
+                status = progressPercent.HasValue ? "" : "Syncing...";
+                sortProgress = progressPercent ?? -1;
             }
             else
             {
@@ -806,8 +809,8 @@ sealed class ManageAccountsForm : Form
             }
 
             var tooltip = entry.LocalPath ?? entry.NodeId ?? "";
-            if (progress.HasValue)
-                tooltip += $"\nUploading {progress.Value}%";
+            if (progressPercent.HasValue)
+                tooltip += $"\nUploading {progressPercent.Value}%";
             if (entry.LastError != null)
                 tooltip += $"\nError: {entry.LastError}";
 
@@ -827,7 +830,7 @@ sealed class ManageAccountsForm : Form
 
             desired.Add(($"outbox:{entry.Id}", name, FormatFileSize(entry.FileSize), action,
                 status, FormatRelativeTime(entry.UpdatedAt, now),
-                color, tooltip, progress, sortProgress, entry.IsRejected, tag));
+                color, tooltip, progressPercent, sortProgress, entry.IsRejected, tag));
         }
 
         // Sort: highest progress first, then in-progress without %, then queued/waiting

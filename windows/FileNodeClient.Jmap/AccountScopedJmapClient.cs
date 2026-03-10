@@ -479,7 +479,7 @@ public class AccountScopedJmapClient : IJmapClient
     }
 
     public Task<string> UploadBlobChunkedAsync(Stream data, string contentType, long totalSize,
-        Action<int>? onProgress = null, Action<JmapClient.UploadedChunkInfo>? onChunkUploaded = null,
+        Action<long>? onProgress = null, Action<JmapClient.UploadedChunkInfo>? onChunkUploaded = null,
         List<JmapClient.UploadedChunkInfo>? previousChunks = null,
         CancellationToken ct = default)
     {

@@ -509,9 +509,9 @@ public class OutboxProcessor : IDisposable
 
         void ResetStall() { try { stallTimer.Change(stallTimeout, Timeout.InfiniteTimeSpan); } catch { } }
 
-        void OnProgress(int percent)
+        void OnProgress(long bytesUploaded)
         {
-            _outbox.UpdateProgress(change.Id, percent);
+            _outbox.UpdateProgress(change.Id, bytesUploaded);
             ResetStall();
         }
 

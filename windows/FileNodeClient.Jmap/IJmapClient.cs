@@ -54,7 +54,7 @@ public interface IJmapClient : IDisposable
     Task<(Stream data, bool isPartial)> DownloadBlobRangeAsync(string blobId, long offset, long length, string? type = null, string? name = null, CancellationToken ct = default);
     Task<string> UploadBlobAsync(Stream data, string contentType, CancellationToken ct = default);
     Task<string> UploadBlobChunkedAsync(Stream data, string contentType, long totalSize,
-        Action<int>? onProgress = null, Action<JmapClient.UploadedChunkInfo>? onChunkUploaded = null,
+        Action<long>? onProgress = null, Action<JmapClient.UploadedChunkInfo>? onChunkUploaded = null,
         List<JmapClient.UploadedChunkInfo>? previousChunks = null,
         CancellationToken ct = default);
     Task<FileNode> CreateFileNodeAsync(string parentId, string? blobId, string name, string? type = null, string? onExists = null, DateTime? createdAt = null, DateTime? modifiedAt = null, CancellationToken ct = default);

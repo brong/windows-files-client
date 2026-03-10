@@ -547,6 +547,8 @@ Discovery via `draft-ietf-mailmaint-oauth-public-01`:
 
 The activity feed is push-based (not polled). The service fires a throttled event (100ms) whenever outbox or download state changes. The UI debounces (50ms) and renders from a cached snapshot per account. Initial state is fetched via `GetOutbox` on connect; after that, pushes take over.
 
+Upload progress is reported as **bytes uploaded** (not percentage). The service streams push `uploadedBytes` and `fileSize` per entry; the UI calculates percentage locally. This avoids rounding artifacts, enables accurate display for any file size, and lets the UI show bytes/total in tooltips. Progress callbacks from the upload streams are throttled to 100ms to avoid flooding the IPC channel.
+
 ### Per-Account Status
 
 ```
@@ -882,3 +884,6 @@ A fixed wall-clock timeout (even one scaled to file size) fails for large files 
 
 **30. Stall timer must not start until the upload begins.**
 If the stall timer starts ticking when the upload is *enqueued* rather than when it actually starts sending bytes, queue wait time counts toward the stall timeout. With 4 concurrent upload slots and large files, a queued upload can easily wait 30+ seconds for a slot, triggering a false stall cancellation before any bytes are sent. Start the timer unarmed (infinite initial due time) and arm it on the first progress callback. This was a real bug: the client cancelled the HTTP request after the server had received all bytes but before it sent the response (nginx logged 499), then the retry hit a 403.
+
+**31. Report upload progress as bytes, not percentage.**
+Shipping percentage (int 0-100) over IPC loses precision for large files and makes it impossible to show bytes/total in the UI. With a 2GB file, each 1% is 20MB — the progress bar appears frozen for long stretches. Report cumulative bytes uploaded and file size separately; the UI calculates percentage locally. Throttle progress callbacks from the upload streams (100ms) to avoid flooding the IPC channel — without throttling, every 8KB socket write generates a callback that propagates through the outbox, IPC broadcast, and UI render path.

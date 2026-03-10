@@ -514,7 +514,7 @@ public class JmapClient : IJmapClient
     internal const long MaxChunkSize = 67_108_864; // 64 MB maximum
 
     public Task<string> UploadBlobChunkedAsync(Stream data, string contentType, long totalSize,
-        Action<int>? onProgress = null, Action<UploadedChunkInfo>? onChunkUploaded = null,
+        Action<long>? onProgress = null, Action<UploadedChunkInfo>? onChunkUploaded = null,
         List<UploadedChunkInfo>? previousChunks = null,
         CancellationToken ct = default)
     {
@@ -552,145 +552,145 @@ public class JmapClient : IJmapClient
         HttpClient http, string uploadUrl, string accountId, long chunkSize,
         Func<string[], string, object, Task<JsonElement>> callAsync,
         Stream data, string contentType, long totalSize,
-        Action<int>? onProgress, Action<UploadedChunkInfo>? onChunkUploaded,
+        Action<long>? onProgress, Action<UploadedChunkInfo>? onChunkUploaded,
         List<UploadedChunkInfo>? previousChunks,
         CancellationToken ct)
     {
-        var buffer = ArrayPool<byte>.Shared.Rent((int)chunkSize);
-        try
-        {
-            var chunkBlobIds = new List<(string BlobId, string Sha1Base64)>();
-            using var overallHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA1);
-            long totalUploaded = 0;
+        // Small buffer for resume verification (hash previously uploaded chunks
+        // without loading them entirely into memory).
+        const int HashBufferSize = 65536;
 
-            // Restore previously uploaded chunks — verify they still exist on
-            // the server via Blob/get, then skip their bytes (just hash for the
-            // overall digest) and add their blobIds to the combine list.
-            if (previousChunks != null && previousChunks.Count > 0)
+        var chunkBlobIds = new List<(string BlobId, string Sha1Base64)>();
+        using var overallHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA1);
+        long totalUploaded = 0;
+
+        // Restore previously uploaded chunks — verify they still exist on
+        // the server via Blob/get, then skip their bytes (just hash for the
+        // overall digest) and add their blobIds to the combine list.
+        if (previousChunks != null && previousChunks.Count > 0)
+        {
+            // Verify chunk blobIds still exist on server
+            var blobIds = previousChunks.Select(c => c.BlobId).ToArray();
+            int validCount = previousChunks.Count;
+            try
             {
-                // Verify chunk blobIds still exist on server
-                var blobIds = previousChunks.Select(c => c.BlobId).ToArray();
-                int validCount = previousChunks.Count;
-                try
+                var blobCheck = await callAsync(BlobUsing, "Blob/get", new
                 {
-                    var blobCheck = await callAsync(BlobUsing, "Blob/get", new
+                    accountId,
+                    ids = blobIds,
+                    properties = new[] { "id", "size" },
+                });
+                var blobResponse = blobCheck.Deserialize<BlobGetResponse>(JmapSerializerOptions.Default);
+                if (blobResponse != null)
+                {
+                    var notFound = new HashSet<string>(blobResponse.NotFound);
+                    if (notFound.Count > 0)
                     {
-                        accountId,
-                        ids = blobIds,
-                        properties = new[] { "id", "size" },
-                    });
-                    var blobResponse = blobCheck.Deserialize<BlobGetResponse>(JmapSerializerOptions.Default);
-                    if (blobResponse != null)
-                    {
-                        var notFound = new HashSet<string>(blobResponse.NotFound);
-                        if (notFound.Count > 0)
+                        // Find the first expired chunk — discard it and all subsequent
+                        validCount = 0;
+                        for (int i = 0; i < previousChunks.Count; i++)
                         {
-                            // Find the first expired chunk — discard it and all subsequent
-                            validCount = 0;
-                            for (int i = 0; i < previousChunks.Count; i++)
-                            {
-                                if (notFound.Contains(previousChunks[i].BlobId))
-                                    break;
-                                validCount = i + 1;
-                            }
+                            if (notFound.Contains(previousChunks[i].BlobId))
+                                break;
+                            validCount = i + 1;
                         }
                     }
                 }
-                catch
-                {
-                    // Blob/get failed — start fresh to be safe
-                    validCount = 0;
-                }
+            }
+            catch
+            {
+                // Blob/get failed — start fresh to be safe
+                validCount = 0;
+            }
 
-                if (validCount == 0)
-                {
-                    // All chunks expired — start from scratch
-                    data.Position = 0;
-                    return await UploadBlobChunkedInternalAsync(http, uploadUrl, accountId,
-                        chunkSize, callAsync, data, contentType, totalSize,
-                        onProgress, onChunkUploaded, null, ct);
-                }
+            if (validCount == 0)
+            {
+                // All chunks expired — start from scratch
+                data.Position = 0;
+                return await UploadBlobChunkedInternalAsync(http, uploadUrl, accountId,
+                    chunkSize, callAsync, data, contentType, totalSize,
+                    onProgress, onChunkUploaded, null, ct);
+            }
 
+            var hashBuf = ArrayPool<byte>.Shared.Rent(HashBufferSize);
+            try
+            {
                 for (int i = 0; i < validCount; i++)
                 {
                     var prev = previousChunks[i];
-                    // Read and hash the chunk data (needed for overall SHA1)
-                    // but don't re-upload it
-                    var toRead = prev.Length;
-                    var offset = 0;
-                    while (offset < toRead)
+                    // Hash the chunk data incrementally (needed for overall SHA1)
+                    // without loading the whole chunk into memory
+                    using var chunkVerifyHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA1);
+                    var remaining = prev.Length;
+                    while (remaining > 0)
                     {
-                        var read = await data.ReadAsync(buffer.AsMemory(offset, toRead - offset), ct);
-                        if (read == 0)
-                            break;
-                        offset += read;
+                        var toRead = Math.Min(remaining, hashBuf.Length);
+                        var read = await data.ReadAsync(hashBuf.AsMemory(0, toRead), ct);
+                        if (read == 0) break;
+                        chunkVerifyHash.AppendData(hashBuf.AsSpan(0, read));
+                        overallHash.AppendData(hashBuf.AsSpan(0, read));
+                        remaining -= read;
                     }
 
-                    // Verify the chunk data still matches (file hasn't changed)
-                    var chunkSpan = buffer.AsSpan(0, offset);
-                    var chunkSha1 = SHA1.HashData(chunkSpan);
-                    var chunkSha1Base64 = Convert.ToBase64String(chunkSha1);
-
+                    var chunkSha1Base64 = Convert.ToBase64String(chunkVerifyHash.GetHashAndReset());
                     if (chunkSha1Base64 != prev.Sha1Base64)
                     {
                         // File has changed since chunks were uploaded — start over
                         data.Position = 0;
+                        ArrayPool<byte>.Shared.Return(hashBuf);
                         return await UploadBlobChunkedInternalAsync(http, uploadUrl, accountId,
                             chunkSize, callAsync, data, contentType, totalSize,
                             onProgress, onChunkUploaded, null, ct);
                     }
 
-                    overallHash.AppendData(chunkSpan);
                     chunkBlobIds.Add((prev.BlobId, prev.Sha1Base64));
-                    totalUploaded += offset;
+                    totalUploaded += prev.Length - remaining;
                 }
-                onProgress?.Invoke((int)(totalUploaded * 100 / totalSize));
             }
-
-            while (totalUploaded < totalSize)
+            finally
             {
-                // Read one full chunk (or remainder)
-                var toRead = (int)Math.Min(chunkSize, totalSize - totalUploaded);
-                var offset = 0;
-                while (offset < toRead)
-                {
-                    var read = await data.ReadAsync(buffer.AsMemory(offset, toRead - offset), ct);
-                    if (read == 0)
-                        break;
-                    offset += read;
-                }
-
-                var chunkSpan = buffer.AsSpan(0, offset);
-                var chunkSha1 = SHA1.HashData(chunkSpan);
-                overallHash.AppendData(chunkSpan);
-                var chunkSha1Base64 = Convert.ToBase64String(chunkSha1);
-
-                // Upload chunk via HTTP POST (chunks are raw bytes, not the final content type).
-                // Force HTTP/1.1 so each upload gets its own TCP connection and doesn't
-                // starve interactive downloads via HTTP/2 multiplexing contention.
-                using var chunkStream = new MemoryStream(buffer, 0, offset, writable: false);
-                var chunkContent = new StreamContent(chunkStream);
-                chunkContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
-                using var chunkRequest = new HttpRequestMessage(HttpMethod.Post, uploadUrl) { Content = chunkContent, Version = System.Net.HttpVersion.Version11 };
-                var response = await http.SendAsync(chunkRequest, ct);
-                response.EnsureSuccessStatusCode();
-                var json = await response.Content.ReadAsStringAsync(ct);
-                var upload = JsonSerializer.Deserialize<UploadResponse>(json, JmapSerializerOptions.Default)
-                    ?? throw new InvalidOperationException("Failed to parse chunk upload response");
-
-                chunkBlobIds.Add((upload.BlobId, chunkSha1Base64));
-                totalUploaded += offset;
-                onProgress?.Invoke((int)(totalUploaded * 100 / totalSize));
-                onChunkUploaded?.Invoke(new UploadedChunkInfo(upload.BlobId, chunkSha1Base64, totalUploaded - offset, offset));
-
-                // Yield between chunks so interactive work (downloads) can proceed.
-                // Without this, rapid small-chunk uploads can starve the async scheduler.
-                await Task.Yield();
+                ArrayPool<byte>.Shared.Return(hashBuf);
             }
+            onProgress?.Invoke((int)(totalUploaded * 100 / totalSize));
+        }
 
-            // Compute overall SHA1
-            var overallSha1 = overallHash.GetHashAndReset();
-            var overallSha1Base64 = Convert.ToBase64String(overallSha1);
+        while (totalUploaded < totalSize)
+        {
+            var thisChunkSize = (int)Math.Min(chunkSize, totalSize - totalUploaded);
+
+            // Stream directly from file → HTTP POST, computing hashes and
+            // reporting progress as bytes flow through. No full-chunk buffer.
+            using var chunkHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA1);
+            var chunkStream = new ChunkUploadStream(
+                data, thisChunkSize, chunkHash, overallHash,
+                totalUploaded, totalSize, onProgress, null);
+
+            // Upload chunk via HTTP POST (chunks are raw bytes, not the final content type).
+            // Force HTTP/1.1 so each upload gets its own TCP connection and doesn't
+            // starve interactive downloads via HTTP/2 multiplexing contention.
+            var chunkContent = new StreamContent(chunkStream);
+            chunkContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
+            chunkContent.Headers.ContentLength = thisChunkSize;
+            using var chunkRequest = new HttpRequestMessage(HttpMethod.Post, uploadUrl) { Content = chunkContent, Version = System.Net.HttpVersion.Version11 };
+            var response = await http.SendAsync(chunkRequest, ct);
+            response.EnsureSuccessStatusCode();
+            var json = await response.Content.ReadAsStringAsync(ct);
+            var upload = JsonSerializer.Deserialize<UploadResponse>(json, JmapSerializerOptions.Default)
+                ?? throw new InvalidOperationException("Failed to parse chunk upload response");
+
+            var chunkSha1Base64 = chunkStream.GetChunkSha1Base64();
+            var bytesRead = chunkStream.TotalBytesRead;
+            chunkBlobIds.Add((upload.BlobId, chunkSha1Base64));
+            totalUploaded += bytesRead;
+            onChunkUploaded?.Invoke(new UploadedChunkInfo(upload.BlobId, chunkSha1Base64, totalUploaded - bytesRead, bytesRead));
+
+            // Yield between chunks so interactive work (downloads) can proceed.
+            await Task.Yield();
+        }
+
+        // Compute overall SHA1
+        var overallSha1 = overallHash.GetHashAndReset();
+        var overallSha1Base64 = Convert.ToBase64String(overallSha1);
 
             // Combine chunks via Blob/upload
             var dataArray = chunkBlobIds.Select(c => new Dictionary<string, object?>
@@ -723,11 +723,6 @@ public class JmapClient : IJmapClient
                 throw new InvalidOperationException("Blob/upload returned no result");
 
             return created.Id;
-        }
-        finally
-        {
-            ArrayPool<byte>.Shared.Return(buffer);
-        }
     }
 
     public async Task<FileNode> CreateFileNodeAsync(string parentId, string? blobId, string name, string? type = null, string? onExists = null, DateTime? createdAt = null, DateTime? modifiedAt = null, CancellationToken ct = default)

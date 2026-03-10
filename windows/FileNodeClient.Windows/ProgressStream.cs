@@ -1,19 +1,20 @@
 namespace FileNodeClient.Windows;
 
 /// <summary>
-/// Read-only stream wrapper that reports upload progress as a percentage.
-/// Only fires the callback when the integer percentage changes.
+/// Read-only stream wrapper that reports upload progress as cumulative bytes read.
+/// Throttles progress callbacks to at most once per 100ms, always fires on final read.
 /// </summary>
 sealed class ProgressStream : Stream
 {
     private readonly Stream _inner;
     private readonly long _totalLength;
-    private long _bytesRead;
-    private readonly Action<int> _onProgress;
+    private readonly Action<long> _onProgress;
     private readonly Action? _onBytesRead;
-    private int _lastReported = -1;
+    private long _bytesRead;
+    private long _lastReportedTicks;
+    private const long ThrottleIntervalTicks = 100 * TimeSpan.TicksPerMillisecond;
 
-    public ProgressStream(Stream inner, long totalLength, Action<int> onProgress, Action? onBytesRead = null)
+    public ProgressStream(Stream inner, long totalLength, Action<long> onProgress, Action? onBytesRead = null)
     {
         _inner = inner;
         _totalLength = totalLength;
@@ -60,15 +61,13 @@ sealed class ProgressStream : Stream
 
         _onBytesRead?.Invoke();
 
-        if (_totalLength <= 0)
-            return;
-
         _bytesRead += bytesRead;
-        var percent = (int)(_bytesRead * 100 / _totalLength);
-        if (percent != _lastReported)
+
+        var nowTicks = DateTime.UtcNow.Ticks;
+        if (nowTicks - _lastReportedTicks >= ThrottleIntervalTicks || _bytesRead >= _totalLength)
         {
-            _lastReported = percent;
-            _onProgress(percent);
+            _lastReportedTicks = nowTicks;
+            _onProgress(_bytesRead);
         }
     }
 

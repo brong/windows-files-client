@@ -2,6 +2,7 @@
 #   1. This file (VERSION)
 #   2. windows/FileNodeClient.Package/AppxManifest.xml  (<Identity Version="...">)
 
+1.0.23.0 2026-03-10  Bytes-based upload progress, 100ms throttled progress callbacks
 1.0.22.0 2026-03-10  Context menu actions for rejected files, retry/dismiss/delete
 1.0.21.0 2026-03-10  RFC 8620 error handling, file size column, fix stall timer
 1.0.20.0 2026-03-10  HTTP/1.1 uploads, fix download starvation during uploads
