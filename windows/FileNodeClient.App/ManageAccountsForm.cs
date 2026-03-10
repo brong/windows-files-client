@@ -1653,7 +1653,10 @@ sealed partial class ManageAccountsForm : Form
                     _reauthStatusLabel.Text = msg;
             });
 
-            var cred = await flow.SignInAsync(progress);
+            // Preserve the existing session URL (e.g. beta) during reauth
+            var sessionUrlOverride = _sessionUrlBox.Text.Trim();
+            var cred = await flow.SignInAsync(progress,
+                sessionUrlOverride: string.IsNullOrEmpty(sessionUrlOverride) ? null : sessionUrlOverride);
 
             _reauthStatusLabel.Text = "Updating credentials...";
             await _serviceClient.UpdateLoginAsync(

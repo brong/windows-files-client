@@ -19,11 +19,13 @@ sealed class OAuthLoginFlow : IDisposable
     /// Opens the user's browser for authentication and waits for the callback.
     /// </summary>
     public async Task<OAuthCredential> SignInAsync(IProgress<string>? progress = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default, string? sessionUrlOverride = null)
     {
         // Step 1: Discover OAuth metadata
         progress?.Report("Discovering server...");
         var (sessionUrl, metadata) = await OAuthDiscovery.DiscoverAsync(ct: ct);
+        if (sessionUrlOverride != null)
+            sessionUrl = sessionUrlOverride;
 
         if (metadata.RegistrationEndpoint == null)
             throw new InvalidOperationException("Server does not support dynamic client registration");

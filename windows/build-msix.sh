@@ -44,7 +44,7 @@ WINBUILD=$(wslpath -w "$BUILDDIR")
 PUBLISHDIR="$BUILDDIR/FileNodeClient.Package/publish"
 
 # Extract version from VERSION file (first non-comment line, first field)
-APP_VERSION=$(grep -v '^#' "$BUILDDIR/VERSION" | head -1 | awk '{print $1}')
+APP_VERSION=$(grep -v '^#\|^$' "$BUILDDIR/VERSION" | head -1 | awk '{print $1}')
 BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 echo "=== Version: $APP_VERSION  Build: $BUILD_DATE ==="
 VERSION_PROPS="-p:Version=$APP_VERSION -p:InformationalVersion=$APP_VERSION+$BUILD_DATE"

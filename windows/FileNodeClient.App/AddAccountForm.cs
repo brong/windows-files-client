@@ -11,6 +11,7 @@ sealed class AddAccountForm : Form
 
     // OAuth flow controls
     private readonly Button _signInButton;
+    private readonly Button _betaButton;
 
     // Advanced (manual) flow controls
     private readonly GroupBox _advancedGroup;
@@ -34,7 +35,7 @@ sealed class AddAccountForm : Form
 
         Text = "Add Account";
         var em = Font.Height;
-        Size = new Size(32 * em, 12 * em);
+        Size = new Size(40 * em, 12 * em);
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;
@@ -56,7 +57,18 @@ sealed class AddAccountForm : Form
             Location = new Point(pad, y),
             Anchor = AnchorStyles.Top | AnchorStyles.Left,
         };
-        _signInButton.Click += OnSignInClicked;
+        _signInButton.Click += (_, _) => DoOAuthSignIn(sessionUrlOverride: null);
+
+        _betaButton = new Button
+        {
+            Text = "Sign in with Fastmail (beta)",
+            AutoSize = true,
+            Height = (int)(em * 2.2),
+            Location = new Point(_signInButton.Right + em / 2, y),
+            Anchor = AnchorStyles.Top | AnchorStyles.Left,
+        };
+        _betaButton.Click += (_, _) => DoOAuthSignIn(
+            sessionUrlOverride: "https://betaapi.fastmail.com/jmap/session");
 
         _advancedToggle = new LinkLabel
         {
@@ -153,7 +165,7 @@ sealed class AddAccountForm : Form
             DialogResult = DialogResult.Cancel,
         };
 
-        Controls.AddRange([_signInButton, _advancedToggle,
+        Controls.AddRange([_signInButton, _betaButton, _advancedToggle,
             _statusLabel, _advancedGroup, cancelButton]);
 
         // Position cancel at bottom-right
@@ -179,9 +191,10 @@ sealed class AddAccountForm : Form
         Size = new Size(Size.Width, (int)(12 * em) + extraHeight);
     }
 
-    private async void OnSignInClicked(object? sender, EventArgs e)
+    private async void DoOAuthSignIn(string? sessionUrlOverride)
     {
         _signInButton.Enabled = false;
+        _betaButton.Enabled = false;
         _statusLabel.ForeColor = Color.DodgerBlue;
 
         try
@@ -195,7 +208,7 @@ sealed class AddAccountForm : Form
                     _statusLabel.Text = msg;
             });
 
-            var cred = await flow.SignInAsync(progress);
+            var cred = await flow.SignInAsync(progress, sessionUrlOverride: sessionUrlOverride);
 
             // Bring app to front after browser auth completes
             Owner?.Show();
@@ -207,7 +220,7 @@ sealed class AddAccountForm : Form
             {
                 _statusLabel.Text = "Service is not running. Start the service first.";
                 _statusLabel.ForeColor = Color.Red;
-                _signInButton.Enabled = true;
+                _signInButton.Enabled = _betaButton.Enabled = true;
                 return;
             }
 
@@ -218,7 +231,7 @@ sealed class AddAccountForm : Form
             {
                 _statusLabel.Text = "No FileNode accounts found";
                 _statusLabel.ForeColor = Color.Red;
-                _signInButton.Enabled = true;
+                _signInButton.Enabled = _betaButton.Enabled = true;
                 return;
             }
 
@@ -232,7 +245,7 @@ sealed class AddAccountForm : Form
                 using var selectForm = new SelectAccountsForm(accounts, null);
                 if (selectForm.ShowDialog(this) != DialogResult.OK || selectForm.SelectedAccountIds == null)
                 {
-                    _signInButton.Enabled = true;
+                    _signInButton.Enabled = _betaButton.Enabled = true;
                     _statusLabel.Text = "";
                     return;
                 }
@@ -242,7 +255,7 @@ sealed class AddAccountForm : Form
                 {
                     _statusLabel.Text = "No accounts selected";
                     _statusLabel.ForeColor = Color.Red;
-                    _signInButton.Enabled = true;
+                    _signInButton.Enabled = _betaButton.Enabled = true;
                     return;
                 }
             }
@@ -262,7 +275,7 @@ sealed class AddAccountForm : Form
             var msg = string.IsNullOrWhiteSpace(ex.Message) ? ex.GetType().Name : ex.Message;
             _statusLabel.Text = $"Error: {msg}";
             _statusLabel.ForeColor = Color.Red;
-            _signInButton.Enabled = true;
+            _signInButton.Enabled = _betaButton.Enabled = true;
         }
     }
 
