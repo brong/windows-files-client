@@ -5,16 +5,15 @@ using FileNodeClient.Jmap.Auth;
 
 namespace FileNodeClient.App;
 
-sealed class ManageAccountsForm : Form
+sealed partial class ManageAccountsForm : Form
 {
     private readonly ServiceClient _serviceClient;
     private readonly CancellationTokenSource _appCts;
     private readonly TreeView _treeView;
     private readonly Panel _detailPanel;
     private readonly System.Windows.Forms.Timer _refreshTimer;
-    private readonly System.Windows.Forms.Timer _statusDebounceTimer;
-    private readonly System.Windows.Forms.Timer _accountsDebounceTimer;
-    private readonly System.Windows.Forms.Timer _activityDebounceTimer;
+    private readonly System.Windows.Forms.Timer _renderTimer;
+    private readonly ViewModel _vm = new();
 
     // Detail panel controls — login selected
     private readonly Panel _loginPanel;
@@ -59,27 +58,14 @@ sealed class ManageAccountsForm : Form
         bool IsSynced, bool IsMissing, AccountInfo? SyncInfo);
     private record ActivityItemTag(string AccountId, Guid EntryId, string? LocalPath);
 
-    // Accounts that are being set up (added via OAuth/token but supervisor not yet created)
-    private readonly HashSet<string> _settingUpAccounts = new();
-
-    // Track what's currently displayed in the detail panel to avoid resetting it
-    private string? _displayedLoginId;
-    private string? _displayedAccountId;
     private bool _suppressSelectionChanged;
     private bool _operationInProgress;
-    private readonly Dictionary<string, ActivitySnapshot> _activityCache = new();
+    private string? _renderedLoginId;
+    private string? _renderedAccountId;
     private readonly Button _addLoginButton;
     private readonly Button _startServiceButton;
     private readonly Button _stopServiceButton;
     private readonly Button _restartServiceButton;
-
-    // Version info
-    private VersionInfo? _serviceVersion;
-
-    // Discovered accounts per login (populated async on form open)
-    private readonly Dictionary<string, List<DiscoveredAccount>> _discoveredAccounts = new();
-    private readonly Dictionary<string, LoginAccountsResult> _loginAccountResults = new();
-    private readonly HashSet<string> _refreshedLogins = new();
 
     public ManageAccountsForm(ServiceClient serviceClient, CancellationTokenSource appCts)
     {
@@ -112,13 +98,19 @@ sealed class ManageAccountsForm : Form
             if (!_suppressSelectionChanged)
                 OnSelectionChanged();
         };
-        // Click on already-selected node deselects it (show all activity)
+        // Click on already-selected node deselects it (show version info).
+        // Must use BeginInvoke so the deselection runs AFTER the TreeView's
+        // built-in click processing (which re-selects the clicked node).
         _treeView.MouseDown += (_, e) =>
         {
             var hit = _treeView.HitTest(e.Location);
             if (hit.Node != null && hit.Node == _treeView.SelectedNode)
             {
-                _treeView.SelectedNode = null;
+                BeginInvoke(() =>
+                {
+                    _treeView.SelectedNode = null;
+                    OnSelectionChanged();
+                });
             }
         };
 
@@ -361,7 +353,7 @@ sealed class ManageAccountsForm : Form
             ForeColor = Color.Green,
             TextAlign = ContentAlignment.MiddleCenter,
             Font = new Font(Font.FontFamily, Font.Size * 1.2f),
-            Visible = true,
+            Visible = false,
         };
 
         // ======= Available (non-synced) account panel =======
@@ -500,72 +492,358 @@ sealed class ManageAccountsForm : Form
         Controls.Add(_treeView);
         Controls.Add(bottomPanel);
 
-        // Debounce timers — coalesce rapid status/account changes so brief
-        // SSE hiccups (Disconnected→Idle in <1s) don't cause visible flicker.
-        _statusDebounceTimer = new System.Windows.Forms.Timer { Interval = 1000 };
-        _statusDebounceTimer.Tick += (_, _) =>
-        {
-            _statusDebounceTimer.Stop();
-            UpdateStatusText();
-        };
+        // Single render timer — coalesces all state changes into one UI pass
+        _renderTimer = new System.Windows.Forms.Timer { Interval = 50 };
+        _renderTimer.Tick += (_, _) => { _renderTimer.Stop(); Render(); };
 
-        _accountsDebounceTimer = new System.Windows.Forms.Timer { Interval = 1000 };
-        _accountsDebounceTimer.Tick += (_, _) =>
-        {
-            _accountsDebounceTimer.Stop();
-            RefreshTree();
-        };
-
-        _serviceClient.AccountsChanged += () =>
-        {
-            if (InvokeRequired)
-                BeginInvoke(() => _accountsDebounceTimer.Start());
-            else
-                _accountsDebounceTimer.Start();
-        };
-
-        _serviceClient.StatusChanged += () =>
-        {
-            if (InvokeRequired)
-                BeginInvoke(() => _statusDebounceTimer.Start());
-            else
-                _statusDebounceTimer.Start();
-        };
-
-        _serviceClient.ActivityChanged += OnActivityPushed;
-
-        _serviceClient.ConnectionChanged += connected =>
-        {
-            void OnConnChange()
-            {
-                UpdateServiceButtons();
-                if (connected)
-                    FetchServiceVersion();
-                else
-                {
-                    _serviceVersion = null;
-                    _activityCache.Clear();
-                    RefreshActivityFromCache();
-                }
-            }
-            if (InvokeRequired) BeginInvoke(OnConnChange); else OnConnChange();
-        };
-
-        // Safety-net timer
+        // Safety-net timer — catches any missed events
         _refreshTimer = new System.Windows.Forms.Timer { Interval = 30000 };
-        _refreshTimer.Tick += (_, _) => UpdateStatusText();
+        _refreshTimer.Tick += (_, _) => { SnapshotServiceState(); ScheduleRender(); };
         _refreshTimer.Start();
 
-        // Debounce timer for batching rapid activity pushes into single UI update
-        _activityDebounceTimer = new System.Windows.Forms.Timer { Interval = 50 };
-        _activityDebounceTimer.Tick += (_, _) =>
-        {
-            _activityDebounceTimer.Stop();
-            RefreshActivityFromCache();
-        };
+        _serviceClient.AccountsChanged += () => { SnapshotServiceState(); ScheduleRender(); };
+        _serviceClient.StatusChanged += () => { SnapshotServiceState(); ScheduleRender(); };
+        _serviceClient.ActivityChanged += OnActivityPushed;
+        _serviceClient.ConnectionChanged += OnConnectionChanged;
 
-        RefreshTree();
+        SnapshotServiceState();
+        Render();
         _ = RefreshAllLoginAccountsAsync();
+    }
+
+    // === Core rendering infrastructure ===
+
+    private void ScheduleRender()
+    {
+        _vm.MarkDirty();
+        if (InvokeRequired) BeginInvoke(() => _renderTimer.Start());
+        else _renderTimer.Start();
+    }
+
+    private void SnapshotServiceState()
+    {
+        _vm.IsConnected = _serviceClient.IsConnected;
+        _vm.Accounts = _serviceClient.Accounts.ToList();
+        _vm.ConnectingLoginIds = _serviceClient.ConnectingLoginIds.ToList();
+        _vm.FailedLogins = _serviceClient.FailedLogins.ToList();
+        _vm.ConnectedLoginIds = _serviceClient.ConnectedLoginIds.ToList();
+    }
+
+    private void OnConnectionChanged(bool connected)
+    {
+        void Handle()
+        {
+            SnapshotServiceState();
+            UpdateServiceButtons();
+            if (connected)
+            {
+                FetchServiceVersion();
+                FetchInitialActivity();
+            }
+            else
+            {
+                _vm.ServiceVersion = null;
+                _vm.ActivityCache.Clear();
+            }
+            ScheduleRender();
+        }
+        if (InvokeRequired) BeginInvoke(Handle); else Handle();
+    }
+
+    private void Render()
+    {
+        _vm.ClearDirty();
+        if (!Visible) return;
+
+        RenderTree();
+        RenderDetailPanel();
+        RenderActivityView();
+    }
+
+    private void RenderTree()
+    {
+        var accounts = _vm.Accounts;
+        var connectingIds = _vm.ConnectingLoginIds;
+        var failedLogins = _vm.FailedLogins;
+        var connectedLoginIds = _vm.ConnectedLoginIds;
+        var serviceConnected = _vm.IsConnected;
+
+        _suppressSelectionChanged = true;
+
+        _treeView.BeginUpdate();
+        _treeView.Nodes.Clear();
+
+        if (!serviceConnected)
+        {
+            _treeView.Nodes.Add(new TreeNode("Service not running")
+                { ForeColor = Color.Gray });
+            _treeView.EndUpdate();
+            _suppressSelectionChanged = false;
+            return;
+        }
+
+        // Group synced accounts by loginId
+        var byLogin = accounts
+            .Where(a => !string.IsNullOrEmpty(a.LoginId))
+            .GroupBy(a => a.LoginId)
+            .ToDictionary(g => g.Key, g => g.ToList());
+
+        var allLoginIds = byLogin.Keys
+            .Union(_vm.DiscoveredAccounts.Keys)
+            .Union(connectingIds)
+            .Union(connectedLoginIds)
+            .Union(failedLogins.Select(f => f.LoginId))
+            .Distinct()
+            .OrderBy(id => id)
+            .ToList();
+
+        foreach (var loginId in allLoginIds)
+        {
+            var syncedAccounts = byLogin.GetValueOrDefault(loginId) ?? new List<AccountInfo>();
+            var syncedIds = syncedAccounts.Select(a => a.AccountId).ToHashSet();
+
+            var parts = loginId.Split('@');
+            var displayText = parts.Length >= 3
+                ? $"{parts[0]}@{parts[1]} ({parts[2]})"
+                : loginId;
+
+            var loginTreeNode = new TreeNode(displayText)
+            {
+                Tag = new LoginNode(loginId),
+                NodeFont = new Font(_treeView.Font, FontStyle.Bold),
+            };
+
+            var failedInfo = failedLogins.FirstOrDefault(f => f.LoginId == loginId);
+
+            if (connectingIds.Contains(loginId) && syncedAccounts.Count == 0)
+            {
+                loginTreeNode.Nodes.Add(new TreeNode("Connecting...") { ForeColor = Color.Gray });
+            }
+            else if (failedInfo != null && syncedAccounts.Count == 0)
+            {
+                loginTreeNode.Nodes.Add(new TreeNode($"Connection failed: {failedInfo.Error}")
+                    { ForeColor = Color.Red });
+            }
+            else
+            {
+                var discoveredIds = _vm.DiscoveredAccounts.TryGetValue(loginId, out var disc)
+                    ? disc.Select(d => d.AccountId).ToHashSet() : null;
+                var loginRefreshed = _vm.RefreshedLogins.Contains(loginId);
+
+                foreach (var account in syncedAccounts)
+                {
+                    var isMissing = loginRefreshed && discoveredIds != null
+                        && !discoveredIds.Contains(account.AccountId);
+
+                    var rejCount = _serviceClient.GetRejectedCount(account.AccountId);
+                    var statusText = isMissing ? "Missing on server" : account.Status switch
+                    {
+                        AccountStatus.Paused when account.PauseReason?.Contains("DiskFull") == true => "Disk full",
+                        AccountStatus.Paused when account.PauseReason?.Contains("UserRequested") == true => "Paused",
+                        AccountStatus.Paused when account.PauseReason?.Contains("MeteredConnection") == true => "Metered",
+                        AccountStatus.Idle when account.PendingCount > 0 => $"{account.PendingCount} pending",
+                        AccountStatus.Idle when rejCount > 0 => rejCount == 1 ? "1 file rejected" : $"{rejCount} files rejected",
+                        AccountStatus.Idle => "Up to date",
+                        AccountStatus.Syncing => "Syncing",
+                        AccountStatus.Error => "Error",
+                        AccountStatus.Disconnected => "Offline",
+                        _ => "Unknown",
+                    };
+
+                    var node = new TreeNode($"{account.DisplayName} \u2014 {statusText}")
+                    {
+                        Tag = new AccountNode(loginId, account.AccountId, account.DisplayName,
+                            IsSynced: true, IsMissing: isMissing, SyncInfo: account),
+                        ForeColor = isMissing ? Color.FromArgb(200, 120, 0) : default,
+                    };
+                    loginTreeNode.Nodes.Add(node);
+                }
+
+                if (disc != null)
+                {
+                    foreach (var d in disc.Where(d => !syncedIds.Contains(d.AccountId)))
+                    {
+                        var isSettingUp = _vm.SettingUpAccounts.Contains(d.AccountId);
+                        var label = isSettingUp ? "Setting up" : "Not synced";
+                        var node = new TreeNode($"{d.Name} \u2014 {label}")
+                        {
+                            Tag = new AccountNode(loginId, d.AccountId, d.Name,
+                                IsSynced: false, IsMissing: false, SyncInfo: null),
+                            ForeColor = isSettingUp ? Color.DodgerBlue : Color.Gray,
+                        };
+                        loginTreeNode.Nodes.Add(node);
+                    }
+                }
+
+                // Clear setting-up flag for accounts that are now synced
+                foreach (var acct in syncedAccounts)
+                    _vm.SettingUpAccounts.Remove(acct.AccountId);
+            }
+
+            _treeView.Nodes.Add(loginTreeNode);
+        }
+
+        _treeView.ExpandAll();
+
+        // Restore selection from ViewModel
+        if (_vm.SelectedLoginId != null || _vm.SelectedAccountId != null)
+        {
+            foreach (TreeNode loginTn in _treeView.Nodes)
+            {
+                if (loginTn.Tag is LoginNode restoredLn && restoredLn.LoginId == _vm.SelectedLoginId)
+                {
+                    _treeView.SelectedNode = loginTn;
+                    break;
+                }
+                foreach (TreeNode accountTn in loginTn.Nodes)
+                {
+                    if (accountTn.Tag is AccountNode restoredAn && restoredAn.AccountId == _vm.SelectedAccountId)
+                    {
+                        _treeView.SelectedNode = accountTn;
+                        break;
+                    }
+                }
+            }
+        }
+        _treeView.EndUpdate();
+        _suppressSelectionChanged = false;
+
+        // Clear selection if nothing was previously selected — must happen
+        // AFTER EndUpdate because the TreeView can auto-select the first
+        // node during EndUpdate's internal processing.
+        if (_vm.SelectedLoginId == null && _vm.SelectedAccountId == null)
+            _treeView.SelectedNode = null;
+
+        // If any login doesn't have discovered accounts yet, kick off discovery.
+        var undiscoveredLogins = allLoginIds
+            .Where(id => !_vm.DiscoveredAccounts.ContainsKey(id) && !connectingIds.Contains(id))
+            .ToList();
+        if (undiscoveredLogins.Count > 0)
+            _ = DiscoverAccountsForLoginsAsync(undiscoveredLogins);
+    }
+
+    private void RenderDetailPanel()
+    {
+        var selectedNode = _treeView.SelectedNode;
+        bool loginChanged = _vm.SelectedLoginId != _renderedLoginId;
+        bool accountChanged = _vm.SelectedAccountId != _renderedAccountId;
+        bool selectionChanged = loginChanged || accountChanged;
+
+        _renderedLoginId = _vm.SelectedLoginId;
+        _renderedAccountId = _vm.SelectedAccountId;
+
+        // Always set panel visibility — hide all, then show the right one
+        _loginPanel.Visible = false;
+        _syncedAccountPanel.Visible = false;
+        _availableAccountPanel.Visible = false;
+        _noSelectionLabel.Visible = false;
+
+        if (selectedNode?.Tag is LoginNode loginNode)
+        {
+            _loginPanel.Visible = true;
+            if (selectionChanged)
+            {
+                _loginIdLabel.Text = loginNode.LoginId;
+                var atIdx = loginNode.LoginId.LastIndexOf('@');
+                var host = atIdx >= 0 ? loginNode.LoginId.Substring(atIdx + 1) : "";
+                _sessionUrlBox.Text = !string.IsNullOrEmpty(host)
+                    ? $"https://{host}/jmap/session"
+                    : "";
+                _tokenBox.Text = "";
+                _reauthStatusLabel.Text = "";
+            }
+        }
+        else if (selectedNode?.Tag is AccountNode accountNode)
+        {
+            if (accountNode.IsSynced && accountNode.SyncInfo != null)
+            {
+                _syncedAccountPanel.Visible = true;
+                UpdateSyncedAccountLabels(accountNode);
+            }
+            else if (_vm.SettingUpAccounts.Contains(accountNode.AccountId))
+            {
+                _availableAccountPanel.Visible = true;
+                _availableAccountLabel.Text = $"{accountNode.Name} is being set up...";
+                _addAccountButton.Visible = false;
+            }
+            else
+            {
+                _availableAccountPanel.Visible = true;
+                _availableAccountLabel.Text = $"{accountNode.Name} is not currently synced.";
+                _addAccountButton.Visible = true;
+            }
+        }
+        else
+        {
+            // No selection — show version info
+            if (!_vm.IsConnected)
+            {
+                _noSelectionLabel.Text = "Service is not running. Click \"Start Service\" to connect.";
+            }
+            else
+            {
+                UpdateVersionDisplay();
+            }
+            _noSelectionLabel.Visible = true;
+        }
+    }
+
+    private void RenderActivityView()
+    {
+        if (!_vm.IsConnected)
+        {
+            _activityListView.Visible = false;
+            _activityEmptyLabel.Visible = false;
+            _activityListView.Items.Clear();
+            return;
+        }
+
+        // No activity display when no selection or login selected
+        var selectedNode = _treeView.SelectedNode;
+        if (selectedNode == null || selectedNode.Tag is LoginNode)
+        {
+            _activityListView.Visible = false;
+            _activityEmptyLabel.Visible = false;
+            _activityListView.Items.Clear();
+            return;
+        }
+
+        var allEntries = new List<(string DisplayName, string AccountId, string LoginId, OutboxEntry Entry)>();
+        var allDownloads = new List<(string DisplayName, string AccountId, string LoginId, ActiveDownloadEntry Download)>();
+
+        foreach (var acct in _vm.Accounts)
+        {
+            if (!_vm.ActivityCache.TryGetValue(acct.AccountId, out var snap)) continue;
+
+            foreach (var entry in snap.ActiveEntries)
+                allEntries.Add((acct.DisplayName, acct.AccountId, acct.LoginId, entry));
+            foreach (var entry in snap.ErrorEntries)
+                allEntries.Add((acct.DisplayName, acct.AccountId, acct.LoginId, entry));
+            foreach (var entry in snap.PendingEntries)
+                allEntries.Add((acct.DisplayName, acct.AccountId, acct.LoginId, entry));
+            foreach (var entry in snap.RejectedEntries)
+                allEntries.Add((acct.DisplayName, acct.AccountId, acct.LoginId, entry));
+
+            if (snap.ActiveDownloads is { } dls)
+                foreach (var dl in dls)
+                    allDownloads.Add((acct.DisplayName, acct.AccountId, acct.LoginId, dl));
+        }
+
+        // Filter by selection
+        if (_vm.SelectedAccountId != null)
+        {
+            allEntries = allEntries.Where(e => e.AccountId == _vm.SelectedAccountId).ToList();
+            allDownloads = allDownloads.Where(d => d.AccountId == _vm.SelectedAccountId).ToList();
+        }
+        else if (_vm.SelectedLoginId != null)
+        {
+            allEntries = allEntries.Where(e => e.LoginId == _vm.SelectedLoginId).ToList();
+            allDownloads = allDownloads.Where(d => d.LoginId == _vm.SelectedLoginId).ToList();
+        }
+
+        bool hasSyncedSelection = selectedNode?.Tag is AccountNode selAcct && selAcct.IsSynced;
+
+        RefreshActivityList(allEntries, allDownloads, hasSyncedSelection);
     }
 
     private void OnExitClicked(object? sender, EventArgs e)
@@ -681,87 +959,27 @@ sealed class ManageAccountsForm : Form
     private void OnActivityPushed(ActivitySnapshot snapshot)
     {
         if (InvokeRequired) { BeginInvoke(() => OnActivityPushed(snapshot)); return; }
-        if (!Visible) return;
-        _activityCache[snapshot.AccountId] = snapshot;
-        _activityDebounceTimer.Start(); // Restarts 50ms debounce
-    }
-
-    private void RefreshActivityFromCache()
-    {
-        if (!_serviceClient.IsConnected)
-        {
-            _activityListView.Visible = false;
-            _activityEmptyLabel.Visible = false;
-            _activityListView.Items.Clear();
-            _activityCache.Clear();
-            return;
-        }
-
-        var allEntries = new List<(string DisplayName, string AccountId, string LoginId, OutboxEntry Entry)>();
-        var allDownloads = new List<(string DisplayName, string AccountId, string LoginId, ActiveDownloadEntry Download)>();
-
-        var accounts = _serviceClient.Accounts;
-        foreach (var acct in accounts)
-        {
-            if (!_activityCache.TryGetValue(acct.AccountId, out var snap)) continue;
-
-            // Combine entries in order: active, errors, pending, rejected
-            foreach (var entry in snap.ActiveEntries)
-                allEntries.Add((acct.DisplayName, acct.AccountId, acct.LoginId, entry));
-            foreach (var entry in snap.ErrorEntries)
-                allEntries.Add((acct.DisplayName, acct.AccountId, acct.LoginId, entry));
-            foreach (var entry in snap.PendingEntries)
-                allEntries.Add((acct.DisplayName, acct.AccountId, acct.LoginId, entry));
-            foreach (var entry in snap.RejectedEntries)
-                allEntries.Add((acct.DisplayName, acct.AccountId, acct.LoginId, entry));
-
-            if (snap.ActiveDownloads is { } dls)
-                foreach (var dl in dls)
-                    allDownloads.Add((acct.DisplayName, acct.AccountId, acct.LoginId, dl));
-        }
-
-        // Filter by tree selection
-        var node = _treeView.SelectedNode;
-        if (node?.Tag is AccountNode selAccount)
-        {
-            allEntries = allEntries.Where(e => e.AccountId == selAccount.AccountId).ToList();
-            allDownloads = allDownloads.Where(d => d.AccountId == selAccount.AccountId).ToList();
-        }
-        else if (node?.Tag is LoginNode selLogin)
-        {
-            allEntries = allEntries.Where(e => e.LoginId == selLogin.LoginId).ToList();
-            allDownloads = allDownloads.Where(d => d.LoginId == selLogin.LoginId).ToList();
-        }
-
-        // Determine if the current selection has a synced account — only show
-        // "Nothing to sync" when a synced account is idle, not for unsynced accounts.
-        bool hasSyncedSelection = true;
-        if (node?.Tag is AccountNode selAcct2 && !selAcct2.IsSynced)
-            hasSyncedSelection = false;
-        else if (accounts.Count == 0)
-            hasSyncedSelection = false;
-
-        RefreshActivityList(allEntries, allDownloads, hasSyncedSelection);
+        _vm.ActivityCache[snapshot.AccountId] = snapshot;
+        ScheduleRender();
     }
 
     private async void FetchServiceVersion()
     {
         try
         {
-            _serviceVersion = await _serviceClient.GetVersionAsync();
-            UpdateVersionDisplay();
+            _vm.ServiceVersion = await _serviceClient.GetVersionAsync();
+            ScheduleRender();
         }
         catch { /* IPC not available */ }
     }
 
     private void UpdateVersionDisplay()
     {
-        if (!_noSelectionLabel.Visible) return;
         var appVersion = VersionHelper.GetVersionInfo();
         var lines = new List<string>();
         lines.Add($"App: {appVersion.Version}  ({FormatBuildDate(appVersion.BuildDate)})");
-        if (_serviceVersion != null)
-            lines.Add($"Service: {_serviceVersion.Version}  ({FormatBuildDate(_serviceVersion.BuildDate)})");
+        if (_vm.ServiceVersion != null)
+            lines.Add($"Service: {_vm.ServiceVersion.Version}  ({FormatBuildDate(_vm.ServiceVersion.BuildDate)})");
         else
             lines.Add("Service: not connected");
         _noSelectionLabel.Text = string.Join("\n", lines);
@@ -783,9 +1001,9 @@ sealed class ManageAccountsForm : Form
             var results = await Task.WhenAll(tasks);
 
             for (int i = 0; i < results.Length; i++)
-                _activityCache[results[i].AccountId] = results[i];
+                _vm.ActivityCache[results[i].AccountId] = results[i];
 
-            RefreshActivityFromCache();
+            ScheduleRender();
         }
         catch
         {
@@ -1186,11 +1404,12 @@ sealed class ManageAccountsForm : Form
         foreach (var (loginId, result, _) in await Task.WhenAll(cachedTasks))
         {
             if (result == null) continue;
-            _loginAccountResults[loginId] = result;
+            _vm.LoginAccountResults[loginId] = result;
             if (result.Accounts != null)
-                _discoveredAccounts[loginId] = result.Accounts;
+                _vm.DiscoveredAccounts[loginId] = result.Accounts;
         }
-        if (InvokeRequired) BeginInvoke(RefreshTree); else RefreshTree();
+        SnapshotServiceState();
+        ScheduleRender();
 
         // Phase 2: fresh from server (slow, all logins in parallel)
         var refreshTasks = loginIds.Select(async loginId =>
@@ -1207,188 +1426,18 @@ sealed class ManageAccountsForm : Form
         {
             if (result != null)
             {
-                _loginAccountResults[loginId] = result;
+                _vm.LoginAccountResults[loginId] = result;
                 if (result.Accounts != null)
-                    _discoveredAccounts[loginId] = result.Accounts;
+                    _vm.DiscoveredAccounts[loginId] = result.Accounts;
             }
             else if (ex != null)
             {
                 Log.Error($"Failed to refresh accounts for {loginId}: {ex.Message}");
             }
-            _refreshedLogins.Add(loginId);
+            _vm.RefreshedLogins.Add(loginId);
         }
-        if (InvokeRequired) BeginInvoke(RefreshTree); else RefreshTree();
-    }
-
-    private void RefreshTree()
-    {
-        var accounts = _serviceClient.Accounts;
-        var connectingIds = _serviceClient.ConnectingLoginIds;
-        var failedLogins = _serviceClient.FailedLogins;
-        var connectedLoginIds = _serviceClient.ConnectedLoginIds;
-        var serviceConnected = _serviceClient.IsConnected;
-
-        // Preserve selection
-        string? selectedLoginId = null;
-        string? selectedAccountId = null;
-        if (_treeView.SelectedNode?.Tag is LoginNode ln)
-            selectedLoginId = ln.LoginId;
-        else if (_treeView.SelectedNode?.Tag is AccountNode an)
-            selectedAccountId = an.AccountId;
-
-        // Suppress AfterSelect during tree rebuild so Nodes.Clear() and
-        // SelectedNode assignment don't trigger OnSelectionChanged()
-        _suppressSelectionChanged = true;
-
-        _treeView.BeginUpdate();
-        _treeView.Nodes.Clear();
-
-        if (!serviceConnected)
-        {
-            _treeView.Nodes.Add(new TreeNode("Service not running")
-                { ForeColor = Color.Gray });
-            _treeView.EndUpdate();
-            _suppressSelectionChanged = false;
-            OnSelectionChanged();
-            return;
-        }
-
-        // Group synced accounts by loginId
-        var byLogin = accounts
-            .Where(a => !string.IsNullOrEmpty(a.LoginId))
-            .GroupBy(a => a.LoginId)
-            .ToDictionary(g => g.Key, g => g.ToList());
-
-        var allLoginIds = byLogin.Keys
-            .Union(_discoveredAccounts.Keys)
-            .Union(connectingIds)
-            .Union(connectedLoginIds)
-            .Union(failedLogins.Select(f => f.LoginId))
-            .Distinct()
-            .OrderBy(id => id)
-            .ToList();
-
-        foreach (var loginId in allLoginIds)
-        {
-            var syncedAccounts = byLogin.GetValueOrDefault(loginId) ?? new List<AccountInfo>();
-            var syncedIds = syncedAccounts.Select(a => a.AccountId).ToHashSet();
-
-            // Show the login ID — split "user@host" for readability
-            var parts = loginId.Split('@');
-            var displayText = parts.Length >= 3
-                ? $"{parts[0]}@{parts[1]} ({parts[2]})"  // user@domain@host -> user@domain (host)
-                : loginId;
-
-            var loginTreeNode = new TreeNode(displayText)
-            {
-                Tag = new LoginNode(loginId),
-                NodeFont = new Font(_treeView.Font, FontStyle.Bold),
-            };
-
-            var failedInfo = failedLogins.FirstOrDefault(f => f.LoginId == loginId);
-
-            if (connectingIds.Contains(loginId) && syncedAccounts.Count == 0)
-            {
-                loginTreeNode.Nodes.Add(new TreeNode("Connecting...") { ForeColor = Color.Gray });
-            }
-            else if (failedInfo != null && syncedAccounts.Count == 0)
-            {
-                loginTreeNode.Nodes.Add(new TreeNode($"Connection failed: {failedInfo.Error}")
-                    { ForeColor = Color.Red });
-            }
-            else
-            {
-                var discoveredIds = _discoveredAccounts.TryGetValue(loginId, out var disc)
-                    ? disc.Select(d => d.AccountId).ToHashSet() : null;
-                var loginRefreshed = _refreshedLogins.Contains(loginId);
-
-                foreach (var account in syncedAccounts)
-                {
-                    var isMissing = loginRefreshed && discoveredIds != null
-                        && !discoveredIds.Contains(account.AccountId);
-
-                    var rejCount = _serviceClient.GetRejectedCount(account.AccountId);
-                    var statusText = isMissing ? "Missing on server" : account.Status switch
-                    {
-                        AccountStatus.Idle when account.PendingCount > 0 => $"{account.PendingCount} pending",
-                        AccountStatus.Idle when rejCount > 0 => rejCount == 1 ? "1 file rejected" : $"{rejCount} files rejected",
-                        AccountStatus.Idle => "Up to date",
-                        AccountStatus.Syncing => "Syncing",
-                        AccountStatus.Error => "Error",
-                        AccountStatus.Disconnected => "Offline",
-                        _ => "Unknown",
-                    };
-
-                    var node = new TreeNode($"{account.DisplayName} \u2014 {statusText}")
-                    {
-                        Tag = new AccountNode(loginId, account.AccountId, account.DisplayName,
-                            IsSynced: true, IsMissing: isMissing, SyncInfo: account),
-                        ForeColor = isMissing ? Color.FromArgb(200, 120, 0) : default,
-                    };
-                    loginTreeNode.Nodes.Add(node);
-                }
-
-                if (disc != null)
-                {
-                    foreach (var d in disc.Where(d => !syncedIds.Contains(d.AccountId)))
-                    {
-                        var isSettingUp = _settingUpAccounts.Contains(d.AccountId);
-                        var label = isSettingUp ? "Setting up" : "Not synced";
-                        var node = new TreeNode($"{d.Name} \u2014 {label}")
-                        {
-                            Tag = new AccountNode(loginId, d.AccountId, d.Name,
-                                IsSynced: false, IsMissing: false, SyncInfo: null),
-                            ForeColor = isSettingUp ? Color.DodgerBlue : Color.Gray,
-                        };
-                        loginTreeNode.Nodes.Add(node);
-                    }
-                }
-
-                // Clear setting-up flag for accounts that are now synced
-                foreach (var acct in syncedAccounts)
-                    _settingUpAccounts.Remove(acct.AccountId);
-            }
-
-            _treeView.Nodes.Add(loginTreeNode);
-        }
-
-        _treeView.ExpandAll();
-
-        // Restore selection
-        if (selectedLoginId != null || selectedAccountId != null)
-        {
-            foreach (TreeNode loginTn in _treeView.Nodes)
-            {
-                if (loginTn.Tag is LoginNode restoredLn && restoredLn.LoginId == selectedLoginId)
-                {
-                    _treeView.SelectedNode = loginTn;
-                    break;
-                }
-                foreach (TreeNode accountTn in loginTn.Nodes)
-                {
-                    if (accountTn.Tag is AccountNode restoredAn && restoredAn.AccountId == selectedAccountId)
-                    {
-                        _treeView.SelectedNode = accountTn;
-                        break;
-                    }
-                }
-            }
-        }
-
-        _treeView.EndUpdate();
-        _suppressSelectionChanged = false;
-
-        // Always refresh the detail panel — the same account may have changed
-        // state (e.g. non-synced → synced) even if the selection ID is the same
-        OnSelectionChanged();
-
-        // If any login doesn't have discovered accounts yet, kick off discovery.
-        // This handles new logins arriving via AccountsChanged after AddAccountForm.
-        var undiscoveredLogins = allLoginIds
-            .Where(id => !_discoveredAccounts.ContainsKey(id) && !connectingIds.Contains(id))
-            .ToList();
-        if (undiscoveredLogins.Count > 0)
-            _ = DiscoverAccountsForLoginsAsync(undiscoveredLogins);
+        SnapshotServiceState();
+        ScheduleRender();
     }
 
     /// <summary>
@@ -1402,10 +1451,10 @@ sealed class ManageAccountsForm : Form
             try
             {
                 var result = await _serviceClient.GetLoginAccountsAsync(loginId);
-                _loginAccountResults[loginId] = result;
+                _vm.LoginAccountResults[loginId] = result;
                 if (result.Accounts != null)
                 {
-                    _discoveredAccounts[loginId] = result.Accounts;
+                    _vm.DiscoveredAccounts[loginId] = result.Accounts;
                     changed = true;
                 }
             }
@@ -1417,187 +1466,30 @@ sealed class ManageAccountsForm : Form
             try
             {
                 var result = await _serviceClient.RefreshLoginAccountsAsync(loginId);
-                _loginAccountResults[loginId] = result;
+                _vm.LoginAccountResults[loginId] = result;
                 if (result.Accounts != null)
                 {
-                    _discoveredAccounts[loginId] = result.Accounts;
+                    _vm.DiscoveredAccounts[loginId] = result.Accounts;
                     changed = true;
                 }
-                _refreshedLogins.Add(loginId);
+                _vm.RefreshedLogins.Add(loginId);
             }
             catch
             {
-                _refreshedLogins.Add(loginId);
+                _vm.RefreshedLogins.Add(loginId);
             }
         }
 
         if (changed)
-        {
-            if (InvokeRequired) BeginInvoke(RefreshTree); else RefreshTree();
-        }
-    }
-
-    /// <summary>
-    /// Lightweight update: refreshes only the status text on existing tree nodes
-    /// and the detail panel status label, without rebuilding the tree or resetting
-    /// text boxes. This preserves focus and user input.
-    /// </summary>
-    private void UpdateStatusText()
-    {
-        var accounts = _serviceClient.Accounts;
-        var accountLookup = accounts.ToDictionary(a => a.AccountId);
-
-        bool needsRebuild = false;
-        foreach (TreeNode loginTn in _treeView.Nodes)
-        {
-            foreach (TreeNode childTn in loginTn.Nodes)
-            {
-                if (childTn.Tag is not AccountNode an)
-                    continue;
-
-                // If a non-synced tree node now appears in the accounts list,
-                // the supervisor was created — need a full tree rebuild
-                if (!an.IsSynced && accountLookup.ContainsKey(an.AccountId))
-                {
-                    needsRebuild = true;
-                    continue;
-                }
-
-                if (!an.IsSynced)
-                    continue;
-
-                if (!accountLookup.TryGetValue(an.AccountId, out var info))
-                    continue;
-
-                var rej = _serviceClient.GetRejectedCount(an.AccountId);
-                var statusText = an.IsMissing ? "Missing on server" : info.Status switch
-                {
-                    AccountStatus.Paused when info.PauseReason?.Contains("DiskFull") == true => "Disk full",
-                    AccountStatus.Paused when info.PauseReason?.Contains("UserRequested") == true => "Paused",
-                    AccountStatus.Paused when info.PauseReason?.Contains("MeteredConnection") == true => "Metered",
-                    AccountStatus.Idle when info.PendingCount > 0 => $"{info.PendingCount} pending",
-                    AccountStatus.Idle when rej > 0 => rej == 1 ? "1 file rejected" : $"{rej} files rejected",
-                    AccountStatus.Idle => "Up to date",
-                    AccountStatus.Syncing => "Syncing",
-                    AccountStatus.Error => "Error",
-                    AccountStatus.Disconnected => "Offline",
-                    _ => "Unknown",
-                };
-
-                var newText = $"{an.Name} \u2014 {statusText}";
-                if (childTn.Text != newText)
-                    childTn.Text = newText;
-
-                // Update the tag with fresh SyncInfo
-                childTn.Tag = an with { SyncInfo = info };
-            }
-        }
-
-        if (needsRebuild)
-        {
-            RefreshTree();
-            return;
-        }
-
-        // If the selected node is a synced account, update the detail panel (status + buttons)
-        if (_treeView.SelectedNode?.Tag is AccountNode selAn
-            && selAn.IsSynced && selAn.SyncInfo != null)
-        {
-            UpdateSyncedAccountLabels(selAn);
-        }
+            ScheduleRender();
     }
 
     private void OnSelectionChanged()
     {
         var node = _treeView.SelectedNode;
-
-        // Determine what the new selection refers to
-        string? newLoginId = null;
-        string? newAccountId = null;
-        if (node?.Tag is LoginNode ln)
-            newLoginId = ln.LoginId;
-        else if (node?.Tag is AccountNode an)
-            newAccountId = an.AccountId;
-
-        // If the same synced account is still selected AND we're already showing
-        // the synced panel, just update labels without clearing the activity list.
-        if (newAccountId != null && newAccountId == _displayedAccountId
-            && _syncedAccountPanel.Visible
-            && node?.Tag is AccountNode sameAn && sameAn.IsSynced && sameAn.SyncInfo != null)
-        {
-            UpdateSyncedAccountLabels(sameAn);
-            return;
-        }
-
-        _loginPanel.Visible = false;
-        _syncedAccountPanel.Visible = false;
-        _availableAccountPanel.Visible = false;
-        _noSelectionLabel.Visible = false;
-
-        // Update tracking fields
-        _displayedLoginId = null;
-        _displayedAccountId = null;
-
-        // (activity pushes run globally, not tied to selection)
-
-        if (node == null)
-        {
-            if (!_serviceClient.IsConnected)
-            {
-                _noSelectionLabel.Text = "Service is not running. Click \"Start Service\" to connect.";
-            }
-            else
-            {
-                _noSelectionLabel.Text = "";
-                UpdateVersionDisplay();
-            }
-            _noSelectionLabel.Visible = true;
-            _activityListView.Visible = false;
-            _activityEmptyLabel.Visible = false;
-            _activityListView.Items.Clear();
-            return;
-        }
-
-        if (node.Tag is LoginNode loginNode)
-        {
-            _displayedLoginId = loginNode.LoginId;
-            _loginPanel.Visible = true;
-            _loginIdLabel.Text = loginNode.LoginId;
-            // Derive a default session URL from the login ID host
-            var atIdx = loginNode.LoginId.LastIndexOf('@');
-            var host = atIdx >= 0 ? loginNode.LoginId.Substring(atIdx + 1) : "";
-            _sessionUrlBox.Text = !string.IsNullOrEmpty(host)
-                ? $"https://{host}/jmap/session"
-                : "";
-            _tokenBox.Text = "";
-        }
-        else if (node.Tag is AccountNode accountNode)
-        {
-            _displayedAccountId = accountNode.AccountId;
-            if (accountNode.IsSynced && accountNode.SyncInfo != null)
-            {
-                _syncedAccountPanel.Visible = true;
-                UpdateSyncedAccountLabels(accountNode);
-            }
-            else if (_settingUpAccounts.Contains(accountNode.AccountId))
-            {
-                _availableAccountPanel.Visible = true;
-                _availableAccountLabel.Text = $"{accountNode.Name} is being set up...";
-                _addAccountButton.Visible = false;
-            }
-            else
-            {
-                _availableAccountPanel.Visible = true;
-                _availableAccountLabel.Text = $"{accountNode.Name} is not currently synced.";
-                _addAccountButton.Visible = true;
-            }
-        }
-        else
-        {
-            _noSelectionLabel.Visible = true;
-        }
-
-        FetchInitialActivity();
+        _vm.SelectedLoginId = (node?.Tag is LoginNode ln) ? ln.LoginId : null;
+        _vm.SelectedAccountId = (node?.Tag is AccountNode an) ? an.AccountId : null;
+        ScheduleRender();
     }
 
     private void UpdateSyncedAccountLabels(AccountNode accountNode)
@@ -1689,7 +1581,7 @@ sealed class ManageAccountsForm : Form
                 // Mark selected accounts as "Setting up" until their supervisor appears
                 if (addForm.EnabledAccountIds != null)
                     foreach (var id in addForm.EnabledAccountIds)
-                        _settingUpAccounts.Add(id);
+                        _vm.SettingUpAccounts.Add(id);
                 _ = RefreshAllLoginAccountsAsync();
             }
         }
@@ -1826,10 +1718,11 @@ sealed class ManageAccountsForm : Form
         try
         {
             await _serviceClient.RemoveLoginAsync(loginNode.LoginId);
-            _discoveredAccounts.Remove(loginNode.LoginId);
-            _loginAccountResults.Remove(loginNode.LoginId);
-            _refreshedLogins.Remove(loginNode.LoginId);
-            RefreshTree();
+            _vm.DiscoveredAccounts.Remove(loginNode.LoginId);
+            _vm.LoginAccountResults.Remove(loginNode.LoginId);
+            _vm.RefreshedLogins.Remove(loginNode.LoginId);
+            SnapshotServiceState();
+            ScheduleRender();
         }
         catch (Exception ex)
         {
@@ -2019,7 +1912,7 @@ sealed class ManageAccountsForm : Form
             return;
 
         SetAllButtonsEnabled(false);
-        _settingUpAccounts.Add(accountNode.AccountId);
+        _vm.SettingUpAccounts.Add(accountNode.AccountId);
         try
         {
             await _serviceClient.EnableAccountAsync(accountNode.LoginId, accountNode.AccountId);
@@ -2027,7 +1920,7 @@ sealed class ManageAccountsForm : Form
         }
         catch (Exception ex)
         {
-            _settingUpAccounts.Remove(accountNode.AccountId);
+            _vm.SettingUpAccounts.Remove(accountNode.AccountId);
             MessageBox.Show($"Failed to add account: {ex.Message}", "Error",
                 MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
@@ -2096,6 +1989,8 @@ sealed class ManageAccountsForm : Form
         base.OnVisibleChanged(e);
         if (Visible)
         {
+            SnapshotServiceState();
+            Render();
             FetchInitialActivity();
             EnsureOnScreen();
             // Briefly set TopMost to ensure the panel appears above other windows
@@ -2104,7 +1999,7 @@ sealed class ManageAccountsForm : Form
         }
         else
         {
-            _activityCache.Clear();
+            _vm.ActivityCache.Clear();
         }
     }
 
@@ -2217,14 +2112,10 @@ sealed class ManageAccountsForm : Form
             Hide();
             return;
         }
-        _activityDebounceTimer.Stop();
-        _activityDebounceTimer.Dispose();
+        _renderTimer.Stop();
+        _renderTimer.Dispose();
         _refreshTimer.Stop();
         _refreshTimer.Dispose();
-        _statusDebounceTimer.Stop();
-        _statusDebounceTimer.Dispose();
-        _accountsDebounceTimer.Stop();
-        _accountsDebounceTimer.Dispose();
         base.OnFormClosing(e);
     }
 }
