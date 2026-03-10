@@ -64,7 +64,7 @@ sealed class AddAccountForm : Form
             Text = "Sign in with Fastmail (beta)",
             AutoSize = true,
             Height = (int)(em * 2.2),
-            Location = new Point(_signInButton.Right + em / 2, y),
+            Location = new Point(pad + _signInButton.PreferredSize.Width + em / 2, y),
             Anchor = AnchorStyles.Top | AnchorStyles.Left,
         };
         _betaButton.Click += (_, _) => DoOAuthSignIn(

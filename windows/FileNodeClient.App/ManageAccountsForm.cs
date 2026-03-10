@@ -1653,10 +1653,15 @@ sealed partial class ManageAccountsForm : Form
                     _reauthStatusLabel.Text = msg;
             });
 
-            // Preserve the existing session URL (e.g. beta) during reauth
-            var sessionUrlOverride = _sessionUrlBox.Text.Trim();
+            // Preserve non-standard session URLs (e.g. beta) during reauth;
+            // for standard api.fastmail.com logins, let discovery determine the URL
+            string? sessionUrlOverride = null;
+            var currentUrl = _sessionUrlBox.Text.Trim();
+            if (!string.IsNullOrEmpty(currentUrl) &&
+                !currentUrl.Contains("api.fastmail.com", StringComparison.OrdinalIgnoreCase))
+                sessionUrlOverride = currentUrl;
             var cred = await flow.SignInAsync(progress,
-                sessionUrlOverride: string.IsNullOrEmpty(sessionUrlOverride) ? null : sessionUrlOverride);
+                sessionUrlOverride: sessionUrlOverride);
 
             _reauthStatusLabel.Text = "Updating credentials...";
             await _serviceClient.UpdateLoginAsync(
