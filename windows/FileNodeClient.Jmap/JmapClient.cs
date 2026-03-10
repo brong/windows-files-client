@@ -496,7 +496,8 @@ public class JmapClient : IJmapClient
         var url = Session.GetUploadUrl(AccountId);
         var content = new StreamContent(data);
         content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(contentType);
-        var response = await _http.PostAsync(url, content, ct);
+        using var request = new HttpRequestMessage(HttpMethod.Post, url) { Content = content, Version = System.Net.HttpVersion.Version11 };
+        var response = await _http.SendAsync(request, ct);
         response.EnsureSuccessStatusCode();
         var json = await response.Content.ReadAsStringAsync(ct);
         var upload = JsonSerializer.Deserialize<UploadResponse>(json, JmapSerializerOptions.Default)
@@ -664,11 +665,14 @@ public class JmapClient : IJmapClient
                 overallHash.AppendData(chunkSpan);
                 var chunkSha1Base64 = Convert.ToBase64String(chunkSha1);
 
-                // Upload chunk via HTTP POST (chunks are raw bytes, not the final content type)
+                // Upload chunk via HTTP POST (chunks are raw bytes, not the final content type).
+                // Force HTTP/1.1 so each upload gets its own TCP connection and doesn't
+                // starve interactive downloads via HTTP/2 multiplexing contention.
                 using var chunkStream = new MemoryStream(buffer, 0, offset, writable: false);
                 var chunkContent = new StreamContent(chunkStream);
                 chunkContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
-                var response = await http.PostAsync(uploadUrl, chunkContent, ct);
+                using var chunkRequest = new HttpRequestMessage(HttpMethod.Post, uploadUrl) { Content = chunkContent, Version = System.Net.HttpVersion.Version11 };
+                var response = await http.SendAsync(chunkRequest, ct);
                 response.EnsureSuccessStatusCode();
                 var json = await response.Content.ReadAsStringAsync(ct);
                 var upload = JsonSerializer.Deserialize<UploadResponse>(json, JmapSerializerOptions.Default)
@@ -678,6 +682,10 @@ public class JmapClient : IJmapClient
                 totalUploaded += offset;
                 onProgress?.Invoke((int)(totalUploaded * 100 / totalSize));
                 onChunkUploaded?.Invoke(new UploadedChunkInfo(upload.BlobId, chunkSha1Base64, totalUploaded - offset, offset));
+
+                // Yield between chunks so interactive work (downloads) can proceed.
+                // Without this, rapid small-chunk uploads can starve the async scheduler.
+                await Task.Yield();
             }
 
             // Compute overall SHA1

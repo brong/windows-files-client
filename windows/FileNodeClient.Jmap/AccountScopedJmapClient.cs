@@ -469,7 +469,8 @@ public class AccountScopedJmapClient : IJmapClient
         var url = Session.GetUploadUrl(_accountId);
         var content = new StreamContent(data);
         content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(contentType);
-        var response = await Http.PostAsync(url, content, ct);
+        using var request = new HttpRequestMessage(HttpMethod.Post, url) { Content = content, Version = System.Net.HttpVersion.Version11 };
+        var response = await Http.SendAsync(request, ct);
         response.EnsureSuccessStatusCode();
         var json = await response.Content.ReadAsStringAsync(ct);
         var upload = JsonSerializer.Deserialize<UploadResponse>(json, JmapSerializerOptions.Default)
