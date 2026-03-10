@@ -2,6 +2,7 @@
 #   1. This file (VERSION)
 #   2. windows/FileNodeClient.Package/AppxManifest.xml  (<Identity Version="...">)
 
+1.0.36.0 2026-03-10  Beta server OAuth button, reauth preserves session URL
 1.0.35.0 2026-03-10  Fix build script version extraction
 1.0.34.0 2026-03-10  MVC refactor, blobext capability URI update
 1.0.31.0 2026-03-10  Show app/service version and build date in management window
