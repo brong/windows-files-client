@@ -46,6 +46,8 @@ sealed class IpcCommandHandler
                 "pauseAccount" => HandlePauseAccount(request),
                 "resumeAccount" => HandleResumeAccount(request),
                 "syncNow" => HandleSyncNow(request),
+                "retryRejected" => HandleRetryRejected(request),
+                "dismissRejected" => HandleDismissRejected(request),
                 _ => IpcSerializer.SerializeError(request.Id, $"Unknown method: {request.Method}"),
             };
             Log.Debug($"[IPC] Response id={request.Id} method={request.Method} ok");
@@ -272,6 +274,22 @@ sealed class IpcCommandHandler
         return IpcSerializer.SerializeResponse(request.Id);
     }
 
+    private string HandleRetryRejected(IpcRequest request)
+    {
+        var p = Deserialize<OutboxEntryParams>(request.Params);
+        var supervisor = _loginManager.Supervisors.FirstOrDefault(s => s.AccountId == p.AccountId);
+        supervisor?.Outbox?.RetryRejected(p.EntryId);
+        return IpcSerializer.SerializeResponse(request.Id);
+    }
+
+    private string HandleDismissRejected(IpcRequest request)
+    {
+        var p = Deserialize<OutboxEntryParams>(request.Params);
+        var supervisor = _loginManager.Supervisors.FirstOrDefault(s => s.AccountId == p.AccountId);
+        supervisor?.Outbox?.DismissRejected(p.EntryId);
+        return IpcSerializer.SerializeResponse(request.Id);
+    }
+
     public ActivitySnapshot? BuildActivitySnapshot(AccountSupervisor supervisor)
     {
         if (supervisor.Outbox == null) return null;
@@ -386,6 +404,7 @@ sealed class IpcCommandHandler
     private record DiscoverParams(string SessionUrl, string Token);
     private record LoginIdParams(string LoginId);
     private record AccountIdParams(string AccountId);
+    private record OutboxEntryParams(string AccountId, Guid EntryId);
     private record ConfigureLoginParams(string LoginId, HashSet<string> EnabledAccountIds);
     private record EnableAccountParams(string LoginId, string AccountId);
 

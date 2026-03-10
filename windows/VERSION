@@ -2,6 +2,8 @@
 #   1. This file (VERSION)
 #   2. windows/FileNodeClient.Package/AppxManifest.xml  (<Identity Version="...">)
 
+1.0.22.0 2026-03-10  Context menu actions for rejected files, retry/dismiss/delete
+1.0.21.0 2026-03-10  RFC 8620 error handling, file size column, fix stall timer
 1.0.20.0 2026-03-10  HTTP/1.1 uploads, fix download starvation during uploads
 1.0.19.0 2026-03-10  Rejected file indicators, chunk size limits, UI cleanup
 1.0.18.0 2026-03-10  Fix "Up to date" status race, resumable chunked uploads

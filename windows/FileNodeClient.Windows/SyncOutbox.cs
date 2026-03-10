@@ -540,6 +540,26 @@ public class SyncOutbox : IDisposable
     }
 
     /// <summary>Dismiss a rejected entry (user acknowledged or file removed).</summary>
+    public void RetryRejected(Guid id)
+    {
+        lock (_lock)
+        {
+            if (_entries.TryGetValue(id, out var entry) && entry.IsRejected)
+            {
+                Log.Info($"{_logPrefix} Outbox: retrying rejected entry {entry.LocalPath ?? entry.NodeId}");
+                entry.IsRejected = false;
+                entry.RejectionReason = null;
+                entry.LastError = null;
+                entry.AttemptCount = 0;
+                entry.NextRetryAfter = null;
+                entry.UploadedChunks = null;
+                MarkDirtyAndSignal();
+            }
+        }
+
+        RaisePendingCountChanged();
+    }
+
     public void DismissRejected(Guid id)
     {
         lock (_lock)

@@ -57,6 +57,7 @@ sealed class ManageAccountsForm : Form
     private record LoginNode(string LoginId);
     private record AccountNode(string LoginId, string AccountId, string Name,
         bool IsSynced, bool IsMissing, AccountInfo? SyncInfo);
+    private record ActivityItemTag(string AccountId, Guid EntryId, string? LocalPath);
 
     // Accounts that are being set up (added via OAuth/token but supervisor not yet created)
     private readonly HashSet<string> _settingUpAccounts = new();
@@ -347,6 +348,7 @@ sealed class ManageAccountsForm : Form
         _activityListView.DrawColumnHeader += (_, e) => e.DrawDefault = true;
         _activityListView.DrawItem += (_, _) => { };
         _activityListView.DrawSubItem += OnDrawActivitySubItem;
+        _activityListView.MouseUp += OnActivityListMouseUp;
 
         // Empty activity label — shown when nothing to sync
         _activityEmptyLabel = new Label
@@ -758,8 +760,10 @@ sealed class ManageAccountsForm : Form
 
         // Build all items into a flat list, then sort by progress descending
         // IsRejected flag distinguishes permanent rejections from transient errors
+        // ActivityTag carries context for context menu actions
         var desired = new List<(string Key, string Col0, string Col1, string Col2, string Col3, string Col4,
-            Color ForeColor, string Tooltip, int? ProgressTag, int SortProgress, bool IsRejected)>();
+            Color ForeColor, string Tooltip, int? ProgressTag, int SortProgress, bool IsRejected,
+            ActivityItemTag? Tag)>();
 
         // Downloads (active and pending)
         foreach (var (displayName, accountId, _, dl) in downloads)
@@ -767,7 +771,7 @@ sealed class ManageAccountsForm : Form
             if (dl.IsPending)
             {
                 desired.Add(($"pending:{accountId}:{dl.FileName}", dl.FileName, FormatFileSize(dl.TotalSize), "Download",
-                    "Queued", "", Color.Gray, dl.FileName, null, -2, false));
+                    "Queued", "", Color.Gray, dl.FileName, null, -2, false, null));
             }
             else
             {
@@ -775,12 +779,12 @@ sealed class ManageAccountsForm : Form
                 var tooltip = dl.Progress.HasValue ? $"Downloading {dl.Progress.Value}%" : dl.FileName;
                 desired.Add(($"dl:{accountId}:{dl.FileName}", dl.FileName, FormatFileSize(dl.TotalSize), "Download",
                     statusText, FormatRelativeTime(dl.StartedAt, now),
-                    Color.DodgerBlue, tooltip, dl.Progress, dl.Progress ?? -1, false));
+                    Color.DodgerBlue, tooltip, dl.Progress, dl.Progress ?? -1, false, null));
             }
         }
 
         // Outbox entries
-        foreach (var (displayName, _, _, entry) in entries)
+        foreach (var (displayName, accountId, _, entry) in entries)
         {
             var name = entry.LocalPath != null
                 ? Path.GetFileName(entry.LocalPath)
@@ -817,9 +821,13 @@ sealed class ManageAccountsForm : Form
             if (entry.IsRejected || entry.LastError != null)
                 sortProgress = -1;
 
+            var tag = entry.IsRejected
+                ? new ActivityItemTag(accountId, entry.Id, entry.LocalPath)
+                : null;
+
             desired.Add(($"outbox:{entry.Id}", name, FormatFileSize(entry.FileSize), action,
                 status, FormatRelativeTime(entry.UpdatedAt, now),
-                color, tooltip, progress, sortProgress, entry.IsRejected));
+                color, tooltip, progress, sortProgress, entry.IsRejected, tag));
         }
 
         // Sort: highest progress first, then in-progress without %, then queued/waiting
@@ -843,7 +851,8 @@ sealed class ManageAccountsForm : Form
 
         int pendingCount = desired.Count - activeCount;
         var kept = new List<(string Key, string Col0, string Col1, string Col2, string Col3, string Col4,
-            Color ForeColor, string Tooltip, int? ProgressTag, int SortProgress, bool IsRejected)>();
+            Color ForeColor, string Tooltip, int? ProgressTag, int SortProgress, bool IsRejected,
+            ActivityItemTag? Tag)>();
 
         // Keep all active items, cap rejected to MaxVisibleRejected
         int shownRejected = 0;
@@ -860,7 +869,7 @@ sealed class ManageAccountsForm : Form
             int hiddenRejected = rejectedInActive - MaxVisibleRejected;
             kept.Add(("summary:rejected", $"+ {hiddenRejected:N0} more rejected", "", "",
                 "", "",
-                Color.Red, $"{hiddenRejected} additional files rejected", null, -1, true));
+                Color.Red, $"{hiddenRejected} additional files rejected", null, -1, true, null));
         }
 
         // Add pending items with cap
@@ -873,7 +882,7 @@ sealed class ManageAccountsForm : Form
             int hiddenCount = pendingCount - MaxVisiblePending;
             kept.Add(("summary:pending", $"+ {hiddenCount:N0} more pending", "", "",
                 "", "",
-                Color.Gray, $"{hiddenCount} additional items queued", null, -3, false));
+                Color.Gray, $"{hiddenCount} additional items queued", null, -3, false, null));
         }
 
         desired = kept;
@@ -935,6 +944,7 @@ sealed class ManageAccountsForm : Form
                     item.SubItems.Add(d.Col4);
                     item.ForeColor = d.ForeColor;
                     item.ToolTipText = d.Tooltip;
+                    item.Tag = d.Tag;
                     _activityListView.Items.Insert(i, item);
                 }
             }
@@ -949,7 +959,8 @@ sealed class ManageAccountsForm : Form
 
     private void UpdateItemFields(ListViewItem item,
         (string Key, string Col0, string Col1, string Col2, string Col3, string Col4,
-         Color ForeColor, string Tooltip, int? ProgressTag, int SortProgress, bool IsRejected) d)
+         Color ForeColor, string Tooltip, int? ProgressTag, int SortProgress, bool IsRejected,
+         ActivityItemTag? Tag) d)
     {
         if (item.Text != d.Col0) item.Text = d.Col0;
         if (item.SubItems[1].Text != d.Col1) item.SubItems[1].Text = d.Col1;
@@ -966,6 +977,41 @@ sealed class ManageAccountsForm : Form
         if (item.SubItems[4].Text != d.Col4) item.SubItems[4].Text = d.Col4;
         if (item.ForeColor != d.ForeColor) item.ForeColor = d.ForeColor;
         if (item.ToolTipText != d.Tooltip) item.ToolTipText = d.Tooltip;
+        item.Tag = d.Tag;
+    }
+
+    private void OnActivityListMouseUp(object? sender, MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Right) return;
+        var hit = _activityListView.HitTest(e.Location);
+        if (hit.Item?.Tag is not ActivityItemTag tag) return;
+
+        var menu = new ContextMenuStrip();
+        menu.Items.Add("Retry upload", null, async (_, _) =>
+        {
+            try { await _serviceClient.RetryRejectedAsync(tag.AccountId, tag.EntryId); }
+            catch (Exception ex) { Log.Error($"Retry rejected failed: {ex.Message}"); }
+        });
+        menu.Items.Add("Dismiss", null, async (_, _) =>
+        {
+            try { await _serviceClient.DismissRejectedAsync(tag.AccountId, tag.EntryId); }
+            catch (Exception ex) { Log.Error($"Dismiss rejected failed: {ex.Message}"); }
+        });
+        if (tag.LocalPath != null)
+        {
+            menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add("Delete local file", null, async (_, _) =>
+            {
+                try
+                {
+                    if (File.Exists(tag.LocalPath))
+                        File.Delete(tag.LocalPath);
+                    await _serviceClient.DismissRejectedAsync(tag.AccountId, tag.EntryId);
+                }
+                catch (Exception ex) { Log.Error($"Delete rejected file failed: {ex.Message}"); }
+            });
+        }
+        menu.Show(_activityListView, e.Location);
     }
 
     private void OnDrawActivitySubItem(object? sender, DrawListViewSubItemEventArgs e)
@@ -1193,9 +1239,11 @@ sealed class ManageAccountsForm : Form
                     var isMissing = loginRefreshed && discoveredIds != null
                         && !discoveredIds.Contains(account.AccountId);
 
+                    var rejCount = _serviceClient.GetRejectedCount(account.AccountId);
                     var statusText = isMissing ? "Missing on server" : account.Status switch
                     {
                         AccountStatus.Idle when account.PendingCount > 0 => $"{account.PendingCount} pending",
+                        AccountStatus.Idle when rejCount > 0 => rejCount == 1 ? "1 file rejected" : $"{rejCount} files rejected",
                         AccountStatus.Idle => "Up to date",
                         AccountStatus.Syncing => "Syncing",
                         AccountStatus.Error => "Error",
@@ -1353,12 +1401,14 @@ sealed class ManageAccountsForm : Form
                 if (!accountLookup.TryGetValue(an.AccountId, out var info))
                     continue;
 
+                var rej = _serviceClient.GetRejectedCount(an.AccountId);
                 var statusText = an.IsMissing ? "Missing on server" : info.Status switch
                 {
                     AccountStatus.Paused when info.PauseReason?.Contains("DiskFull") == true => "Disk full",
                     AccountStatus.Paused when info.PauseReason?.Contains("UserRequested") == true => "Paused",
                     AccountStatus.Paused when info.PauseReason?.Contains("MeteredConnection") == true => "Metered",
                     AccountStatus.Idle when info.PendingCount > 0 => $"{info.PendingCount} pending",
+                    AccountStatus.Idle when rej > 0 => rej == 1 ? "1 file rejected" : $"{rej} files rejected",
                     AccountStatus.Idle => "Up to date",
                     AccountStatus.Syncing => "Syncing",
                     AccountStatus.Error => "Error",
@@ -1500,6 +1550,7 @@ sealed class ManageAccountsForm : Form
             var isUserPaused = info.PauseReason?.Contains("UserRequested") == true;
             var isMetered = info.PauseReason?.Contains("MeteredConnection") == true;
             var isPaused = info.Status == AccountStatus.Paused;
+            var rejectedCount = _serviceClient.GetRejectedCount(accountNode.AccountId);
 
             _accountStatusLabel.Text = info.Status switch
             {
@@ -1512,13 +1563,18 @@ sealed class ManageAccountsForm : Form
                 AccountStatus.Paused when isMetered =>
                     "Status: Metered connection \u2014 uploads paused",
                 AccountStatus.Idle when info.PendingCount > 0 => $"Status: {info.PendingCount} pending",
+                AccountStatus.Idle when rejectedCount > 0 => rejectedCount == 1
+                    ? "Status: 1 file rejected"
+                    : $"Status: {rejectedCount} files rejected",
                 AccountStatus.Idle => "Status: Up to date",
                 AccountStatus.Syncing => "Status: Syncing",
                 AccountStatus.Error => $"Status: Error \u2014 {info.StatusDetail}",
                 AccountStatus.Disconnected => "Status: Offline",
                 _ => "Status: Unknown",
             };
-            _accountStatusLabel.ForeColor = isDiskFull ? Color.FromArgb(200, 50, 50) : default;
+            _accountStatusLabel.ForeColor = isDiskFull ? Color.FromArgb(200, 50, 50)
+                : rejectedCount > 0 ? Color.Red
+                : default;
             _refreshButton.Visible = true;
             _cleanButton.Visible = true;
             _openFolderButton.Visible = true;

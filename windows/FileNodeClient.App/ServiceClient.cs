@@ -58,6 +58,12 @@ sealed class ServiceClient : IDisposable
         get { lock (_lock) return _rejectedFileCount; }
     }
 
+    public int GetRejectedCount(string accountId)
+    {
+        lock (_lock)
+            return _rejectedByAccount.TryGetValue(accountId, out var count) ? count : 0;
+    }
+
     public bool IsConnected
     {
         get { lock (_lock) return _connected; }
@@ -207,6 +213,16 @@ sealed class ServiceClient : IDisposable
     public async Task SyncNowAsync(string accountId, CancellationToken ct = default)
     {
         await CallVoidAsync("syncNow", new { accountId }, ct);
+    }
+
+    public async Task RetryRejectedAsync(string accountId, Guid entryId, CancellationToken ct = default)
+    {
+        await CallVoidAsync("retryRejected", new { accountId, entryId }, ct);
+    }
+
+    public async Task DismissRejectedAsync(string accountId, Guid entryId, CancellationToken ct = default)
+    {
+        await CallVoidAsync("dismissRejected", new { accountId, entryId }, ct);
     }
 
     public async Task<LoginAccountsResult> GetLoginAccountsAsync(string loginId,
