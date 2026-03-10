@@ -1953,6 +1953,9 @@ public class SyncEngine : IDisposable
             // (TransferError during a failed FETCH_DATA marks the placeholder not-in-sync).
             // Only mark files that are NOT still dehydrated — failed files should remain
             // not-in-sync so the next DetectAndHydratePinnedDirectories pass re-attempts them.
+            // Throttle: each SetInSync fires a shell notification; rapid-fire thousands
+            // overwhelms Explorer. Yield every 50 files to let Explorer catch up.
+            int inSyncCount = 0;
             foreach (var filePath in Directory.EnumerateFiles(directoryPath))
             {
                 try
@@ -1964,6 +1967,8 @@ public class SyncEngine : IDisposable
                         continue; // Still dehydrated — don't mark in-sync
                     }
                     SetInSync(filePath);
+                    if (++inSyncCount % 50 == 0)
+                        Thread.Sleep(50);
                 }
                 catch { /* not a placeholder or file gone — ignore */ }
             }
