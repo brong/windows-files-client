@@ -186,7 +186,7 @@ sealed class IpcCommandHandler
         var supervisor = _loginManager.Supervisors.FirstOrDefault(s => s.AccountId == p.AccountId);
         var snapshot = supervisor != null ? BuildActivitySnapshot(supervisor) : null;
         return IpcSerializer.SerializeResponse(request.Id,
-            snapshot ?? new ActivitySnapshot(p.AccountId, new(), new(), new(), null, 0, 0));
+            snapshot ?? new ActivitySnapshot(p.AccountId, new(), new(), new(), new(), null, 0, 0));
     }
 
     private string HandleGetLoginAccounts(IpcRequest request)
@@ -295,6 +295,15 @@ sealed class IpcCommandHandler
             else pending.Add(oe);
         }
 
+        // Rejected entries (kept separately, not in normal processing queue)
+        var rejectedEntries = supervisor.Outbox.GetRejectedSnapshot();
+        var rejected = rejectedEntries.Select(e => new OutboxEntry(
+            e.Id, e.LocalPath, e.NodeId, e.IsFolder,
+            e.IsDirtyContent, e.IsDirtyLocation, e.IsDeleted,
+            e.CreatedAt, e.UpdatedAt, e.AttemptCount,
+            e.LastError, e.NextRetryAfter,
+            false, null, true, e.RejectionReason)).ToList();
+
         var downloadSnapshot = supervisor.GetActiveDownloadSnapshot();
         List<ActiveDownloadEntry>? downloads = null;
         if (downloadSnapshot.Count > 0)
@@ -314,6 +323,7 @@ sealed class IpcCommandHandler
             active,
             errors,
             pending.Take(10).ToList(),
+            rejected,
             downloads,
             entries.Length,
             downloadSnapshot.Count);

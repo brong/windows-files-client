@@ -18,6 +18,16 @@ public interface IJmapClient : IDisposable
     /// </summary>
     long? ChunkSize { get; }
     /// <summary>
+    /// Max number of data sources in a single Blob/upload combine request,
+    /// from urn:ietf:params:jmap:blob capability. Null if not reported.
+    /// </summary>
+    int? MaxDataSources { get; }
+    /// <summary>
+    /// Max total size of a Blob/upload combine request, from urn:ietf:params:jmap:blob.
+    /// Files larger than this cannot be uploaded via chunked combine.
+    /// </summary>
+    long? MaxSizeBlobSet { get; }
+    /// <summary>
     /// Whether the server supports Blob/convert (blobext capability).
     /// </summary>
     bool HasBlobConvert { get; }
@@ -44,7 +54,9 @@ public interface IJmapClient : IDisposable
     Task<(Stream data, bool isPartial)> DownloadBlobRangeAsync(string blobId, long offset, long length, string? type = null, string? name = null, CancellationToken ct = default);
     Task<string> UploadBlobAsync(Stream data, string contentType, CancellationToken ct = default);
     Task<string> UploadBlobChunkedAsync(Stream data, string contentType, long totalSize,
-        Action<int>? onProgress = null, CancellationToken ct = default);
+        Action<int>? onProgress = null, Action<JmapClient.UploadedChunkInfo>? onChunkUploaded = null,
+        List<JmapClient.UploadedChunkInfo>? previousChunks = null,
+        CancellationToken ct = default);
     Task<FileNode> CreateFileNodeAsync(string parentId, string? blobId, string name, string? type = null, string? onExists = null, DateTime? createdAt = null, DateTime? modifiedAt = null, CancellationToken ct = default);
     Task<FileNode> ReplaceFileNodeBlobAsync(string nodeId, string parentId, string name, string blobId, string? type = null, DateTime? createdAt = null, DateTime? modifiedAt = null, CancellationToken ct = default);
     Task MoveFileNodeAsync(string nodeId, string parentId, string newName, string? onExists = null, CancellationToken ct = default);

@@ -106,6 +106,30 @@ public class JmapSession
         return null;
     }
 
+    public int? GetMaxDataSources(string accountId)
+    {
+        if (!Accounts.TryGetValue(accountId, out var account))
+            return null;
+        if (!account.AccountCapabilities.TryGetValue("urn:ietf:params:jmap:blob", out var blobCap))
+            return null;
+        if (blobCap.TryGetProperty("maxDataSources", out var val)
+            && val.ValueKind == JsonValueKind.Number)
+            return val.GetInt32();
+        return null;
+    }
+
+    public long? GetMaxSizeBlobSet(string accountId)
+    {
+        if (!Accounts.TryGetValue(accountId, out var account))
+            return null;
+        if (!account.AccountCapabilities.TryGetValue("urn:ietf:params:jmap:blob", out var blobCap))
+            return null;
+        if (blobCap.TryGetProperty("maxSizeBlobSet", out var val)
+            && val.ValueKind == JsonValueKind.Number)
+            return val.GetInt64();
+        return null;
+    }
+
     public string? GetTrashUrl(string accountId)
     {
         if (!Accounts.TryGetValue(accountId, out var account))

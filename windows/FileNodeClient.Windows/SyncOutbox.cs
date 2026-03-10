@@ -5,6 +5,21 @@ using FileNodeClient.Logging;
 
 namespace FileNodeClient.Windows;
 
+public class UploadedChunk
+{
+    [JsonPropertyName("blobId")]
+    public string BlobId { get; set; } = "";
+
+    [JsonPropertyName("sha1")]
+    public string Sha1Base64 { get; set; } = "";
+
+    [JsonPropertyName("offset")]
+    public long Offset { get; set; }
+
+    [JsonPropertyName("length")]
+    public int Length { get; set; }
+}
+
 public class PendingChange
 {
     [JsonPropertyName("id")]
@@ -45,6 +60,19 @@ public class PendingChange
 
     [JsonPropertyName("nextRetryAfter")]
     public DateTime? NextRetryAfter { get; set; }
+
+    /// <summary>
+    /// Chunks already uploaded for a resumable chunked upload.
+    /// Persisted to disk so uploads can resume after service restart.
+    /// </summary>
+    [JsonPropertyName("uploadedChunks")]
+    public List<UploadedChunk>? UploadedChunks { get; set; }
+
+    [JsonPropertyName("isRejected")]
+    public bool IsRejected { get; set; }
+
+    [JsonPropertyName("rejectionReason")]
+    public string? RejectionReason { get; set; }
 }
 
 public class SyncOutbox : IDisposable
@@ -83,7 +111,12 @@ public class SyncOutbox : IDisposable
 
     public int PendingCount
     {
-        get { lock (_lock) return _entries.Count; }
+        get { lock (_lock) return _entries.Values.Count(e => !e.IsRejected); }
+    }
+
+    public int RejectedCount
+    {
+        get { lock (_lock) return _entries.Values.Count(e => e.IsRejected); }
     }
 
     /// <summary>Delete all persisted state and clear in-memory entries.</summary>
@@ -120,10 +153,13 @@ public class SyncOutbox : IDisposable
             {
                 foreach (var entry in entries)
                 {
-                    // Reset retry timers — fresh start after app restart
-                    entry.NextRetryAfter = null;
-                    entry.AttemptCount = 0;
-                    entry.LastError = null;
+                    if (!entry.IsRejected)
+                    {
+                        // Reset retry timers — fresh start after app restart
+                        entry.NextRetryAfter = null;
+                        entry.AttemptCount = 0;
+                        entry.LastError = null;
+                    }
 
                     _entries[entry.Id] = entry;
                     if (entry.LocalPath != null)
@@ -159,6 +195,13 @@ public class SyncOutbox : IDisposable
                 // Coalesce: update timestamp, content is always re-read at process time
                 if (existing.IsDeleted)
                     return; // Delete is terminal
+
+                // If previously rejected, clear rejection — user modified the file
+                if (existing.IsRejected)
+                {
+                    existing.IsRejected = false;
+                    existing.RejectionReason = null;
+                }
 
                 existing.IsDirtyContent = !isFolder; // folders don't have content
                 existing.ContentType = contentType;
@@ -201,7 +244,12 @@ public class SyncOutbox : IDisposable
         {
             if (_byPath.TryGetValue(localPath, out var existingId) && _entries.TryGetValue(existingId, out var existing))
             {
-                if (existing.NodeId == null && nodeId == null)
+                if (existing.IsRejected)
+                {
+                    // Rejected entry — user deleted the file, just dismiss
+                    RemoveEntryLocked(existing);
+                }
+                else if (existing.NodeId == null && nodeId == null)
                 {
                     // Never existed on server — just remove entirely
                     RemoveEntryLocked(existing);
@@ -360,7 +408,8 @@ public class SyncOutbox : IDisposable
         lock (_lock)
         {
             var ready = _entries.Values
-                .Where(e => !_processingIds.Contains(e.Id)
+                .Where(e => !e.IsRejected
+                    && !_processingIds.Contains(e.Id)
                     && (e.NextRetryAfter == null || e.NextRetryAfter <= now))
                 .ToList();
 
@@ -457,6 +506,8 @@ public class SyncOutbox : IDisposable
             {
                 entry.AttemptCount++;
                 entry.LastError = error;
+                // Clear uploaded chunks on failure — blobIds may have expired
+                entry.UploadedChunks = null;
                 var delayMs = Math.Min(1000 * (1 << entry.AttemptCount), 60000);
                 entry.NextRetryAfter = DateTime.UtcNow.AddMilliseconds(delayMs);
                 MarkDirtyAndSignal();
@@ -466,7 +517,7 @@ public class SyncOutbox : IDisposable
         RaisePendingCountChanged();
     }
 
-    /// <summary>Mark a change as permanently rejected (e.g. permission denied). Removes from outbox.</summary>
+    /// <summary>Mark a change as permanently rejected. Entry stays visible for user awareness.</summary>
     public void MarkRejected(Guid id, string reason)
     {
         _uploadProgress.TryRemove(id, out _);
@@ -477,12 +528,78 @@ public class SyncOutbox : IDisposable
             if (_entries.TryGetValue(id, out var entry))
             {
                 Log.Info($"{_logPrefix} Outbox: rejected {entry.LocalPath ?? entry.NodeId}: {reason}");
+                entry.IsRejected = true;
+                entry.RejectionReason = reason;
+                entry.LastError = reason;
+                entry.UploadedChunks = null;
+                MarkDirtyAndSignal();
+            }
+        }
+
+        RaisePendingCountChanged();
+    }
+
+    /// <summary>Dismiss a rejected entry (user acknowledged or file removed).</summary>
+    public void DismissRejected(Guid id)
+    {
+        lock (_lock)
+        {
+            if (_entries.TryGetValue(id, out var entry) && entry.IsRejected)
+            {
                 RemoveEntryLocked(entry);
                 MarkDirtyAndSignal();
             }
         }
 
         RaisePendingCountChanged();
+    }
+
+    /// <summary>Dismiss a rejected entry by local path (e.g. when file is deleted/moved).</summary>
+    public bool DismissRejectedByPath(string localPath)
+    {
+        bool found = false;
+        lock (_lock)
+        {
+            if (_byPath.TryGetValue(localPath, out var id)
+                && _entries.TryGetValue(id, out var entry)
+                && entry.IsRejected)
+            {
+                RemoveEntryLocked(entry);
+                MarkDirtyAndSignal();
+                found = true;
+            }
+        }
+
+        if (found)
+            RaisePendingCountChanged();
+        return found;
+    }
+
+    /// <summary>Record a successfully uploaded chunk for resumable uploads. Persists to disk.</summary>
+    public void AddUploadedChunk(Guid id, UploadedChunk chunk)
+    {
+        lock (_lock)
+        {
+            if (_entries.TryGetValue(id, out var entry))
+            {
+                entry.UploadedChunks ??= new();
+                entry.UploadedChunks.Add(chunk);
+                MarkDirtyAndSignal();
+            }
+        }
+    }
+
+    /// <summary>Clear uploaded chunks (e.g., after upload completes or chunks expire).</summary>
+    public void ClearUploadedChunks(Guid id)
+    {
+        lock (_lock)
+        {
+            if (_entries.TryGetValue(id, out var entry) && entry.UploadedChunks != null)
+            {
+                entry.UploadedChunks = null;
+                MarkDirtyAndSignal();
+            }
+        }
     }
 
     /// <summary>Update transient upload progress for a pending change.</summary>
@@ -499,7 +616,14 @@ public class SyncOutbox : IDisposable
     public (PendingChange[] Entries, HashSet<Guid> ProcessingIds) GetSnapshot()
     {
         lock (_lock)
-            return (_entries.Values.ToArray(), new HashSet<Guid>(_processingIds));
+            return (_entries.Values.Where(e => !e.IsRejected).ToArray(), new HashSet<Guid>(_processingIds));
+    }
+
+    /// <summary>Return rejected entries separately.</summary>
+    public PendingChange[] GetRejectedSnapshot()
+    {
+        lock (_lock)
+            return _entries.Values.Where(e => e.IsRejected).ToArray();
     }
 
     /// <summary>

@@ -32,6 +32,10 @@ public class JmapClient : IJmapClient
     private bool _preferredDigestResolved;
     private long? _chunkSize;
     private bool _chunkSizeResolved;
+    private int? _maxDataSources;
+    private bool _maxDataSourcesResolved;
+    private long? _maxSizeBlobSet;
+    private bool _maxSizeBlobSetResolved;
     private string? _trashUrl;
     private bool _trashUrlResolved;
     private string? _webUrlTemplate;
@@ -70,6 +74,32 @@ public class JmapClient : IJmapClient
                 _chunkSizeResolved = true;
             }
             return _chunkSize;
+        }
+    }
+
+    public int? MaxDataSources
+    {
+        get
+        {
+            if (!_maxDataSourcesResolved)
+            {
+                _maxDataSources = Session.GetMaxDataSources(AccountId);
+                _maxDataSourcesResolved = true;
+            }
+            return _maxDataSources;
+        }
+    }
+
+    public long? MaxSizeBlobSet
+    {
+        get
+        {
+            if (!_maxSizeBlobSetResolved)
+            {
+                _maxSizeBlobSet = Session.GetMaxSizeBlobSet(AccountId);
+                _maxSizeBlobSetResolved = true;
+            }
+            return _maxSizeBlobSet;
         }
     }
 
@@ -474,20 +504,56 @@ public class JmapClient : IJmapClient
         return upload.BlobId;
     }
 
+    /// <summary>
+    /// Represents a previously uploaded chunk that can be reused on resume.
+    /// </summary>
+    public record UploadedChunkInfo(string BlobId, string Sha1Base64, long Offset, int Length);
+
+    internal const long MinChunkSize = 1_048_576; // 1 MB minimum
+    internal const long MaxChunkSize = 67_108_864; // 64 MB maximum
+
     public Task<string> UploadBlobChunkedAsync(Stream data, string contentType, long totalSize,
-        Action<int>? onProgress = null, CancellationToken ct = default)
+        Action<int>? onProgress = null, Action<UploadedChunkInfo>? onChunkUploaded = null,
+        List<UploadedChunkInfo>? previousChunks = null,
+        CancellationToken ct = default)
     {
+        var baseChunkSize = ChunkSize ?? throw new InvalidOperationException("ChunkSize not available");
+
+        // Reject files that exceed the server's max combined blob size
+        var maxSize = MaxSizeBlobSet;
+        if (maxSize.HasValue && totalSize > maxSize.Value)
+            throw new InvalidOperationException(
+                $"File size {totalSize} exceeds server maxSizeBlobSet {maxSize.Value}");
+
+        // Start with the server's chunk size (already a power of 2), enforce floor of 1 MB
+        var effectiveChunkSize = Math.Max(baseChunkSize, MinChunkSize);
+
+        // If maxDataSources limits how many chunks we can combine, keep doubling
+        // until the file fits within maxDataSources chunks.
+        var maxSources = MaxDataSources;
+        if (maxSources.HasValue && maxSources.Value > 0 && totalSize > 0)
+        {
+            while ((totalSize + effectiveChunkSize - 1) / effectiveChunkSize > maxSources.Value
+                   && effectiveChunkSize < MaxChunkSize)
+                effectiveChunkSize *= 2;
+        }
+
+        if (effectiveChunkSize > MaxChunkSize)
+            effectiveChunkSize = MaxChunkSize;
+
         return UploadBlobChunkedInternalAsync(_http, Session.GetUploadUrl(AccountId), AccountId,
-            ChunkSize ?? throw new InvalidOperationException("ChunkSize not available"),
+            effectiveChunkSize,
             (caps, method, args) => CallAsync(caps, method, args, ct),
-            data, contentType, totalSize, onProgress, ct);
+            data, contentType, totalSize, onProgress, onChunkUploaded, previousChunks, ct);
     }
 
     internal static async Task<string> UploadBlobChunkedInternalAsync(
         HttpClient http, string uploadUrl, string accountId, long chunkSize,
         Func<string[], string, object, Task<JsonElement>> callAsync,
         Stream data, string contentType, long totalSize,
-        Action<int>? onProgress, CancellationToken ct)
+        Action<int>? onProgress, Action<UploadedChunkInfo>? onChunkUploaded,
+        List<UploadedChunkInfo>? previousChunks,
+        CancellationToken ct)
     {
         var buffer = ArrayPool<byte>.Shared.Rent((int)chunkSize);
         try
@@ -495,6 +561,90 @@ public class JmapClient : IJmapClient
             var chunkBlobIds = new List<(string BlobId, string Sha1Base64)>();
             using var overallHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA1);
             long totalUploaded = 0;
+
+            // Restore previously uploaded chunks — verify they still exist on
+            // the server via Blob/get, then skip their bytes (just hash for the
+            // overall digest) and add their blobIds to the combine list.
+            if (previousChunks != null && previousChunks.Count > 0)
+            {
+                // Verify chunk blobIds still exist on server
+                var blobIds = previousChunks.Select(c => c.BlobId).ToArray();
+                int validCount = previousChunks.Count;
+                try
+                {
+                    var blobCheck = await callAsync(BlobUsing, "Blob/get", new
+                    {
+                        accountId,
+                        ids = blobIds,
+                        properties = new[] { "id", "size" },
+                    });
+                    var blobResponse = blobCheck.Deserialize<BlobGetResponse>(JmapSerializerOptions.Default);
+                    if (blobResponse != null)
+                    {
+                        var notFound = new HashSet<string>(blobResponse.NotFound);
+                        if (notFound.Count > 0)
+                        {
+                            // Find the first expired chunk — discard it and all subsequent
+                            validCount = 0;
+                            for (int i = 0; i < previousChunks.Count; i++)
+                            {
+                                if (notFound.Contains(previousChunks[i].BlobId))
+                                    break;
+                                validCount = i + 1;
+                            }
+                        }
+                    }
+                }
+                catch
+                {
+                    // Blob/get failed — start fresh to be safe
+                    validCount = 0;
+                }
+
+                if (validCount == 0)
+                {
+                    // All chunks expired — start from scratch
+                    data.Position = 0;
+                    return await UploadBlobChunkedInternalAsync(http, uploadUrl, accountId,
+                        chunkSize, callAsync, data, contentType, totalSize,
+                        onProgress, onChunkUploaded, null, ct);
+                }
+
+                for (int i = 0; i < validCount; i++)
+                {
+                    var prev = previousChunks[i];
+                    // Read and hash the chunk data (needed for overall SHA1)
+                    // but don't re-upload it
+                    var toRead = prev.Length;
+                    var offset = 0;
+                    while (offset < toRead)
+                    {
+                        var read = await data.ReadAsync(buffer.AsMemory(offset, toRead - offset), ct);
+                        if (read == 0)
+                            break;
+                        offset += read;
+                    }
+
+                    // Verify the chunk data still matches (file hasn't changed)
+                    var chunkSpan = buffer.AsSpan(0, offset);
+                    var chunkSha1 = SHA1.HashData(chunkSpan);
+                    var chunkSha1Base64 = Convert.ToBase64String(chunkSha1);
+
+                    if (chunkSha1Base64 != prev.Sha1Base64)
+                    {
+                        // File has changed since chunks were uploaded — start over
+                        data.Position = 0;
+                        return await UploadBlobChunkedInternalAsync(http, uploadUrl, accountId,
+                            chunkSize, callAsync, data, contentType, totalSize,
+                            onProgress, onChunkUploaded, null, ct);
+                    }
+
+                    overallHash.AppendData(chunkSpan);
+                    chunkBlobIds.Add((prev.BlobId, prev.Sha1Base64));
+                    totalUploaded += offset;
+                }
+                onProgress?.Invoke((int)(totalUploaded * 100 / totalSize));
+            }
 
             while (totalUploaded < totalSize)
             {
@@ -527,6 +677,7 @@ public class JmapClient : IJmapClient
                 chunkBlobIds.Add((upload.BlobId, chunkSha1Base64));
                 totalUploaded += offset;
                 onProgress?.Invoke((int)(totalUploaded * 100 / totalSize));
+                onChunkUploaded?.Invoke(new UploadedChunkInfo(upload.BlobId, chunkSha1Base64, totalUploaded - offset, offset));
             }
 
             // Compute overall SHA1

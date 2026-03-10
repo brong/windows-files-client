@@ -18,6 +18,8 @@ sealed class ServiceClient : IDisposable
     private List<string> _connectedLoginIds = new();
     private AccountStatus _aggregateStatus = AccountStatus.Idle;
     private int _aggregatePendingCount;
+    private int _rejectedFileCount;
+    private readonly Dictionary<string, int> _rejectedByAccount = new();
     private bool _connected;
     private bool _disposed;
 
@@ -49,6 +51,11 @@ sealed class ServiceClient : IDisposable
     public int AggregatePendingCount
     {
         get { lock (_lock) return _aggregatePendingCount; }
+    }
+
+    public int RejectedFileCount
+    {
+        get { lock (_lock) return _rejectedFileCount; }
     }
 
     public bool IsConnected
@@ -238,6 +245,8 @@ sealed class ServiceClient : IDisposable
                 _connectedLoginIds.Clear();
                 _aggregateStatus = AccountStatus.Idle;
                 _aggregatePendingCount = 0;
+                _rejectedFileCount = 0;
+                _rejectedByAccount.Clear();
             }
         }
 
@@ -299,7 +308,13 @@ sealed class ServiceClient : IDisposable
                 case "activityChanged":
                 {
                     var activity = IpcSerializer.Deserialize<ActivitySnapshot>(push.Params);
+                    lock (_lock)
+                    {
+                        _rejectedByAccount[activity.AccountId] = activity.RejectedEntries.Count;
+                        _rejectedFileCount = _rejectedByAccount.Values.Sum();
+                    }
                     Log.SafeInvoke(() => ActivityChanged?.Invoke(activity), "ServiceClient.ActivityChanged");
+                    Log.SafeInvoke(() => StatusChanged?.Invoke(), "ServiceClient.ActivityRejectedStatus");
                     break;
                 }
 
@@ -331,6 +346,11 @@ sealed class ServiceClient : IDisposable
         foreach (var acct in accounts)
         {
             var snapshot = await GetActivityAsync(acct.AccountId);
+            lock (_lock)
+            {
+                _rejectedByAccount[snapshot.AccountId] = snapshot.RejectedEntries.Count;
+                _rejectedFileCount = _rejectedByAccount.Values.Sum();
+            }
             Log.SafeInvoke(() => ActivityChanged?.Invoke(snapshot), "ServiceClient.FetchInitialActivity");
         }
     }

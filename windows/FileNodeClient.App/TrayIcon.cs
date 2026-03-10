@@ -163,6 +163,20 @@ sealed class TrayIcon : IDisposable
             }
         }
 
+        // Override to orange when files have been rejected
+        if (connected && accounts.Count > 0)
+        {
+            var rejectedCount = _serviceClient.RejectedFileCount;
+            if (rejectedCount > 0)
+            {
+                if (color == Color.LimeGreen)
+                    color = Color.FromArgb(200, 120, 0);
+                tooltip += rejectedCount == 1
+                    ? " (1 file rejected)"
+                    : $" ({rejectedCount} files rejected)";
+            }
+        }
+
         if (tooltip.Length > 127)
             tooltip = tooltip.Substring(0, 127);
 

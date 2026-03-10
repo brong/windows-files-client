@@ -2,6 +2,8 @@
 #   1. This file (VERSION)
 #   2. windows/FileNodeClient.Package/AppxManifest.xml  (<Identity Version="...">)
 
+1.0.18.0 2026-03-10  Fix "Up to date" status race, resumable chunked uploads
+1.0.17.0 2026-03-10  SafeInvoke crash resilience, collection cleanup, IPC timeout
 1.0.16.0 2026-03-10  Stall-based upload timeout (30s idle), fix activity list layout
 1.0.15.0 2026-03-10  Fix activity list layout (Z-order for Fill docking)
 1.0.14.0 2026-03-10  Push-based activity feed, remove polling, push quota/pause changes

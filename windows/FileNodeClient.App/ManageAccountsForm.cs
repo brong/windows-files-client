@@ -691,12 +691,14 @@ sealed class ManageAccountsForm : Form
         {
             if (!_activityCache.TryGetValue(acct.AccountId, out var snap)) continue;
 
-            // Combine entries in order: active, errors, pending
+            // Combine entries in order: active, errors, pending, rejected
             foreach (var entry in snap.ActiveEntries)
                 allEntries.Add((acct.DisplayName, acct.AccountId, acct.LoginId, entry));
             foreach (var entry in snap.ErrorEntries)
                 allEntries.Add((acct.DisplayName, acct.AccountId, acct.LoginId, entry));
             foreach (var entry in snap.PendingEntries)
+                allEntries.Add((acct.DisplayName, acct.AccountId, acct.LoginId, entry));
+            foreach (var entry in snap.RejectedEntries)
                 allEntries.Add((acct.DisplayName, acct.AccountId, acct.LoginId, entry));
 
             if (snap.ActiveDownloads is { } dls)
@@ -795,9 +797,14 @@ sealed class ManageAccountsForm : Form
             if (entry.LastError != null)
                 tooltip += $"\nError: {entry.LastError}";
 
-            var color = entry.IsProcessing ? Color.DodgerBlue
+            var color = entry.IsRejected ? Color.FromArgb(200, 120, 0)
+                : entry.IsProcessing ? Color.DodgerBlue
                 : entry.LastError != null ? Color.Red
                 : _activityListView.ForeColor;
+
+            // Rejected entries sort between active (-1) and pending (-2)
+            if (entry.IsRejected)
+                sortProgress = -1; // Same tier as active, so they stay visible
 
             desired.Add(($"outbox:{entry.Id}", displayName, name, action,
                 status, FormatRelativeTime(entry.UpdatedAt, now),
@@ -807,24 +814,60 @@ sealed class ManageAccountsForm : Form
         // Sort: highest progress first, then in-progress without %, then queued/waiting
         desired.Sort((a, b) => b.SortProgress.CompareTo(a.SortProgress));
 
-        // Cap the list: show active items (progress >= -1) individually,
-        // collapse remaining pending items into a single summary row
+        // Cap the list: show active/rejected items (progress >= -1) individually,
+        // collapse remaining pending items into a single summary row.
+        // Rejected items always show (they need user attention).
         const int MaxVisiblePending = 5;
+        const int MaxVisibleRejected = 5;
+
+        // Count active+rejected items (sortProgress >= -1)
         int activeCount = 0;
         while (activeCount < desired.Count && desired[activeCount].SortProgress >= -1)
             activeCount++;
 
+        // Among the active tier, separate rejected from truly active
+        int rejectedInActive = 0;
+        for (int i = 0; i < activeCount; i++)
+            if (desired[i].Key.StartsWith("outbox:") && desired[i].ForeColor == Color.FromArgb(200, 120, 0))
+                rejectedInActive++;
+
         int pendingCount = desired.Count - activeCount;
+        var kept = new List<(string Key, string Col0, string Col1, string Col2, string Col3, string Col4,
+            Color ForeColor, string Tooltip, int? ProgressTag, int SortProgress)>();
+
+        // Keep all active items (includes rejected which are in the active tier)
+        int shownRejected = 0;
+        for (int i = 0; i < activeCount; i++)
+        {
+            bool isRejected = desired[i].Key.StartsWith("outbox:") && desired[i].ForeColor == Color.FromArgb(200, 120, 0);
+            if (isRejected && shownRejected >= MaxVisibleRejected)
+                continue;
+            if (isRejected) shownRejected++;
+            kept.Add(desired[i]);
+        }
+
+        if (rejectedInActive > MaxVisibleRejected)
+        {
+            int hiddenRejected = rejectedInActive - MaxVisibleRejected;
+            kept.Add(("summary:rejected", "", "", "",
+                $"+ {hiddenRejected:N0} more rejected", "",
+                Color.FromArgb(200, 120, 0), $"{hiddenRejected} additional files rejected", null, -1));
+        }
+
+        // Add pending items with cap
+        int shownPending = 0;
+        for (int i = activeCount; i < desired.Count && shownPending < MaxVisiblePending; i++, shownPending++)
+            kept.Add(desired[i]);
+
         if (pendingCount > MaxVisiblePending)
         {
-            // Keep active items + a few pending for context + summary row
-            var kept = desired.GetRange(0, activeCount + MaxVisiblePending);
             int hiddenCount = pendingCount - MaxVisiblePending;
             kept.Add(("summary:pending", "", "", "",
                 $"+ {hiddenCount:N0} more pending", "",
                 Color.Gray, $"{hiddenCount} additional items queued", null, -3));
-            desired = kept;
         }
+
+        desired = kept;
 
         // Toggle between empty label and list view
         if (desired.Count == 0)
@@ -962,6 +1005,8 @@ sealed class ManageAccountsForm : Form
 
     private static string DeriveStatus(OutboxEntry entry, DateTime now)
     {
+        if (entry.IsRejected)
+            return "Rejected";
         if (entry.AttemptCount > 0 && entry.LastError != null)
             return $"Error ({entry.AttemptCount})";
         if (entry.NextRetryAfter.HasValue && entry.NextRetryAfter.Value > now)

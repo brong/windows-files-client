@@ -35,6 +35,16 @@ public class OutboxProcessor : IDisposable
 
     private readonly string _logPrefix;
 
+    private void MarkRejectedAndNotInSync(PendingChange change, string reason)
+    {
+        _outbox.MarkRejected(change.Id, reason);
+        if (change.LocalPath != null)
+        {
+            try { SyncEngine.SetNotInSync(change.LocalPath); }
+            catch (Exception ex) { Log.Debug($"{_logPrefix} SetNotInSync failed for {change.LocalPath}: {ex.Message}"); }
+        }
+    }
+
     public OutboxProcessor(SyncOutbox outbox, SyncEngine engine, IJmapClient jmapClient, JmapQueue queue, string logPrefix)
     {
         _outbox = outbox;
@@ -146,7 +156,7 @@ public class OutboxProcessor : IDisposable
             // 4xx = permanent (bad request, not found, payload too large) — don't retry
             if (ex.StatusCode.HasValue && (int)ex.StatusCode.Value >= 400 && (int)ex.StatusCode.Value < 500)
             {
-                _outbox.MarkRejected(change.Id, $"Server rejected ({(int)ex.StatusCode.Value}): {ex.Message}");
+                MarkRejectedAndNotInSync(change, $"Server rejected ({(int)ex.StatusCode.Value}): {ex.Message}");
             }
             else
             {
@@ -160,7 +170,7 @@ public class OutboxProcessor : IDisposable
             if (change.AttemptCount + 1 >= MaxAttempts)
             {
                 Log.Error($"{_logPrefix} Outbox: giving up on inaccessible file after {change.AttemptCount + 1} attempts: {Path.GetFileName(change.LocalPath)}");
-                _outbox.MarkRejected(change.Id, $"File inaccessible: {ex.Message}");
+                MarkRejectedAndNotInSync(change, $"File inaccessible: {ex.Message}");
             }
             else
             {
@@ -168,11 +178,17 @@ public class OutboxProcessor : IDisposable
                 _outbox.MarkFailed(change.Id, ex.Message);
             }
         }
+        catch (InvalidOperationException ex) when (!ct.IsCancellationRequested
+            && ex.Message.Contains("maxSizeBlobSet"))
+        {
+            Log.Error($"{_logPrefix} Outbox: file too large for {Path.GetFileName(change.LocalPath)}: {ex.Message}");
+            MarkRejectedAndNotInSync(change, "File too large for server");
+        }
         catch (Exception ex) when (!ct.IsCancellationRequested
             && (ex.Message.Contains("forbidden") || ex.Message.Contains("Forbidden")))
         {
             Log.Error($"{_logPrefix} Outbox: permission denied for {change.LocalPath ?? change.NodeId}: {ex.Message}");
-            _outbox.MarkRejected(change.Id, ex.Message);
+            MarkRejectedAndNotInSync(change, ex.Message);
 
             // Clean up local file that can't be synced (only new untracked files)
             if (change.LocalPath != null && change.NodeId == null)
@@ -200,7 +216,7 @@ public class OutboxProcessor : IDisposable
             if (change.AttemptCount + 1 >= MaxAttempts)
             {
                 Log.Error($"{_logPrefix} Outbox: giving up after {change.AttemptCount + 1} attempts: {change.LocalPath ?? change.NodeId}");
-                _outbox.MarkRejected(change.Id, $"Gave up after {change.AttemptCount + 1} attempts: {ex.Message}");
+                MarkRejectedAndNotInSync(change, $"Gave up after {change.AttemptCount + 1} attempts: {ex.Message}");
             }
             else
             {
@@ -526,11 +542,36 @@ public class OutboxProcessor : IDisposable
 
         if (chunkSize.HasValue && fileLength > chunkSize.Value)
         {
-            return await _queue.EnqueueAsync(QueuePriority.Background,
+            // Convert persisted chunks to JmapClient format for resume
+            List<JmapClient.UploadedChunkInfo>? previousChunks = null;
+            if (change.UploadedChunks?.Count > 0)
+            {
+                previousChunks = change.UploadedChunks
+                    .Select(c => new JmapClient.UploadedChunkInfo(c.BlobId, c.Sha1Base64, c.Offset, c.Length))
+                    .ToList();
+                Log.Info($"{_logPrefix} Outbox: resuming upload of {Path.GetFileName(change.LocalPath)} with {previousChunks.Count} cached chunks");
+            }
+
+            void OnChunkUploaded(JmapClient.UploadedChunkInfo chunk)
+            {
+                _outbox.AddUploadedChunk(change.Id, new UploadedChunk
+                {
+                    BlobId = chunk.BlobId,
+                    Sha1Base64 = chunk.Sha1Base64,
+                    Offset = chunk.Offset,
+                    Length = chunk.Length,
+                });
+                ResetStall();
+            }
+
+            var blobId = await _queue.EnqueueAsync(QueuePriority.Background,
                 () => _jmapClient.UploadBlobChunkedAsync(
                     fileStream, contentType, fileLength,
-                    OnProgress,
+                    OnProgress, OnChunkUploaded, previousChunks,
                     uploadCts.Token), ct);
+            // Upload complete — clear persisted chunks
+            _outbox.ClearUploadedChunks(change.Id);
+            return blobId;
         }
 
         using var stream = new ProgressStream(fileStream, fileLength, OnProgress, ResetStall);

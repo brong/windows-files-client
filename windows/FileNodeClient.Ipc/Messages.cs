@@ -33,7 +33,9 @@ public record OutboxEntry(
     string? LastError,
     DateTime? NextRetryAfter,
     bool IsProcessing,
-    int? UploadProgress);
+    int? UploadProgress,
+    bool IsRejected = false,
+    string? RejectionReason = null);
 
 public record DiscoveredAccount(string AccountId, string Name, bool IsPrimary);
 
@@ -81,6 +83,7 @@ public record ActivitySnapshot(
     List<OutboxEntry> ActiveEntries,
     List<OutboxEntry> ErrorEntries,
     List<OutboxEntry> PendingEntries,
+    List<OutboxEntry> RejectedEntries,
     List<ActiveDownloadEntry>? ActiveDownloads,
     int TotalPendingCount,
     int TotalDownloadCount);

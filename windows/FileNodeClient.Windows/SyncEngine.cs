@@ -364,9 +364,9 @@ public class SyncEngine : IDisposable
         _fileChangeWatcher.OnFileUnpinned += OnFileUnpinned;
         _scopeKey = scopeKey;
         _outbox = new SyncOutbox(scopeKey, _logPrefix);
-        _outbox.Load();
         _outbox.PendingCountChanged += count => Log.SafeInvoke(() => PendingCountChanged?.Invoke(count), "SyncEngine.PendingCountChanged");
         _outbox.Changed += () => Log.SafeInvoke(() => ActivityChanged?.Invoke(), "SyncEngine.OutboxChanged.ActivityChanged");
+        _outbox.Load();
         _outboxProcessor = new OutboxProcessor(_outbox, this, jmapClient, queue, _logPrefix);
         _cleanupTimer = new Timer(CleanupStaleEntries, null, TimeSpan.FromMinutes(5), TimeSpan.FromMinutes(5));
     }
@@ -2315,6 +2315,16 @@ public class SyncEngine : IDisposable
 
     internal static unsafe void SetInSync(string path)
     {
+        SetSyncState(path, CF_IN_SYNC_STATE.CF_IN_SYNC_STATE_IN_SYNC);
+    }
+
+    internal static unsafe void SetNotInSync(string path)
+    {
+        SetSyncState(path, CF_IN_SYNC_STATE.CF_IN_SYNC_STATE_NOT_IN_SYNC);
+    }
+
+    private static unsafe void SetSyncState(string path, CF_IN_SYNC_STATE state)
+    {
         // Use FILE_WRITE_ATTRIBUTES to avoid triggering hydration on dehydrated
         // files. GENERIC_READ/GENERIC_WRITE would cause cfapi to send FETCH_DATA.
         var isDirectory = Directory.Exists(path);
@@ -2334,7 +2344,7 @@ public class SyncEngine : IDisposable
         var cfHandle = new global::Windows.Win32.Foundation.HANDLE(handle.DangerousGetHandle());
         PInvoke.CfSetInSyncState(
             cfHandle,
-            CF_IN_SYNC_STATE.CF_IN_SYNC_STATE_IN_SYNC,
+            state,
             CF_SET_IN_SYNC_FLAGS.CF_SET_IN_SYNC_FLAG_NONE,
             null).ThrowOnFailure();
     }

@@ -17,6 +17,10 @@ public class AccountScopedJmapClient : IJmapClient
     private string? _preferredDigestAlgorithm;
     private bool _chunkSizeResolved;
     private long? _chunkSize;
+    private bool _maxDataSourcesResolved;
+    private int? _maxDataSources;
+    private bool _maxSizeBlobSetResolved;
+    private long? _maxSizeBlobSet;
     private bool _trashUrlResolved;
     private string? _trashUrl;
     private bool _webUrlTemplateResolved;
@@ -60,6 +64,32 @@ public class AccountScopedJmapClient : IJmapClient
                 _chunkSizeResolved = true;
             }
             return _chunkSize;
+        }
+    }
+
+    public int? MaxDataSources
+    {
+        get
+        {
+            if (!_maxDataSourcesResolved)
+            {
+                _maxDataSources = _parent.Session.GetMaxDataSources(_accountId);
+                _maxDataSourcesResolved = true;
+            }
+            return _maxDataSources;
+        }
+    }
+
+    public long? MaxSizeBlobSet
+    {
+        get
+        {
+            if (!_maxSizeBlobSetResolved)
+            {
+                _maxSizeBlobSet = _parent.Session.GetMaxSizeBlobSet(_accountId);
+                _maxSizeBlobSetResolved = true;
+            }
+            return _maxSizeBlobSet;
         }
     }
 
@@ -448,12 +478,34 @@ public class AccountScopedJmapClient : IJmapClient
     }
 
     public Task<string> UploadBlobChunkedAsync(Stream data, string contentType, long totalSize,
-        Action<int>? onProgress = null, CancellationToken ct = default)
+        Action<int>? onProgress = null, Action<JmapClient.UploadedChunkInfo>? onChunkUploaded = null,
+        List<JmapClient.UploadedChunkInfo>? previousChunks = null,
+        CancellationToken ct = default)
     {
+        var baseChunkSize = ChunkSize ?? throw new InvalidOperationException("ChunkSize not available");
+
+        var maxSize = MaxSizeBlobSet;
+        if (maxSize.HasValue && totalSize > maxSize.Value)
+            throw new InvalidOperationException(
+                $"File size {totalSize} exceeds server maxSizeBlobSet {maxSize.Value}");
+
+        var effectiveChunkSize = Math.Max(baseChunkSize, JmapClient.MinChunkSize);
+
+        var maxSources = MaxDataSources;
+        if (maxSources.HasValue && maxSources.Value > 0 && totalSize > 0)
+        {
+            while ((totalSize + effectiveChunkSize - 1) / effectiveChunkSize > maxSources.Value
+                   && effectiveChunkSize < JmapClient.MaxChunkSize)
+                effectiveChunkSize *= 2;
+        }
+
+        if (effectiveChunkSize > JmapClient.MaxChunkSize)
+            effectiveChunkSize = JmapClient.MaxChunkSize;
+
         return JmapClient.UploadBlobChunkedInternalAsync(Http, Session.GetUploadUrl(_accountId), _accountId,
-            ChunkSize ?? throw new InvalidOperationException("ChunkSize not available"),
+            effectiveChunkSize,
             (caps, method, args) => CallAsync(caps, method, args, ct),
-            data, contentType, totalSize, onProgress, ct);
+            data, contentType, totalSize, onProgress, onChunkUploaded, previousChunks, ct);
     }
 
     public async Task<FileNode> CreateFileNodeAsync(string parentId, string? blobId, string name, string? type = null, string? onExists = null, DateTime? createdAt = null, DateTime? modifiedAt = null, CancellationToken ct = default)
