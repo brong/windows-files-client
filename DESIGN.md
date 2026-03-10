@@ -231,6 +231,8 @@ Use two priority lanes for JMAP requests (4 concurrent slots each):
 
 This prevents bulk uploads from starving user-initiated downloads. The number of slots (4) is tunable but should match server rate limits.
 
+**HTTP version matters for concurrency.** HTTP/2 multiplexes all requests to the same host over a single TCP connection. This means rapid chunk uploads can saturate the connection and starve interactive downloads despite the separate queue lanes. Force uploads to use HTTP/1.1 so each upload opens its own TCP connection, leaving the HTTP/2 connection free for interactive traffic. See pitfall #22.
+
 ---
 
 ## 4. File Download (Hydration)
@@ -324,6 +326,30 @@ Skip an entry if its parent folder is still pending creation (it'll be processed
 5. Update mappings
 
 **Important:** Because `blobId` is immutable, updating file content always creates a new node. The `onExists: "replace"` option makes this atomic — the server handles the destroy-and-create in one operation.
+
+### Chunked Upload (Large Files)
+
+Files larger than the server's suggested `chunkSize` (from `blobext` capability) are uploaded in chunks and reassembled via `Blob/set` combine:
+
+1. Calculate effective chunk size: start from the server-suggested size (already a power of 2), double until `ceil(fileSize / chunkSize) <= maxDataSources` (from `urn:ietf:params:jmap:blob`), clamp to [1MB, 64MB]
+2. If fileSize > `maxSizeBlobSet`, reject immediately — the file cannot be uploaded
+3. Upload each chunk as a separate blob POST, collecting `(chunkIndex, blobId)` pairs
+4. Persist chunk blobIds with the outbox entry for resumability
+5. `Blob/set create` with `dataSourceList` referencing all chunk blobIds → final blobId
+6. Create the FileNode with the combined blobId
+
+Force HTTP/1.1 for chunk uploads (see §3 Concurrency Control). Insert `Task.Yield()` between chunks to let interactive work proceed.
+
+### Rejected Files
+
+Some files cannot be uploaded (too large for `maxSizeBlobSet`, forbidden by server, permanently failing). These are marked as rejected in the outbox rather than silently removed:
+
+- **Explorer indicator**: Mark the file not-in-sync so it shows an error overlay
+- **Activity list**: Show rejected files in orange, with the rejection reason
+- **Tray icon**: Show orange warning icon while rejected files exist
+- **Auto-clear**: If the user modifies or deletes the file, the rejection is dismissed and the entry is either re-queued (modify) or removed (delete)
+
+See pitfalls #23 and #24 for details.
 
 **Preserving timestamps:** Always pass the local file's `created` and `modified` timestamps to the server on create/replace. This keeps the server's properties in sync with the local filesystem. Without this, the server assigns its own timestamps, and the next `PollChanges` would see a spurious difference between the server node and the local file. This is especially important for files copied or moved into the sync root — they may have old creation/modification times that should be preserved on the server, not replaced with "now". Preserving mtime also simplifies echo suppression — the server-known mtime can be used as the ground truth for "has this file been edited?"
 
@@ -514,10 +540,12 @@ Discovery via `draft-ietf-mailmaint-oauth-public-01`:
 - Pause, Resume, SyncNow
 - GetOutbox (list pending changes)
 
-**Events** (Service → UI):
+**Events** (Service → UI, push-based):
 - StatusSnapshot (all accounts)
 - AccountStatusChanged (one account)
-- OutboxSnapshot (pending changes list)
+- ActivityChanged (per-account activity snapshot: active/pending/rejected uploads, active/pending downloads, counts)
+
+The activity feed is push-based (not polled). The service fires a throttled event (100ms) whenever outbox or download state changes. The UI debounces (50ms) and renders from a cached snapshot per account. Initial state is fetched via `GetOutbox` on connect; after that, pushes take over.
 
 ### Per-Account Status
 
@@ -555,9 +583,10 @@ The message format (JSON lines or similar) can be shared.
 | HTTP 5xx / timeout | Exponential backoff: `min(1000 * 2^attempt, 60000)` ms, max 10 attempts |
 | `cannotCalculateChanges` | Fall back to full reconciliation |
 | `notFound` / 404 | Treat as success (idempotent delete/update) |
-| `forbidden` | Reject immediately, no retry, clean up local file |
+| `forbidden` | Permanent rejection — mark in outbox, notify user |
 | I/O error (file locked) | Silent retry — file is still being written |
-| HTTP 4xx (other) | Permanent rejection |
+| HTTP 4xx (other) | Permanent rejection — mark in outbox, notify user |
+| File too large (`maxSizeBlobSet`) | Permanent rejection — mark in outbox, notify user |
 | Network down | Pause sync, resume on connectivity change |
 
 ### Disk Space
@@ -808,3 +837,31 @@ A fixed 30-second timeout will fail for large files on slow connections. Use `ba
 
 **21. Digest verification should be concurrent, not sequential.**
 Fetch the content digest via `Blob/get` in parallel with the content download. Don't add a round-trip.
+
+### Upload & Transfer Pitfalls
+
+**22. HTTP/2 multiplexing starves downloads during uploads.**
+HTTP/2 multiplexes all requests to the same origin over a single TCP connection. When the client is rapidly uploading small chunks (each a separate POST), the upload stream saturates the shared connection and interactive downloads (user opening a file) get no bandwidth. The fix: force uploads to use HTTP/1.1 (`HttpRequestMessage.Version = HttpVersion.Version11`), which creates separate TCP connections per upload. This leaves the HTTP/2 connection free for interactive traffic (downloads, JMAP method calls, SSE). Also insert `Task.Yield()` between upload chunks so the async scheduler can dispatch interactive work between chunk uploads.
+
+**23. Chunk size must respect `maxDataSources` from the Blob capability.**
+The `urn:ietf:params:jmap:blob` capability includes `maxDataSources` (maximum number of data sources in a `Blob/set` combine call) and `maxSizeBlobSet` (maximum total size for blob operations). The server-suggested `chunkSize` from `blobext` may be too small for large files — if `ceil(fileSize / chunkSize) > maxDataSources`, the upload will fail. Calculate the effective chunk size by doubling the base chunk size until the file fits within `maxDataSources` chunks, clamped to `[1MB, 64MB]`. Reject files exceeding `maxSizeBlobSet` outright — they cannot be uploaded.
+
+**24. Rejected files must remain visible, not silently disappear.**
+When an upload is permanently rejected (file too large, forbidden, max retries exceeded), don't just remove the outbox entry. The user needs to know *which* files failed and *why*. Keep rejected entries in the outbox with `IsRejected=true` and a human-readable `RejectionReason`. Show them in the activity list (orange, below active transfers). Mark the file not-in-sync in the file system (Explorer overlay icon) so the user can see the problem even without opening the app. Show a warning on the tray icon. Auto-clear the rejection when the user modifies or deletes the file (the outbox's enqueue-content and enqueue-delete methods should dismiss rejections for the affected path).
+
+**25. Resumable chunked uploads must persist chunk blobIds.**
+When uploading a large file in chunks, each chunk returns a blobId. If the upload is interrupted (app crash, network failure, process restart), the already-uploaded chunks still exist on the server. Persist the list of `(chunkIndex, blobId)` pairs with the outbox entry. On retry, verify the stored blobIds are still valid via `Blob/get` (just fetch `size` — no data transfer), then resume from where you left off. Without this, every retry re-uploads the entire file from scratch, which wastes bandwidth and time for multi-gigabyte files.
+
+### Architecture Pitfalls
+
+**26. Subscribe to events before loading initial state.**
+When wiring up event-driven components, always subscribe to change events *before* loading the initial snapshot. If you load first and subscribe second, changes that occur between the load and the subscription are silently lost. This was a real bug: the outbox loaded its persisted state, then later the `Changed` event was wired up — any outbox mutations during that gap (e.g., from a concurrent sync operation) were never broadcast to the UI.
+
+**27. Push-based activity feeds beat polling.**
+Polling the service for activity data (outbox entries, active downloads) at a fixed interval (e.g., 500ms) wastes IPC round-trips when nothing has changed, introduces visible latency (up to one poll interval before changes appear), and misses short-lived events entirely (a download that starts and completes between polls never appears). Push-based: the service fires a throttled event (100ms) whenever activity changes, and the UI renders what it receives. Use debouncing on the UI side (50ms) to batch rapid pushes into a single render pass.
+
+**28. SafeInvoke for cross-thread UI updates.**
+In event-driven architectures, background events frequently arrive on non-UI threads. Blindly calling `Control.Invoke()` or `Control.BeginInvoke()` throws `ObjectDisposedException` if the form is disposing, or `InvalidOperationException` if the handle isn't created yet. Wrap all cross-thread UI calls in a `SafeInvoke` helper that checks `IsDisposed` and `IsHandleCreated` before invoking. For fire-and-forget event handlers, catch and log all exceptions — an unhandled exception in an event handler tears down the entire process.
+
+**29. Upload timeout should be stall-based, not wall-clock.**
+A fixed wall-clock timeout (even one scaled to file size) fails for large files on variable connections — a brief network stall triggers the timeout even though the upload was making progress moments earlier. Use a stall-based timeout: reset a timer on every successful chunk upload or progress callback. Only trigger the timeout if no progress has been made for N seconds (we use 30s). This lets large uploads on slow connections complete while still catching genuinely stalled transfers.
