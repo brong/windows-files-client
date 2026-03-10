@@ -719,7 +719,15 @@ sealed class ManageAccountsForm : Form
             allDownloads = allDownloads.Where(d => d.LoginId == selLogin.LoginId).ToList();
         }
 
-        RefreshActivityList(allEntries, allDownloads);
+        // Determine if the current selection has a synced account — only show
+        // "Nothing to sync" when a synced account is idle, not for unsynced accounts.
+        bool hasSyncedSelection = true;
+        if (node?.Tag is AccountNode selAcct2 && !selAcct2.IsSynced)
+            hasSyncedSelection = false;
+        else if (accounts.Count == 0)
+            hasSyncedSelection = false;
+
+        RefreshActivityList(allEntries, allDownloads, hasSyncedSelection);
     }
 
     private async void FetchInitialActivity()
@@ -743,7 +751,8 @@ sealed class ManageAccountsForm : Form
 
     private void RefreshActivityList(
         List<(string DisplayName, string AccountId, string LoginId, OutboxEntry Entry)> entries,
-        List<(string DisplayName, string AccountId, string LoginId, ActiveDownloadEntry Download)> downloads)
+        List<(string DisplayName, string AccountId, string LoginId, ActiveDownloadEntry Download)> downloads,
+        bool showEmptyLabel = true)
     {
         var now = DateTime.UtcNow;
 
@@ -873,7 +882,7 @@ sealed class ManageAccountsForm : Form
         if (desired.Count == 0)
         {
             _activityListView.Visible = false;
-            _activityEmptyLabel.Visible = true;
+            _activityEmptyLabel.Visible = showEmptyLabel;
             _activityListView.Items.Clear();
             return;
         }
