@@ -161,6 +161,11 @@ sealed class ServiceClient : IDisposable
         return await CallAsync<ActivitySnapshot>("getActivity", new { accountId }, ct);
     }
 
+    public async Task<VersionInfo> GetVersionAsync(CancellationToken ct = default)
+    {
+        return await CallAsync<VersionInfo>("getVersion", null, ct);
+    }
+
     public async Task UpdateLoginAsync(string loginId, string sessionUrl,
         string token, string? refreshToken = null, string? tokenEndpoint = null,
         string? clientId = null, long? expiresAtUnixSeconds = null,

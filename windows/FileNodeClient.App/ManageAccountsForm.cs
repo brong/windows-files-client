@@ -73,6 +73,9 @@ sealed class ManageAccountsForm : Form
     private readonly Button _stopServiceButton;
     private readonly Button _restartServiceButton;
 
+    // Version info
+    private VersionInfo? _serviceVersion;
+
     // Discovered accounts per login (populated async on form open)
     private readonly Dictionary<string, List<DiscoveredAccount>> _discoveredAccounts = new();
     private readonly Dictionary<string, LoginAccountsResult> _loginAccountResults = new();
@@ -533,10 +536,19 @@ sealed class ManageAccountsForm : Form
 
         _serviceClient.ConnectionChanged += connected =>
         {
-            if (InvokeRequired)
-                BeginInvoke(() => { UpdateServiceButtons(); if (!connected) { _activityCache.Clear(); RefreshActivityFromCache(); } });
-            else
-            { UpdateServiceButtons(); if (!connected) { _activityCache.Clear(); RefreshActivityFromCache(); } }
+            void OnConnChange()
+            {
+                UpdateServiceButtons();
+                if (connected)
+                    FetchServiceVersion();
+                else
+                {
+                    _serviceVersion = null;
+                    _activityCache.Clear();
+                    RefreshActivityFromCache();
+                }
+            }
+            if (InvokeRequired) BeginInvoke(OnConnChange); else OnConnChange();
         };
 
         // Safety-net timer
@@ -730,6 +742,36 @@ sealed class ManageAccountsForm : Form
             hasSyncedSelection = false;
 
         RefreshActivityList(allEntries, allDownloads, hasSyncedSelection);
+    }
+
+    private async void FetchServiceVersion()
+    {
+        try
+        {
+            _serviceVersion = await _serviceClient.GetVersionAsync();
+            UpdateVersionDisplay();
+        }
+        catch { /* IPC not available */ }
+    }
+
+    private void UpdateVersionDisplay()
+    {
+        if (!_noSelectionLabel.Visible) return;
+        var appVersion = VersionHelper.GetVersionInfo();
+        var lines = new List<string>();
+        lines.Add($"App: {appVersion.Version}  ({FormatBuildDate(appVersion.BuildDate)})");
+        if (_serviceVersion != null)
+            lines.Add($"Service: {_serviceVersion.Version}  ({FormatBuildDate(_serviceVersion.BuildDate)})");
+        else
+            lines.Add("Service: not connected");
+        _noSelectionLabel.Text = string.Join("\n", lines);
+    }
+
+    private static string FormatBuildDate(string buildDate)
+    {
+        if (DateTime.TryParse(buildDate, null, System.Globalization.DateTimeStyles.RoundtripKind, out var dt))
+            return dt.ToLocalTime().ToString("yyyy-MM-dd HH:mm");
+        return buildDate;
     }
 
     private async void FetchInitialActivity()
@@ -1503,12 +1545,13 @@ sealed class ManageAccountsForm : Form
             if (!_serviceClient.IsConnected)
             {
                 _noSelectionLabel.Text = "Service is not running. Click \"Start Service\" to connect.";
-                _noSelectionLabel.Visible = true;
             }
             else
             {
-                _noSelectionLabel.Visible = false;
+                _noSelectionLabel.Text = "";
+                UpdateVersionDisplay();
             }
+            _noSelectionLabel.Visible = true;
             _activityListView.Visible = false;
             _activityEmptyLabel.Visible = false;
             _activityListView.Items.Clear();

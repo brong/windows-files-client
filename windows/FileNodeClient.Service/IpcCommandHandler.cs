@@ -28,6 +28,7 @@ sealed class IpcCommandHandler
             var response = request.Method switch
             {
                 "ping" => IpcSerializer.SerializeResponse(request.Id),
+                "getVersion" => HandleGetVersion(request),
                 "getStatus" => IpcSerializer.SerializeResponse(request.Id, BuildStatusSnapshot()),
                 "addLogin" => await HandleAddLoginAsync(request, ct),
                 "discoverAccounts" => await HandleDiscoverAccountsAsync(request, ct),
@@ -58,6 +59,11 @@ sealed class IpcCommandHandler
             Log.Error($"[IPC] Error id={request.Id} method={request.Method}: {ex.Message}");
             return IpcSerializer.SerializeError(request.Id, ex.Message);
         }
+    }
+
+    private string HandleGetVersion(IpcRequest request)
+    {
+        return IpcSerializer.SerializeResponse(request.Id, VersionHelper.GetVersionInfo());
     }
 
     public StatusSnapshotResult BuildStatusSnapshot()

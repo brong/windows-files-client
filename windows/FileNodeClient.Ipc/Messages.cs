@@ -89,6 +89,8 @@ public record ActivitySnapshot(
     int TotalPendingCount,
     int TotalDownloadCount);
 
+public record VersionInfo(string Version, string BuildDate);
+
 // ---- Exception type ----
 
 public class IpcCallException : Exception

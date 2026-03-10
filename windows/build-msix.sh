@@ -43,12 +43,18 @@ rsync -a --exclude='.git' --exclude='.claude' --exclude='bin' --exclude='obj' "$
 WINBUILD=$(wslpath -w "$BUILDDIR")
 PUBLISHDIR="$BUILDDIR/FileNodeClient.Package/publish"
 
+# Extract version from VERSION file (first non-comment line, first field)
+APP_VERSION=$(grep -v '^#' "$BUILDDIR/VERSION" | head -1 | awk '{print $1}')
+BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+echo "=== Version: $APP_VERSION  Build: $BUILD_DATE ==="
+VERSION_PROPS="-p:Version=$APP_VERSION -p:InformationalVersion=$APP_VERSION+$BUILD_DATE"
+
 echo "=== Publishing Service ==="
 cd "$BUILDDIR"
-dotnet.exe publish FileNodeClient.Service/FileNodeClient.Service.csproj -c Release -r win-x64 --self-contained -o FileNodeClient.Package/publish 2>&1 | tail -3
+dotnet.exe publish FileNodeClient.Service/FileNodeClient.Service.csproj -c Release -r win-x64 --self-contained -o FileNodeClient.Package/publish $VERSION_PROPS 2>&1 | tail -3
 
 echo "=== Publishing App ==="
-dotnet.exe publish FileNodeClient.App/FileNodeClient.App.csproj -c Release -r win-x64 --self-contained -o FileNodeClient.Package/publish 2>&1 | tail -3
+dotnet.exe publish FileNodeClient.App/FileNodeClient.App.csproj -c Release -r win-x64 --self-contained -o FileNodeClient.Package/publish $VERSION_PROPS 2>&1 | tail -3
 
 echo "=== Building native thumbnail DLL ==="
 if [ -f "$WINSRC/FileNodeClient.ThumbnailExtension/ThumbnailHandler.c" ]; then
