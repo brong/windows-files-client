@@ -1421,10 +1421,11 @@ sealed class ManageAccountsForm : Form
             }
             else
             {
-                // No selection — show all activity (unfiltered)
                 _noSelectionLabel.Visible = false;
             }
-            FetchInitialActivity();
+            _activityListView.Visible = false;
+            _activityEmptyLabel.Visible = false;
+            _activityListView.Items.Clear();
             return;
         }
 
