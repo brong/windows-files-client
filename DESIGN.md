@@ -88,7 +88,7 @@ The **Jmap** and **Logging** layers are cross-platform (no OS dependencies). The
 | JMAP Core | `urn:ietf:params:jmap:core` | Method call limits, upload limits |
 | FileNode | `urn:ietf:params:jmap:filenode` (or dev URI) | File sync API |
 | Blob | `urn:ietf:params:jmap:blob` | Inline blob fetch + digest verification (RFC 9404) |
-| BlobExt | `https://www.fastmail.com/dev/blobext` | `Blob/convert` for thumbnails, chunked upload |
+| BlobExt | `urn:ietf:params:jmap:blobext` | `Blob/convert` for thumbnails, chunked upload |
 | Quota | `urn:ietf:params:jmap:quota` | Storage quota reporting (RFC 9425) |
 
 Always check for capability presence before using its methods. The server may not support all capabilities, and the client must degrade gracefully. For example, if `Blob` capability is absent, skip digest verification. If `BlobExt` is absent, skip thumbnail fetching via `Blob/convert`.

@@ -93,7 +93,7 @@ public class AccountScopedJmapClient : IJmapClient
         }
     }
 
-    public bool HasBlobConvert => ChunkSize != null;
+    public bool HasBlobConvert => _parent.Session.HasAccountCapability(_accountId, JmapClient.BlobExtCapability);
 
     public string? TrashUrl
     {

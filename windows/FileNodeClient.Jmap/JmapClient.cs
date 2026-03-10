@@ -18,7 +18,7 @@ public class JmapClient : IJmapClient
     public const string CoreCapability = "urn:ietf:params:jmap:core";
     public const string FileNodeCapability = "https://www.fastmail.com/dev/filenode";
     public const string BlobCapability = "urn:ietf:params:jmap:blob";
-    public const string BlobExtCapability = "https://www.fastmail.com/dev/blobext";
+    public const string BlobExtCapability = "urn:ietf:params:jmap:blobext";
     public const string QuotaCapability = "urn:ietf:params:jmap:quota";
     private static readonly string[] FileNodeUsing = [CoreCapability, FileNodeCapability];
     private static readonly string[] BlobUsing = [CoreCapability, BlobCapability];
@@ -103,7 +103,7 @@ public class JmapClient : IJmapClient
         }
     }
 
-    public bool HasBlobConvert => ChunkSize != null;
+    public bool HasBlobConvert => Session.HasAccountCapability(AccountId, BlobExtCapability);
 
     public string? TrashUrl
     {

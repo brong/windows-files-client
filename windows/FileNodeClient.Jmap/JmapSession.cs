@@ -78,6 +78,13 @@ public class JmapSession
 
     public bool HasCapability(string capability) => Capabilities.ContainsKey(capability);
 
+    public bool HasAccountCapability(string accountId, string capability)
+    {
+        if (!Accounts.TryGetValue(accountId, out var account))
+            return false;
+        return account.AccountCapabilities.ContainsKey(capability);
+    }
+
     // JMAP core capability limits (RFC 8620 §2)
     public int MaxCallsInRequest => GetCoreInt("maxCallsInRequest", 16);
     public int MaxObjectsInGet => GetCoreInt("maxObjectsInGet", 500);
@@ -98,7 +105,7 @@ public class JmapSession
         if (!Accounts.TryGetValue(accountId, out var account))
             return null;
         if (!account.AccountCapabilities.TryGetValue(
-            "https://www.fastmail.com/dev/blobext", out var blobExtCap))
+            JmapClient.BlobExtCapability, out var blobExtCap))
             return null;
         if (blobExtCap.TryGetProperty("chunkSize", out var chunkSize)
             && chunkSize.ValueKind == JsonValueKind.Number)
