@@ -34,6 +34,7 @@ public record OutboxEntry(
     DateTime? NextRetryAfter,
     bool IsProcessing,
     int? UploadProgress,
+    long? FileSize = null,
     bool IsRejected = false,
     string? RejectionReason = null);
 

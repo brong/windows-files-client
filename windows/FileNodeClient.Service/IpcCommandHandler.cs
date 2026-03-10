@@ -282,13 +282,20 @@ sealed class IpcCommandHandler
         var pending = new List<OutboxEntry>();
         foreach (var e in entries)
         {
+            long? fileSize = null;
+            if (e.LocalPath != null && !e.IsFolder && !e.IsDeleted)
+            {
+                try { fileSize = new FileInfo(e.LocalPath).Length; } catch { }
+            }
+
             var oe = new OutboxEntry(
                 e.Id, e.LocalPath, e.NodeId, e.IsFolder,
                 e.IsDirtyContent, e.IsDirtyLocation, e.IsDeleted,
                 e.CreatedAt, e.UpdatedAt, e.AttemptCount,
                 e.LastError, e.NextRetryAfter,
                 processingIds.Contains(e.Id),
-                supervisor.Outbox.GetProgress(e.Id));
+                supervisor.Outbox.GetProgress(e.Id),
+                fileSize);
 
             if (oe.IsProcessing) active.Add(oe);
             else if (oe.LastError != null) errors.Add(oe);
@@ -297,12 +304,20 @@ sealed class IpcCommandHandler
 
         // Rejected entries (kept separately, not in normal processing queue)
         var rejectedEntries = supervisor.Outbox.GetRejectedSnapshot();
-        var rejected = rejectedEntries.Select(e => new OutboxEntry(
-            e.Id, e.LocalPath, e.NodeId, e.IsFolder,
-            e.IsDirtyContent, e.IsDirtyLocation, e.IsDeleted,
-            e.CreatedAt, e.UpdatedAt, e.AttemptCount,
-            e.LastError, e.NextRetryAfter,
-            false, null, true, e.RejectionReason)).ToList();
+        var rejected = rejectedEntries.Select(e =>
+        {
+            long? fs = null;
+            if (e.LocalPath != null && !e.IsFolder && !e.IsDeleted)
+            {
+                try { fs = new FileInfo(e.LocalPath).Length; } catch { }
+            }
+            return new OutboxEntry(
+                e.Id, e.LocalPath, e.NodeId, e.IsFolder,
+                e.IsDirtyContent, e.IsDirtyLocation, e.IsDeleted,
+                e.CreatedAt, e.UpdatedAt, e.AttemptCount,
+                e.LastError, e.NextRetryAfter,
+                false, null, fs, true, e.RejectionReason);
+        }).ToList();
 
         var downloadSnapshot = supervisor.GetActiveDownloadSnapshot();
         List<ActiveDownloadEntry>? downloads = null;

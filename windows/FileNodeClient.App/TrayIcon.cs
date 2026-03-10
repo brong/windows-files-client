@@ -163,14 +163,14 @@ sealed class TrayIcon : IDisposable
             }
         }
 
-        // Override to orange when files have been rejected
+        // Override to red when files have been permanently rejected
         if (connected && accounts.Count > 0)
         {
             var rejectedCount = _serviceClient.RejectedFileCount;
             if (rejectedCount > 0)
             {
-                if (color == Color.LimeGreen)
-                    color = Color.FromArgb(200, 120, 0);
+                if (color != Color.DodgerBlue) // don't override active sync
+                    color = Color.Red;
                 tooltip += rejectedCount == 1
                     ? " (1 file rejected)"
                     : $" ({rejectedCount} files rejected)";

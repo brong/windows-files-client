@@ -12,7 +12,7 @@ namespace FileNodeClient.Windows;
 public class OutboxProcessor : IDisposable
 {
     private const int MaxConcurrency = 4;
-    private const int MaxAttempts = 10;
+
 
     private readonly SyncOutbox _outbox;
     private readonly SyncEngine _engine;
@@ -153,30 +153,26 @@ public class OutboxProcessor : IDisposable
             if (ex.InnerException != null)
                 Log.Error($"{_logPrefix}   Inner: {ex.InnerException.GetType().Name}: {ex.InnerException.Message}");
 
-            // 4xx = permanent (bad request, not found, payload too large) — don't retry
-            if (ex.StatusCode.HasValue && (int)ex.StatusCode.Value >= 400 && (int)ex.StatusCode.Value < 500)
+            var code = ex.StatusCode.HasValue ? (int)ex.StatusCode.Value : 0;
+
+            // Only reject permanently when the file itself is the problem
+            // (RFC 8620 §6.1: upload errors return RFC 7807 problem details)
+            if (code == 413) // Payload Too Large — file won't ever fit
             {
-                MarkRejectedAndNotInSync(change, $"Server rejected ({(int)ex.StatusCode.Value}): {ex.Message}");
+                MarkRejectedAndNotInSync(change, $"File too large for server ({code})");
             }
             else
             {
-                // 5xx, network errors, timeouts — transient, back off and retry
-                _outbox.MarkFailed(change.Id, ex.InnerException?.Message ?? ex.Message);
+                // Everything else is retriable: 400 (rate limit), 403 (bad token),
+                // 404 (account not found), 5xx, network errors, timeouts
+                _outbox.MarkFailed(change.Id, $"HTTP {code}: {ex.InnerException?.Message ?? ex.Message}");
             }
         }
         catch (IOException ex) when (change.IsDirtyContent)
         {
-            // File locked or still being copied — retry with limit
-            if (change.AttemptCount + 1 >= MaxAttempts)
-            {
-                Log.Error($"{_logPrefix} Outbox: giving up on inaccessible file after {change.AttemptCount + 1} attempts: {Path.GetFileName(change.LocalPath)}");
-                MarkRejectedAndNotInSync(change, $"File inaccessible: {ex.Message}");
-            }
-            else
-            {
-                Log.Info($"{_logPrefix} Outbox: file not ready for {Path.GetFileName(change.LocalPath)}, will retry ({ex.Message})");
-                _outbox.MarkFailed(change.Id, ex.Message);
-            }
+            // File locked or still being copied — always retry (backoff caps at 60s)
+            Log.Info($"{_logPrefix} Outbox: file not ready for {Path.GetFileName(change.LocalPath)}, will retry ({ex.Message})");
+            _outbox.MarkFailed(change.Id, ex.Message);
         }
         catch (InvalidOperationException ex) when (!ct.IsCancellationRequested
             && ex.Message.Contains("maxSizeBlobSet"))
@@ -187,24 +183,9 @@ public class OutboxProcessor : IDisposable
         catch (Exception ex) when (!ct.IsCancellationRequested
             && (ex.Message.Contains("forbidden") || ex.Message.Contains("Forbidden")))
         {
+            // Forbidden usually means bad/expired token — retriable after re-auth
             Log.Error($"{_logPrefix} Outbox: permission denied for {change.LocalPath ?? change.NodeId}: {ex.Message}");
-            MarkRejectedAndNotInSync(change, ex.Message);
-
-            // Clean up local file that can't be synced (only new untracked files)
-            if (change.LocalPath != null && change.NodeId == null)
-            {
-                try
-                {
-                    if (change.IsFolder && Directory.Exists(change.LocalPath))
-                        Directory.Delete(change.LocalPath, recursive: true);
-                    else if (File.Exists(change.LocalPath))
-                        File.Delete(change.LocalPath);
-                }
-                catch (Exception cleanupEx)
-                {
-                    Log.Warn($"{_logPrefix} Outbox: failed to clean up rejected file {change.LocalPath}: {cleanupEx.Message}");
-                }
-            }
+            _outbox.MarkFailed(change.Id, ex.Message);
         }
         catch (ObjectDisposedException) when (ct.IsCancellationRequested)
         {
@@ -212,16 +193,9 @@ public class OutboxProcessor : IDisposable
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
+            // Transient/unknown errors — always retry (backoff caps at 60s)
             Log.Error($"{_logPrefix} Outbox process error for {change.LocalPath ?? change.NodeId}: {ex.Message}");
-            if (change.AttemptCount + 1 >= MaxAttempts)
-            {
-                Log.Error($"{_logPrefix} Outbox: giving up after {change.AttemptCount + 1} attempts: {change.LocalPath ?? change.NodeId}");
-                MarkRejectedAndNotInSync(change, $"Gave up after {change.AttemptCount + 1} attempts: {ex.Message}");
-            }
-            else
-            {
-                _outbox.MarkFailed(change.Id, ex.Message);
-            }
+            _outbox.MarkFailed(change.Id, ex.Message);
         }
         finally
         {
@@ -523,14 +497,15 @@ public class OutboxProcessor : IDisposable
         var chunkSize = _jmapClient.ChunkSize;
         using var uploadCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
 
-        // Stall timer: cancel if no bytes move for StallTimeoutSeconds.
-        // Reset on every progress callback (fires each 1% of file size).
+        // Stall timer: cancel if no progress for StallTimeoutSeconds.
+        // Starts unarmed (Infinite) so queue wait time doesn't count.
+        // Armed on first byte read, reset on every progress callback.
         var stallTimeout = TimeSpan.FromSeconds(StallTimeoutSeconds);
         using var stallTimer = new Timer(_ =>
         {
             Log.Info($"{_logPrefix} Outbox: upload stalled for {Path.GetFileName(change.LocalPath)}, cancelling");
             try { uploadCts.Cancel(); } catch { }
-        }, null, stallTimeout, Timeout.InfiniteTimeSpan);
+        }, null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
 
         void ResetStall() { try { stallTimer.Change(stallTimeout, Timeout.InfiniteTimeSpan); } catch { } }
 

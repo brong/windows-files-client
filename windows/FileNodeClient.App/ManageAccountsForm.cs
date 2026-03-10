@@ -338,8 +338,8 @@ sealed class ManageAccountsForm : Form
             OwnerDraw = true,
         };
         var em = Font.Height;
-        _activityListView.Columns.Add("Account", 9 * em);
-        _activityListView.Columns.Add("Name", 11 * em);
+        _activityListView.Columns.Add("Name", 14 * em);
+        _activityListView.Columns.Add("Size", 6 * em, HorizontalAlignment.Right);
         _activityListView.Columns.Add("Action", 6 * em);
         _activityListView.Columns.Add("Status", 6 * em);
         _activityListView.Columns.Add("Updated", 7 * em);
@@ -757,24 +757,25 @@ sealed class ManageAccountsForm : Form
         var now = DateTime.UtcNow;
 
         // Build all items into a flat list, then sort by progress descending
+        // IsRejected flag distinguishes permanent rejections from transient errors
         var desired = new List<(string Key, string Col0, string Col1, string Col2, string Col3, string Col4,
-            Color ForeColor, string Tooltip, int? ProgressTag, int SortProgress)>();
+            Color ForeColor, string Tooltip, int? ProgressTag, int SortProgress, bool IsRejected)>();
 
         // Downloads (active and pending)
         foreach (var (displayName, accountId, _, dl) in downloads)
         {
             if (dl.IsPending)
             {
-                desired.Add(($"pending:{accountId}:{dl.FileName}", displayName, dl.FileName, "Download",
-                    "Queued", "", Color.Gray, dl.FileName, null, -2));
+                desired.Add(($"pending:{accountId}:{dl.FileName}", dl.FileName, FormatFileSize(dl.TotalSize), "Download",
+                    "Queued", "", Color.Gray, dl.FileName, null, -2, false));
             }
             else
             {
                 var statusText = dl.Progress.HasValue ? "" : "Downloading...";
                 var tooltip = dl.Progress.HasValue ? $"Downloading {dl.Progress.Value}%" : dl.FileName;
-                desired.Add(($"dl:{accountId}:{dl.FileName}", displayName, dl.FileName, "Download",
+                desired.Add(($"dl:{accountId}:{dl.FileName}", dl.FileName, FormatFileSize(dl.TotalSize), "Download",
                     statusText, FormatRelativeTime(dl.StartedAt, now),
-                    Color.DodgerBlue, tooltip, dl.Progress, dl.Progress ?? -1));
+                    Color.DodgerBlue, tooltip, dl.Progress, dl.Progress ?? -1, false));
             }
         }
 
@@ -806,61 +807,60 @@ sealed class ManageAccountsForm : Form
             if (entry.LastError != null)
                 tooltip += $"\nError: {entry.LastError}";
 
-            var color = entry.IsRejected ? Color.FromArgb(200, 120, 0)
+            // Permanent rejections = red (user must fix), temp errors = orange (will retry)
+            var color = entry.IsRejected ? Color.Red
                 : entry.IsProcessing ? Color.DodgerBlue
-                : entry.LastError != null ? Color.Red
+                : entry.LastError != null ? Color.FromArgb(200, 120, 0)
                 : _activityListView.ForeColor;
 
-            // Rejected entries sort between active (-1) and pending (-2)
-            if (entry.IsRejected)
-                sortProgress = -1; // Same tier as active, so they stay visible
+            // Rejected and errored entries sort in active tier so they stay visible
+            if (entry.IsRejected || entry.LastError != null)
+                sortProgress = -1;
 
-            desired.Add(($"outbox:{entry.Id}", displayName, name, action,
+            desired.Add(($"outbox:{entry.Id}", name, FormatFileSize(entry.FileSize), action,
                 status, FormatRelativeTime(entry.UpdatedAt, now),
-                color, tooltip, progress, sortProgress));
+                color, tooltip, progress, sortProgress, entry.IsRejected));
         }
 
         // Sort: highest progress first, then in-progress without %, then queued/waiting
         desired.Sort((a, b) => b.SortProgress.CompareTo(a.SortProgress));
 
-        // Cap the list: show active/rejected items (progress >= -1) individually,
+        // Cap the list: show active/rejected/errored items (progress >= -1) individually,
         // collapse remaining pending items into a single summary row.
-        // Rejected items always show (they need user attention).
         const int MaxVisiblePending = 5;
         const int MaxVisibleRejected = 5;
 
-        // Count active+rejected items (sortProgress >= -1)
+        // Count active-tier items (sortProgress >= -1)
         int activeCount = 0;
         while (activeCount < desired.Count && desired[activeCount].SortProgress >= -1)
             activeCount++;
 
-        // Among the active tier, separate rejected from truly active
+        // Among the active tier, count permanent rejections
         int rejectedInActive = 0;
         for (int i = 0; i < activeCount; i++)
-            if (desired[i].Key.StartsWith("outbox:") && desired[i].ForeColor == Color.FromArgb(200, 120, 0))
+            if (desired[i].IsRejected)
                 rejectedInActive++;
 
         int pendingCount = desired.Count - activeCount;
         var kept = new List<(string Key, string Col0, string Col1, string Col2, string Col3, string Col4,
-            Color ForeColor, string Tooltip, int? ProgressTag, int SortProgress)>();
+            Color ForeColor, string Tooltip, int? ProgressTag, int SortProgress, bool IsRejected)>();
 
-        // Keep all active items (includes rejected which are in the active tier)
+        // Keep all active items, cap rejected to MaxVisibleRejected
         int shownRejected = 0;
         for (int i = 0; i < activeCount; i++)
         {
-            bool isRejected = desired[i].Key.StartsWith("outbox:") && desired[i].ForeColor == Color.FromArgb(200, 120, 0);
-            if (isRejected && shownRejected >= MaxVisibleRejected)
+            if (desired[i].IsRejected && shownRejected >= MaxVisibleRejected)
                 continue;
-            if (isRejected) shownRejected++;
+            if (desired[i].IsRejected) shownRejected++;
             kept.Add(desired[i]);
         }
 
         if (rejectedInActive > MaxVisibleRejected)
         {
             int hiddenRejected = rejectedInActive - MaxVisibleRejected;
-            kept.Add(("summary:rejected", "", "", "",
-                $"+ {hiddenRejected:N0} more rejected", "",
-                Color.FromArgb(200, 120, 0), $"{hiddenRejected} additional files rejected", null, -1));
+            kept.Add(("summary:rejected", $"+ {hiddenRejected:N0} more rejected", "", "",
+                "", "",
+                Color.Red, $"{hiddenRejected} additional files rejected", null, -1, true));
         }
 
         // Add pending items with cap
@@ -871,9 +871,9 @@ sealed class ManageAccountsForm : Form
         if (pendingCount > MaxVisiblePending)
         {
             int hiddenCount = pendingCount - MaxVisiblePending;
-            kept.Add(("summary:pending", "", "", "",
-                $"+ {hiddenCount:N0} more pending", "",
-                Color.Gray, $"{hiddenCount} additional items queued", null, -3));
+            kept.Add(("summary:pending", $"+ {hiddenCount:N0} more pending", "", "",
+                "", "",
+                Color.Gray, $"{hiddenCount} additional items queued", null, -3, false));
         }
 
         desired = kept;
@@ -949,7 +949,7 @@ sealed class ManageAccountsForm : Form
 
     private void UpdateItemFields(ListViewItem item,
         (string Key, string Col0, string Col1, string Col2, string Col3, string Col4,
-         Color ForeColor, string Tooltip, int? ProgressTag, int SortProgress) d)
+         Color ForeColor, string Tooltip, int? ProgressTag, int SortProgress, bool IsRejected) d)
     {
         if (item.Text != d.Col0) item.Text = d.Col0;
         if (item.SubItems[1].Text != d.Col1) item.SubItems[1].Text = d.Col1;
@@ -1023,6 +1023,16 @@ sealed class ManageAccountsForm : Form
         if (entry.AttemptCount > 0)
             return "Retrying";
         return "Pending";
+    }
+
+    private static string FormatFileSize(long? bytes)
+    {
+        if (bytes == null) return "";
+        double b = bytes.Value;
+        if (b < 1024) return $"{b:0} B";
+        if (b < 1024 * 1024) return $"{b / 1024:0.#} KB";
+        if (b < 1024 * 1024 * 1024) return $"{b / (1024 * 1024):0.#} MB";
+        return $"{b / (1024 * 1024 * 1024):0.##} GB";
     }
 
     private static string FormatRelativeTime(DateTime utcTime, DateTime now)

@@ -345,8 +345,8 @@ Force HTTP/1.1 for chunk uploads (see §3 Concurrency Control). Insert `Task.Yie
 Some files cannot be uploaded (too large for `maxSizeBlobSet`, forbidden by server, permanently failing). These are marked as rejected in the outbox rather than silently removed:
 
 - **Explorer indicator**: Mark the file not-in-sync so it shows an error overlay
-- **Activity list**: Show rejected files in orange, with the rejection reason
-- **Tray icon**: Show orange warning icon while rejected files exist
+- **Activity list**: Show rejected files in red (permanent), temporary errors in orange (will retry)
+- **Tray icon**: Red when rejected files exist; stays green for temporary errors
 - **Auto-clear**: If the user modifies or deletes the file, the rejection is dismissed and the entry is either re-queued (modify) or removed (delete)
 
 See pitfalls #23 and #24 for details.
@@ -578,16 +578,30 @@ The message format (JSON lines or similar) can be shared.
 
 ### Retry Strategy
 
-| Error Class | Action |
-|-------------|--------|
-| HTTP 5xx / timeout | Exponential backoff: `min(1000 * 2^attempt, 60000)` ms, max 10 attempts |
-| `cannotCalculateChanges` | Fall back to full reconciliation |
-| `notFound` / 404 | Treat as success (idempotent delete/update) |
-| `forbidden` | Permanent rejection — mark in outbox, notify user |
-| I/O error (file locked) | Silent retry — file is still being written |
-| HTTP 4xx (other) | Permanent rejection — mark in outbox, notify user |
-| File too large (`maxSizeBlobSet`) | Permanent rejection — mark in outbox, notify user |
-| Network down | Pause sync, resume on connectivity change |
+| Error Class | Action | Severity |
+|-------------|--------|----------|
+| HTTP 5xx / timeout | Exponential backoff: `min(1000 * 2^attempt, 60000)` ms | Temporary (orange) |
+| `cannotCalculateChanges` | Fall back to full reconciliation | — |
+| `notFound` / 404 (JMAP method) | Treat as success (idempotent delete/update) | — |
+| HTTP 403 / `forbidden` | Retry — usually bad/expired token, recoverable after re-auth | Temporary (orange) |
+| HTTP 400 / `urn:ietf:params:jmap:error:limit` | Retry — rate limit or transient server limit | Temporary (orange) |
+| HTTP 413 (Payload Too Large) | Permanent rejection — file exceeds server upload size limit | Permanent (red) |
+| File too large (`maxSizeBlobSet`) | Permanent rejection — file cannot be chunked within limits | Permanent (red) |
+| I/O error (file locked) | Silent retry — file is still being written | Temporary (orange) |
+| Network down | Pause sync, resume on connectivity change | — |
+
+The principle: **only reject permanently when the file itself is the problem** (too large). Everything else (auth, rate limits, network, server errors) is potentially recoverable and should retry indefinitely with backoff.
+
+### Error Visibility
+
+Errors are shown differently based on whether they are transient or permanent:
+
+- **Temporary errors** (orange in activity list): Timeouts, 5xx, 400, 403, network errors, file-locked I/O. These auto-retry with exponential backoff (capped at 60s) indefinitely and disappear when the upload succeeds. The tray icon stays green.
+- **Permanent rejections** (red in activity list): Only when the *file itself* is the problem — HTTP 413 (Payload Too Large) or exceeding `maxSizeBlobSet`/`maxDataSources` limits. These persist in the outbox until the user modifies or deletes the file. The tray icon turns red. The file is marked not-in-sync in the file system so it shows an error overlay in the file manager.
+
+Never give up on a file that the server *could* accept. A 403 means a bad token, not a bad file. A 400 might be a rate limit (RFC 8620 `urn:ietf:params:jmap:error:limit`). Network errors are by definition transient. Only reject when the file *will never* be accepted.
+
+This distinction prevents users from worrying about transient network hiccups while ensuring they notice files that genuinely cannot sync.
 
 ### Disk Space
 
@@ -846,8 +860,8 @@ HTTP/2 multiplexes all requests to the same origin over a single TCP connection.
 **23. Chunk size must respect `maxDataSources` from the Blob capability.**
 The `urn:ietf:params:jmap:blob` capability includes `maxDataSources` (maximum number of data sources in a `Blob/set` combine call) and `maxSizeBlobSet` (maximum total size for blob operations). The server-suggested `chunkSize` from `blobext` may be too small for large files — if `ceil(fileSize / chunkSize) > maxDataSources`, the upload will fail. Calculate the effective chunk size by doubling the base chunk size until the file fits within `maxDataSources` chunks, clamped to `[1MB, 64MB]`. Reject files exceeding `maxSizeBlobSet` outright — they cannot be uploaded.
 
-**24. Rejected files must remain visible, not silently disappear.**
-When an upload is permanently rejected (file too large, forbidden, max retries exceeded), don't just remove the outbox entry. The user needs to know *which* files failed and *why*. Keep rejected entries in the outbox with `IsRejected=true` and a human-readable `RejectionReason`. Show them in the activity list (orange, below active transfers). Mark the file not-in-sync in the file system (Explorer overlay icon) so the user can see the problem even without opening the app. Show a warning on the tray icon. Auto-clear the rejection when the user modifies or deletes the file (the outbox's enqueue-content and enqueue-delete methods should dismiss rejections for the affected path).
+**24. Distinguish permanent rejections from temporary errors — and never give up on retriable files.**
+When an upload fails, the user needs to know whether to wait or to act. Use two tiers: **temporary errors** (orange, auto-retry with backoff — timeouts, 5xx, 400, 403, network errors, I/O) and **permanent rejections** (red, persist until user fixes — HTTP 413, `maxSizeBlobSet` exceeded). Only reject permanently when the *file itself* is the problem. A 403 is a bad token, not a bad file. A 400 might be a rate limit (`urn:ietf:params:jmap:error:limit`). These must retry indefinitely (backoff caps at 60s). Keep permanent rejections with `IsRejected=true` and a human-readable `RejectionReason`. Show them in the activity list (red, below active transfers). Mark the file not-in-sync in the file system (Explorer overlay icon). Turn the tray icon red. Auto-clear the rejection when the user modifies or deletes the file. Temporary errors stay visible in the activity list (orange) so the user can see retries in progress, but don't affect the tray icon.
 
 **25. Resumable chunked uploads must persist chunk blobIds.**
 When uploading a large file in chunks, each chunk returns a blobId. If the upload is interrupted (app crash, network failure, process restart), the already-uploaded chunks still exist on the server. Persist the list of `(chunkIndex, blobId)` pairs with the outbox entry. On retry, verify the stored blobIds are still valid via `Blob/get` (just fetch `size` — no data transfer), then resume from where you left off. Without this, every retry re-uploads the entire file from scratch, which wastes bandwidth and time for multi-gigabyte files.
@@ -865,3 +879,6 @@ In event-driven architectures, background events frequently arrive on non-UI thr
 
 **29. Upload timeout should be stall-based, not wall-clock.**
 A fixed wall-clock timeout (even one scaled to file size) fails for large files on variable connections — a brief network stall triggers the timeout even though the upload was making progress moments earlier. Use a stall-based timeout: reset a timer on every successful chunk upload or progress callback. Only trigger the timeout if no progress has been made for N seconds (we use 30s). This lets large uploads on slow connections complete while still catching genuinely stalled transfers.
+
+**30. Stall timer must not start until the upload begins.**
+If the stall timer starts ticking when the upload is *enqueued* rather than when it actually starts sending bytes, queue wait time counts toward the stall timeout. With 4 concurrent upload slots and large files, a queued upload can easily wait 30+ seconds for a slot, triggering a false stall cancellation before any bytes are sent. Start the timer unarmed (infinite initial due time) and arm it on the first progress callback. This was a real bug: the client cancelled the HTTP request after the server had received all bytes but before it sent the response (nginx logged 499), then the retry hit a 403.
