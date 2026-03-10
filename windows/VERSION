@@ -2,6 +2,7 @@
 #   1. This file (VERSION)
 #   2. windows/FileNodeClient.Package/AppxManifest.xml  (<Identity Version="...">)
 
+1.0.26.0 2026-03-10  Fix activity flicker, auto-size columns, stable sort, coarser time
 1.0.23.0 2026-03-10  Bytes-based upload progress, 100ms throttled progress callbacks
 1.0.22.0 2026-03-10  Context menu actions for rejected files, retry/dismiss/delete
 1.0.21.0 2026-03-10  RFC 8620 error handling, file size column, fix stall timer

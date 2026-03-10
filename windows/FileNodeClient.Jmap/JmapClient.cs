@@ -651,7 +651,7 @@ public class JmapClient : IJmapClient
             {
                 ArrayPool<byte>.Shared.Return(hashBuf);
             }
-            onProgress?.Invoke((int)(totalUploaded * 100 / totalSize));
+            onProgress?.Invoke(totalUploaded);
         }
 
         while (totalUploaded < totalSize)
@@ -691,6 +691,11 @@ public class JmapClient : IJmapClient
         // Compute overall SHA1
         var overallSha1 = overallHash.GetHashAndReset();
         var overallSha1Base64 = Convert.ToBase64String(overallSha1);
+
+            // Signal final progress — all bytes uploaded, now combining.
+            // This resets the stall timer so the combine call has a full
+            // timeout window without being cancelled prematurely.
+            onProgress?.Invoke(totalSize);
 
             // Combine chunks via Blob/upload
             var dataArray = chunkBlobIds.Select(c => new Dictionary<string, object?>

@@ -338,12 +338,12 @@ sealed class ManageAccountsForm : Form
             Visible = false,
             OwnerDraw = true,
         };
-        var em = Font.Height;
-        _activityListView.Columns.Add("Name", 14 * em);
-        _activityListView.Columns.Add("Size", 6 * em, HorizontalAlignment.Right);
-        _activityListView.Columns.Add("Action", 6 * em);
-        _activityListView.Columns.Add("Status", 6 * em);
-        _activityListView.Columns.Add("Updated", 7 * em);
+        _activityListView.Columns.Add("Name", 100);
+        _activityListView.Columns.Add("Size", 60, HorizontalAlignment.Right);
+        _activityListView.Columns.Add("Action", 60);
+        _activityListView.Columns.Add("Status", 60);
+        _activityListView.Columns.Add("Updated", 80);
+        _activityListView.Resize += (_, _) => AutoSizeActivityColumns();
 
         _activityListView.DrawColumnHeader += (_, e) => e.DrawDefault = true;
         _activityListView.DrawItem += (_, _) => { };
@@ -809,8 +809,6 @@ sealed class ManageAccountsForm : Form
             }
 
             var tooltip = entry.LocalPath ?? entry.NodeId ?? "";
-            if (progressPercent.HasValue)
-                tooltip += $"\nUploading {progressPercent.Value}%";
             if (entry.LastError != null)
                 tooltip += $"\nError: {entry.LastError}";
 
@@ -834,7 +832,12 @@ sealed class ManageAccountsForm : Form
         }
 
         // Sort: highest progress first, then in-progress without %, then queued/waiting
-        desired.Sort((a, b) => b.SortProgress.CompareTo(a.SortProgress));
+        // Stable tiebreaker by key to prevent items at similar progress from swapping
+        desired.Sort((a, b) =>
+        {
+            var c = b.SortProgress.CompareTo(a.SortProgress);
+            return c != 0 ? c : string.Compare(a.Key, b.Key, StringComparison.Ordinal);
+        });
 
         // Cap the list: show active/rejected/errored items (progress >= -1) individually,
         // collapse remaining pending items into a single summary row.
@@ -1017,6 +1020,24 @@ sealed class ManageAccountsForm : Form
         menu.Show(_activityListView, e.Location);
     }
 
+    private void AutoSizeActivityColumns()
+    {
+        if (_activityListView.Columns.Count < 5) return;
+        var w = _activityListView.ClientSize.Width;
+        var em = Font.Height;
+        // Fixed columns: Size, Action, Status, Updated
+        var sizeW = (int)(4.5 * em);
+        var actionW = (int)(5.5 * em);
+        var statusW = (int)(5.5 * em);
+        var updatedW = (int)(6.5 * em);
+        var nameW = Math.Max(4 * em, w - sizeW - actionW - statusW - updatedW);
+        _activityListView.Columns[0].Width = nameW;
+        _activityListView.Columns[1].Width = sizeW;
+        _activityListView.Columns[2].Width = actionW;
+        _activityListView.Columns[3].Width = statusW;
+        _activityListView.Columns[4].Width = updatedW;
+    }
+
     private void OnDrawActivitySubItem(object? sender, DrawListViewSubItemEventArgs e)
     {
         if (e.ColumnIndex == 3 && e.SubItem?.Tag is int percent)
@@ -1087,12 +1108,14 @@ sealed class ManageAccountsForm : Form
     private static string FormatRelativeTime(DateTime utcTime, DateTime now)
     {
         var elapsed = now - utcTime;
-        if (elapsed.TotalSeconds < 10)
-            return "just now";
         if (elapsed.TotalSeconds < 60)
-            return $"{(int)elapsed.TotalSeconds} sec ago";
+            return "just now";
+        if (elapsed.TotalMinutes < 2)
+            return "1 min ago";
         if (elapsed.TotalMinutes < 60)
             return $"{(int)elapsed.TotalMinutes} min ago";
+        if (elapsed.TotalHours < 2)
+            return "1 hr ago";
         if (elapsed.TotalHours < 24)
             return $"{(int)elapsed.TotalHours} hr ago";
         return utcTime.ToLocalTime().ToString("g");
