@@ -58,6 +58,9 @@ sealed class ManageAccountsForm : Form
     private record AccountNode(string LoginId, string AccountId, string Name,
         bool IsSynced, bool IsMissing, AccountInfo? SyncInfo);
 
+    // Accounts that are being set up (added via OAuth/token but supervisor not yet created)
+    private readonly HashSet<string> _settingUpAccounts = new();
+
     // Track what's currently displayed in the detail panel to avoid resetting it
     private string? _displayedLoginId;
     private string? _displayedAccountId;
@@ -790,6 +793,25 @@ sealed class ManageAccountsForm : Form
         // Sort: highest progress first, then in-progress without %, then queued/waiting
         desired.Sort((a, b) => b.SortProgress.CompareTo(a.SortProgress));
 
+        // Cap the list: show active items (progress >= -1) individually,
+        // collapse remaining pending items into a single summary row
+        const int MaxVisiblePending = 5;
+        int activeCount = 0;
+        while (activeCount < desired.Count && desired[activeCount].SortProgress >= -1)
+            activeCount++;
+
+        int pendingCount = desired.Count - activeCount;
+        if (pendingCount > MaxVisiblePending)
+        {
+            // Keep active items + a few pending for context + summary row
+            var kept = desired.GetRange(0, activeCount + MaxVisiblePending);
+            int hiddenCount = pendingCount - MaxVisiblePending;
+            kept.Add(("summary:pending", "", "", "",
+                $"+ {hiddenCount:N0} more pending", "",
+                Color.Gray, $"{hiddenCount} additional items queued", null, -3));
+            desired = kept;
+        }
+
         // Toggle between empty label and list view
         if (desired.Count == 0)
         {
@@ -1118,15 +1140,21 @@ sealed class ManageAccountsForm : Form
                 {
                     foreach (var d in disc.Where(d => !syncedIds.Contains(d.AccountId)))
                     {
-                        var node = new TreeNode($"{d.Name} \u2014 Not synced")
+                        var isSettingUp = _settingUpAccounts.Contains(d.AccountId);
+                        var label = isSettingUp ? "Setting up" : "Not synced";
+                        var node = new TreeNode($"{d.Name} \u2014 {label}")
                         {
                             Tag = new AccountNode(loginId, d.AccountId, d.Name,
                                 IsSynced: false, IsMissing: false, SyncInfo: null),
-                            ForeColor = Color.Gray,
+                            ForeColor = isSettingUp ? Color.DodgerBlue : Color.Gray,
                         };
                         loginTreeNode.Nodes.Add(node);
                     }
                 }
+
+                // Clear setting-up flag for accounts that are now synced
+                foreach (var acct in syncedAccounts)
+                    _settingUpAccounts.Remove(acct.AccountId);
             }
 
             _treeView.Nodes.Add(loginTreeNode);
@@ -1227,11 +1255,23 @@ sealed class ManageAccountsForm : Form
         var accounts = _serviceClient.Accounts;
         var accountLookup = accounts.ToDictionary(a => a.AccountId);
 
+        bool needsRebuild = false;
         foreach (TreeNode loginTn in _treeView.Nodes)
         {
             foreach (TreeNode childTn in loginTn.Nodes)
             {
-                if (childTn.Tag is not AccountNode an || !an.IsSynced)
+                if (childTn.Tag is not AccountNode an)
+                    continue;
+
+                // If a non-synced tree node now appears in the accounts list,
+                // the supervisor was created — need a full tree rebuild
+                if (!an.IsSynced && accountLookup.ContainsKey(an.AccountId))
+                {
+                    needsRebuild = true;
+                    continue;
+                }
+
+                if (!an.IsSynced)
                     continue;
 
                 if (!accountLookup.TryGetValue(an.AccountId, out var info))
@@ -1257,6 +1297,12 @@ sealed class ManageAccountsForm : Form
                 // Update the tag with fresh SyncInfo
                 childTn.Tag = an with { SyncInfo = info };
             }
+        }
+
+        if (needsRebuild)
+        {
+            RefreshTree();
+            return;
         }
 
         // If the selected node is a synced account, update the detail panel (status + buttons)
@@ -1337,10 +1383,17 @@ sealed class ManageAccountsForm : Form
                 _syncedAccountPanel.Visible = true;
                 UpdateSyncedAccountLabels(accountNode);
             }
+            else if (_settingUpAccounts.Contains(accountNode.AccountId))
+            {
+                _availableAccountPanel.Visible = true;
+                _availableAccountLabel.Text = $"{accountNode.Name} is being set up...";
+                _addAccountButton.Visible = false;
+            }
             else
             {
                 _availableAccountPanel.Visible = true;
                 _availableAccountLabel.Text = $"{accountNode.Name} is not currently synced.";
+                _addAccountButton.Visible = true;
             }
         }
         else
@@ -1428,7 +1481,13 @@ sealed class ManageAccountsForm : Form
         {
             using var addForm = new AddAccountForm(_serviceClient);
             if (addForm.ShowDialog(this) == DialogResult.OK)
+            {
+                // Mark selected accounts as "Setting up" until their supervisor appears
+                if (addForm.EnabledAccountIds != null)
+                    foreach (var id in addForm.EnabledAccountIds)
+                        _settingUpAccounts.Add(id);
                 _ = RefreshAllLoginAccountsAsync();
+            }
         }
         finally
         {
@@ -1756,6 +1815,7 @@ sealed class ManageAccountsForm : Form
             return;
 
         SetAllButtonsEnabled(false);
+        _settingUpAccounts.Add(accountNode.AccountId);
         try
         {
             await _serviceClient.EnableAccountAsync(accountNode.LoginId, accountNode.AccountId);
@@ -1763,6 +1823,7 @@ sealed class ManageAccountsForm : Form
         }
         catch (Exception ex)
         {
+            _settingUpAccounts.Remove(accountNode.AccountId);
             MessageBox.Show($"Failed to add account: {ex.Message}", "Error",
                 MessageBoxButtons.OK, MessageBoxIcon.Error);
         }

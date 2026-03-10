@@ -156,9 +156,17 @@ public class OutboxProcessor : IDisposable
         }
         catch (IOException ex) when (change.IsDirtyContent)
         {
-            // File locked or still being copied — retry silently
-            Log.Info($"{_logPrefix} Outbox: file not ready for {Path.GetFileName(change.LocalPath)}, will retry ({ex.Message})");
-            _outbox.MarkRetry(change.Id);
+            // File locked or still being copied — retry with limit
+            if (change.AttemptCount + 1 >= MaxAttempts)
+            {
+                Log.Error($"{_logPrefix} Outbox: giving up on inaccessible file after {change.AttemptCount + 1} attempts: {Path.GetFileName(change.LocalPath)}");
+                _outbox.MarkRejected(change.Id, $"File inaccessible: {ex.Message}");
+            }
+            else
+            {
+                Log.Info($"{_logPrefix} Outbox: file not ready for {Path.GetFileName(change.LocalPath)}, will retry ({ex.Message})");
+                _outbox.MarkFailed(change.Id, ex.Message);
+            }
         }
         catch (Exception ex) when (!ct.IsCancellationRequested
             && (ex.Message.Contains("forbidden") || ex.Message.Contains("Forbidden")))
@@ -205,12 +213,34 @@ public class OutboxProcessor : IDisposable
         }
     }
 
+    private const FileAttributes DehydratedFlag = (FileAttributes)0x00400000;
+
     private async Task<bool> ProcessChangeAsync(PendingChange change, CancellationToken ct)
     {
         if (change.IsDeleted)
         {
             await ProcessDeleteAsync(change, ct);
             return true;
+        }
+
+        // Skip upload for dehydrated placeholders — these are server-side files,
+        // not local changes (e.g. stale outbox entry surviving a clean/re-register)
+        if (change.IsDirtyContent && change.LocalPath != null && !change.IsFolder)
+        {
+            try
+            {
+                var attrs = File.GetAttributes(change.LocalPath);
+                if ((attrs & DehydratedFlag) != 0)
+                {
+                    Log.Info($"{_logPrefix} Outbox: skipping dehydrated placeholder {Path.GetFileName(change.LocalPath)}");
+                    return true; // Treat as completed — remove from outbox
+                }
+            }
+            catch (FileNotFoundException)
+            {
+                return true; // File gone — nothing to upload
+            }
+            catch { /* proceed with normal upload attempt */ }
         }
 
         if (change.IsFolder && change.NodeId == null)

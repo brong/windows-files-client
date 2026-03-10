@@ -22,6 +22,9 @@ sealed class AddAccountForm : Form
     private readonly TextBox _statusLabel;
     private readonly LinkLabel _advancedToggle;
 
+    /// <summary>Account IDs selected for sync during this flow.</summary>
+    public HashSet<string>? EnabledAccountIds { get; private set; }
+
     public AddAccountForm(ServiceClient serviceClient)
     {
         _serviceClient = serviceClient;
@@ -194,6 +197,11 @@ sealed class AddAccountForm : Form
 
             var cred = await flow.SignInAsync(progress);
 
+            // Bring app to front after browser auth completes
+            Owner?.Show();
+            Owner?.Activate();
+            Activate();
+
             // Discover accounts
             if (!_serviceClient.IsConnected)
             {
@@ -240,6 +248,7 @@ sealed class AddAccountForm : Form
             }
 
             // Close immediately and add login in the background
+            EnabledAccountIds = enabledAccountIds;
             DialogResult = DialogResult.OK;
             Close();
 
@@ -324,6 +333,7 @@ sealed class AddAccountForm : Form
 
             // Phase 3: Add login via service (no OAuth fields — manual token)
             _statusLabel.Text = "Starting sync...";
+            EnabledAccountIds = enabledAccountIds;
             var addResult = await _serviceClient.AddLoginAsync(sessionUrl, token, enabledAccountIds);
 
             _statusLabel.Text = $"Connected: {addResult.LoginId}";

@@ -65,7 +65,8 @@ internal class SyncRoot : IDisposable
         }
         catch { /* No existing sync root at this path */ }
 
-        var iconResource = iconPath != null
+        // Validate icon path — fall back to shell icon if file is missing
+        var iconResource = iconPath != null && File.Exists(iconPath)
             ? iconPath
             : "%SystemRoot%\\system32\\shell32.dll,-1";
 
@@ -92,7 +93,22 @@ internal class SyncRoot : IDisposable
         if (recycleBinUri != null)
             info.RecycleBinUri = recycleBinUri;
 
-        StorageProviderSyncRootManager.Register(info);
+        // Register with retry — cfapi can transiently fail with 0x80070490
+        // (Element not found) if a previous sync root was recently unregistered.
+        for (int attempt = 0; ; attempt++)
+        {
+            try
+            {
+                StorageProviderSyncRootManager.Register(info);
+                break;
+            }
+            catch (System.Runtime.InteropServices.COMException ex) when (
+                attempt < 3 && (uint)ex.HResult == 0x80070490)
+            {
+                Log.Warn($"{_logPrefix} Register attempt {attempt + 1} failed (0x80070490), retrying...");
+                await Task.Delay(1000 * (attempt + 1));
+            }
+        }
         _registered = true;
         Log.Info($"{_logPrefix} Sync root registered: {_syncRootPath} (id={_syncRootId})");
 

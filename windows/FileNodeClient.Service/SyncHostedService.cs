@@ -102,6 +102,14 @@ sealed class SyncHostedService : BackgroundService
 
     private HashSet<string> _subscribedAccountIds = new();
 
+    // Throttle IPC broadcasts to avoid flooding the App with rapid-fire events
+    // (e.g. thousands of outbox additions when dragging in a large folder)
+    private readonly HashSet<string> _dirtyAccounts = new();
+    private bool _dirtyAggregate;
+    private Timer? _broadcastThrottle;
+    private readonly object _throttleLock = new();
+    private const int BroadcastIntervalMs = 100;
+
     private void SubscribeSupervisorEvents()
     {
         if (_loginManager == null) return;
@@ -126,23 +134,63 @@ sealed class SyncHostedService : BackgroundService
 
     private void OnAggregateStatusChanged(SyncStatus status)
     {
-        if (_handler == null || _ipcServer == null) return;
-        var snapshot = _handler.BuildStatusSnapshot();
-        _ = _ipcServer.BroadcastAsync("statusSnapshot", snapshot);
+        lock (_throttleLock)
+        {
+            _dirtyAggregate = true;
+            _broadcastThrottle ??= new Timer(FlushBroadcasts, null, BroadcastIntervalMs, Timeout.Infinite);
+        }
     }
 
     private void OnSupervisorStatusChanged(AccountSupervisor supervisor)
     {
-        if (_handler == null || _ipcServer == null) return;
-        var payload = _handler.BuildAccountStatus(supervisor);
-        _ = _ipcServer.BroadcastAsync("accountStatusChanged", payload);
+        lock (_throttleLock)
+        {
+            _dirtyAccounts.Add(supervisor.AccountId);
+            _broadcastThrottle ??= new Timer(FlushBroadcasts, null, BroadcastIntervalMs, Timeout.Infinite);
+        }
     }
 
     private void OnSupervisorPendingCountChanged(AccountSupervisor supervisor)
     {
+        lock (_throttleLock)
+        {
+            _dirtyAccounts.Add(supervisor.AccountId);
+            _broadcastThrottle ??= new Timer(FlushBroadcasts, null, BroadcastIntervalMs, Timeout.Infinite);
+        }
+    }
+
+    private void FlushBroadcasts(object? state)
+    {
         if (_handler == null || _ipcServer == null) return;
-        var payload = _handler.BuildAccountStatus(supervisor);
-        _ = _ipcServer.BroadcastAsync("accountStatusChanged", payload);
+
+        bool sendAggregate;
+        List<string> accountIds;
+
+        lock (_throttleLock)
+        {
+            sendAggregate = _dirtyAggregate;
+            _dirtyAggregate = false;
+            accountIds = _dirtyAccounts.ToList();
+            _dirtyAccounts.Clear();
+            _broadcastThrottle?.Dispose();
+            _broadcastThrottle = null;
+        }
+
+        if (sendAggregate)
+        {
+            var snapshot = _handler.BuildStatusSnapshot();
+            _ = _ipcServer.BroadcastAsync("statusSnapshot", snapshot);
+        }
+
+        foreach (var accountId in accountIds)
+        {
+            var supervisor = _loginManager?.Supervisors.FirstOrDefault(s => s.AccountId == accountId);
+            if (supervisor != null)
+            {
+                var payload = _handler.BuildAccountStatus(supervisor);
+                _ = _ipcServer.BroadcastAsync("accountStatusChanged", payload);
+            }
+        }
     }
 
     private static async Task<string?> DownloadIconAsync(CancellationToken ct)

@@ -678,11 +678,9 @@ public class SyncEngine : IDisposable
                         _hydrationGate.Wait(kvp.Value.Token);
                         try
                         {
-                            int count = HydrateDehydratedFiles(kvp.Key, kvp.Value.Token);
+                            var (count, allHydrated) = HydrateDehydratedFiles(kvp.Key, kvp.Value.Token);
                             if (count > 0)
-                                Log.Info($"{_logPrefix} Hydrated {count} files in pinned directory: {kvp.Key}");
-                            try { SetInSync(kvp.Key); }
-                            catch { /* directory might not be a placeholder */ }
+                                Log.Info($"{_logPrefix} Hydrated {count} files in pinned directory: {kvp.Key}{(allHydrated ? "" : " (some files still dehydrated)")}");
                         }
                         finally { _hydrationGate.Release(); }
                     }
@@ -1463,11 +1461,9 @@ public class SyncEngine : IDisposable
                     _hydrationGate.Wait(cts.Token);
                     try
                     {
-                        int count = HydrateDehydratedFiles(info.DirectoryPath, cts.Token);
+                        var (count, allHydrated) = HydrateDehydratedFiles(info.DirectoryPath, cts.Token);
                         if (count > 0)
-                            Log.Info($"{_logPrefix} Hydrated {count} files after directory populated: {info.DirectoryPath}");
-                        try { SetInSync(info.DirectoryPath); }
-                        catch { /* directory might not be a placeholder */ }
+                            Log.Info($"{_logPrefix} Hydrated {count} files after directory populated: {info.DirectoryPath}{(allHydrated ? "" : " (some files still dehydrated)")}");
                     }
                     finally { _hydrationGate.Release(); }
                 }
@@ -1496,11 +1492,9 @@ public class SyncEngine : IDisposable
                     _hydrationGate.Wait(cts.Token);
                     try
                     {
-                        int count = HydrateDehydratedFiles(directoryPath, cts.Token);
+                        var (count, allHydrated) = HydrateDehydratedFiles(directoryPath, cts.Token);
                         if (count > 0)
-                            Log.Info($"{_logPrefix} Hydrated {count} files in {directoryPath}");
-                        try { SetInSync(directoryPath); }
-                        catch { /* directory might not be a placeholder */ }
+                            Log.Info($"{_logPrefix} Hydrated {count} files in {directoryPath}{(allHydrated ? "" : " (some files still dehydrated)")}");
                     }
                     finally { _hydrationGate.Release(); }
                 }
@@ -1816,19 +1810,20 @@ public class SyncEngine : IDisposable
 
     /// <summary>
     /// Hydrate all dehydrated files in a directory (recursively).
-    /// Returns the number of files hydrated.  Throws OperationCanceledException
-    /// if the cancellation token fires (e.g. directory was unpinned).
+    /// Returns (count of files hydrated, true if ALL files are now hydrated).
+    /// Throws OperationCanceledException if the cancellation token fires.
     /// </summary>
-    private int HydrateDehydratedFiles(string directoryPath, CancellationToken ct)
+    private (int Count, bool AllHydrated) HydrateDehydratedFiles(string directoryPath, CancellationToken ct)
     {
         if (!Directory.Exists(directoryPath))
-            return 0;
+            return (0, true);
 
         _hydratingDirectories.TryAdd(directoryPath, 0);
         try
         {
             const FileAttributes dehydratedFlag = (FileAttributes)0x00400000; // FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
             int count = 0;
+            bool allHydrated = true;
             var failed = new List<string>();
 
             // Pre-scan: collect all dehydrated files and add to pending queue
@@ -1914,6 +1909,9 @@ public class SyncEngine : IDisposable
                 failed = stillFailed;
             }
 
+            if (failed.Count > 0)
+                allHydrated = false;
+
             // Mark hydrated files as in-sync so they don't show "syncing"
             // (TransferError during a failed FETCH_DATA marks the placeholder not-in-sync).
             // Only mark files that are NOT still dehydrated — failed files should remain
@@ -1924,7 +1922,10 @@ public class SyncEngine : IDisposable
                 {
                     var attrs = File.GetAttributes(filePath);
                     if ((attrs & dehydratedFlag) != 0)
+                    {
+                        allHydrated = false;
                         continue; // Still dehydrated — don't mark in-sync
+                    }
                     SetInSync(filePath);
                 }
                 catch { /* not a placeholder or file gone — ignore */ }
@@ -1938,7 +1939,18 @@ public class SyncEngine : IDisposable
                 ct.ThrowIfCancellationRequested();
                 if (_pinnedDirectories.TryGetValue(directoryPath, out var parentCts))
                     _pinnedDirectories.TryAdd(subDir, parentCts);
-                count += HydrateDehydratedFiles(subDir, ct);
+                var (subCount, subAllHydrated) = HydrateDehydratedFiles(subDir, ct);
+                count += subCount;
+                if (!subAllHydrated)
+                    allHydrated = false;
+            }
+
+            // Only mark this directory in-sync if all files (including subdirectories)
+            // are fully hydrated — prevents premature green checkmark on parent folders.
+            if (allHydrated)
+            {
+                try { SetInSync(directoryPath); }
+                catch { /* directory might not be a placeholder */ }
             }
 
             // Clean up any lingering pending entries for this directory
@@ -1951,7 +1963,7 @@ public class SyncEngine : IDisposable
             if (_pendingHydrations.IsEmpty && _activeDownloads.IsEmpty)
                 ActiveDownloadCountChanged?.Invoke(0);
 
-            return count;
+            return (count, allHydrated);
         }
         finally
         {
