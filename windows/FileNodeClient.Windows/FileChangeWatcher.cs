@@ -129,15 +129,15 @@ internal sealed class FileChangeWatcher : IDisposable
             if ((attrs & pinnedFlag) != 0)
             {
                 if (Directory.Exists(path))
-                    OnDirectoryPinned?.Invoke(path);
+                    Log.SafeInvoke(() => OnDirectoryPinned?.Invoke(path), "FileChangeWatcher.OnDirectoryPinned");
                 else
-                    OnFilePinned?.Invoke(path);
+                    Log.SafeInvoke(() => OnFilePinned?.Invoke(path), "FileChangeWatcher.OnFilePinned");
                 return;
             }
 
             if ((attrs & unpinnedFlag) != 0)
             {
-                OnFileUnpinned?.Invoke(path);
+                Log.SafeInvoke(() => OnFileUnpinned?.Invoke(path), "FileChangeWatcher.OnFileUnpinned");
                 return;
             }
 

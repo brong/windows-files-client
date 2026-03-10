@@ -105,6 +105,7 @@ sealed class SyncHostedService : BackgroundService
     // Throttle IPC broadcasts to avoid flooding the App with rapid-fire events
     // (e.g. thousands of outbox additions when dragging in a large folder)
     private readonly HashSet<string> _dirtyAccounts = new();
+    private readonly HashSet<string> _dirtyActivity = new();
     private bool _dirtyAggregate;
     private Timer? _broadcastThrottle;
     private readonly object _throttleLock = new();
@@ -121,6 +122,8 @@ sealed class SyncHostedService : BackgroundService
                 supervisor.StatusChanged += OnSupervisorStatusChanged;
                 supervisor.StatusDetailChanged += OnSupervisorStatusChanged;
                 supervisor.PendingCountChanged += OnSupervisorPendingCountChanged;
+                supervisor.QuotaChanged += OnSupervisorStatusChanged;
+                supervisor.ActivityChanged += OnSupervisorActivityChanged;
             }
         }
     }
@@ -129,7 +132,7 @@ sealed class SyncHostedService : BackgroundService
     {
         if (_handler == null || _ipcServer == null) return;
         var payload = _handler.BuildAccountsChanged();
-        _ = _ipcServer.BroadcastAsync("accountsChanged", payload);
+        Log.FireAndForget(_ipcServer.BroadcastAsync("accountsChanged", payload), "BroadcastAccountsChanged");
     }
 
     private void OnAggregateStatusChanged(SyncStatus status)
@@ -159,12 +162,22 @@ sealed class SyncHostedService : BackgroundService
         }
     }
 
+    private void OnSupervisorActivityChanged(AccountSupervisor supervisor)
+    {
+        lock (_throttleLock)
+        {
+            _dirtyActivity.Add(supervisor.AccountId);
+            _broadcastThrottle ??= new Timer(FlushBroadcasts, null, BroadcastIntervalMs, Timeout.Infinite);
+        }
+    }
+
     private void FlushBroadcasts(object? state)
     {
         if (_handler == null || _ipcServer == null) return;
 
         bool sendAggregate;
         List<string> accountIds;
+        List<string> activityAccountIds;
 
         lock (_throttleLock)
         {
@@ -172,6 +185,8 @@ sealed class SyncHostedService : BackgroundService
             _dirtyAggregate = false;
             accountIds = _dirtyAccounts.ToList();
             _dirtyAccounts.Clear();
+            activityAccountIds = _dirtyActivity.ToList();
+            _dirtyActivity.Clear();
             _broadcastThrottle?.Dispose();
             _broadcastThrottle = null;
         }
@@ -179,7 +194,7 @@ sealed class SyncHostedService : BackgroundService
         if (sendAggregate)
         {
             var snapshot = _handler.BuildStatusSnapshot();
-            _ = _ipcServer.BroadcastAsync("statusSnapshot", snapshot);
+            Log.FireAndForget(_ipcServer.BroadcastAsync("statusSnapshot", snapshot), "BroadcastStatusSnapshot");
         }
 
         foreach (var accountId in accountIds)
@@ -188,7 +203,18 @@ sealed class SyncHostedService : BackgroundService
             if (supervisor != null)
             {
                 var payload = _handler.BuildAccountStatus(supervisor);
-                _ = _ipcServer.BroadcastAsync("accountStatusChanged", payload);
+                Log.FireAndForget(_ipcServer.BroadcastAsync("accountStatusChanged", payload), "BroadcastAccountStatus");
+            }
+        }
+
+        foreach (var accountId in activityAccountIds)
+        {
+            var supervisor = _loginManager?.Supervisors.FirstOrDefault(s => s.AccountId == accountId);
+            if (supervisor != null)
+            {
+                var activitySnapshot = _handler.BuildActivitySnapshot(supervisor);
+                if (activitySnapshot != null)
+                    Log.FireAndForget(_ipcServer.BroadcastAsync("activityChanged", activitySnapshot), "BroadcastActivityChanged");
             }
         }
     }

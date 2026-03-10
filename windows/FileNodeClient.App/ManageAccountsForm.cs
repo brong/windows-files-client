@@ -14,7 +14,7 @@ sealed class ManageAccountsForm : Form
     private readonly System.Windows.Forms.Timer _refreshTimer;
     private readonly System.Windows.Forms.Timer _statusDebounceTimer;
     private readonly System.Windows.Forms.Timer _accountsDebounceTimer;
-    private readonly System.Windows.Forms.Timer _outboxTimer;
+    private readonly System.Windows.Forms.Timer _activityDebounceTimer;
 
     // Detail panel controls — login selected
     private readonly Panel _loginPanel;
@@ -66,8 +66,7 @@ sealed class ManageAccountsForm : Form
     private string? _displayedAccountId;
     private bool _suppressSelectionChanged;
     private bool _operationInProgress;
-    private bool _outboxDirty = true;
-    private bool _hasActiveTransfers;
+    private readonly Dictionary<string, ActivitySnapshot> _activityCache = new();
     private readonly Button _addLoginButton;
     private readonly Button _startServiceButton;
     private readonly Button _stopServiceButton;
@@ -404,6 +403,12 @@ sealed class ManageAccountsForm : Form
 
         _detailPanel.Controls.AddRange([_loginPanel, _syncedAccountPanel, _availableAccountPanel, _noSelectionLabel, _activityEmptyLabel, _activityListView]);
 
+        // WinForms docks back-to-front (highest index first). Fill controls
+        // must be at the front (lowest index, processed last) so they get
+        // the remaining space after all Top panels are laid out.
+        _activityListView.BringToFront();
+        _activityEmptyLabel.BringToFront();
+
         // --- Bottom bar ---
         var bottomPanel = new Panel
         {
@@ -516,19 +521,20 @@ sealed class ManageAccountsForm : Form
 
         _serviceClient.StatusChanged += () =>
         {
-            _outboxDirty = true;
             if (InvokeRequired)
                 BeginInvoke(() => _statusDebounceTimer.Start());
             else
                 _statusDebounceTimer.Start();
         };
 
+        _serviceClient.ActivityChanged += OnActivityPushed;
+
         _serviceClient.ConnectionChanged += connected =>
         {
             if (InvokeRequired)
-                BeginInvoke(() => UpdateServiceButtons());
+                BeginInvoke(() => { UpdateServiceButtons(); if (!connected) { _activityCache.Clear(); RefreshActivityFromCache(); } });
             else
-                UpdateServiceButtons();
+            { UpdateServiceButtons(); if (!connected) { _activityCache.Clear(); RefreshActivityFromCache(); } }
         };
 
         // Safety-net timer
@@ -536,9 +542,13 @@ sealed class ManageAccountsForm : Form
         _refreshTimer.Tick += (_, _) => UpdateStatusText();
         _refreshTimer.Start();
 
-        // Outbox polling timer for inline activity display
-        _outboxTimer = new System.Windows.Forms.Timer { Interval = 500 };
-        _outboxTimer.Tick += OnOutboxTick;
+        // Debounce timer for batching rapid activity pushes into single UI update
+        _activityDebounceTimer = new System.Windows.Forms.Timer { Interval = 50 };
+        _activityDebounceTimer.Tick += (_, _) =>
+        {
+            _activityDebounceTimer.Stop();
+            RefreshActivityFromCache();
+        };
 
         RefreshTree();
         _ = RefreshAllLoginAccountsAsync();
@@ -654,74 +664,78 @@ sealed class ManageAccountsForm : Form
             TrayIcon.OpenSyncFolder(accountNode.SyncInfo.SyncRootPath);
     }
 
-    private async void OnOutboxTick(object? sender, EventArgs e)
+    private void OnActivityPushed(ActivitySnapshot snapshot)
     {
-        if (!_outboxDirty && !_hasActiveTransfers)
-            return;
+        if (InvokeRequired) { BeginInvoke(() => OnActivityPushed(snapshot)); return; }
+        if (!Visible) return;
+        _activityCache[snapshot.AccountId] = snapshot;
+        _activityDebounceTimer.Start(); // Restarts 50ms debounce
+    }
 
-        _outboxDirty = false;
-
-        // When disconnected, hide activity pane entirely
+    private void RefreshActivityFromCache()
+    {
         if (!_serviceClient.IsConnected)
         {
             _activityListView.Visible = false;
             _activityEmptyLabel.Visible = false;
             _activityListView.Items.Clear();
-            _hasActiveTransfers = false;
+            _activityCache.Clear();
             return;
         }
 
-        // Poll all synced accounts concurrently
-        var syncedAccounts = _serviceClient.Accounts
-            .Where(a => a.Status != AccountStatus.Idle || a.PendingCount > 0 || _hasActiveTransfers)
-            .ToList();
+        var allEntries = new List<(string DisplayName, string AccountId, string LoginId, OutboxEntry Entry)>();
+        var allDownloads = new List<(string DisplayName, string AccountId, string LoginId, ActiveDownloadEntry Download)>();
 
-        // If nothing looks active, still poll all synced accounts (they may have queued items)
-        if (syncedAccounts.Count == 0)
-            syncedAccounts = _serviceClient.Accounts.ToList();
-
-        if (syncedAccounts.Count == 0)
+        var accounts = _serviceClient.Accounts;
+        foreach (var acct in accounts)
         {
-            if (_activityListView.Items.Count > 0)
-                RefreshActivityList(new(), new());
-            return;
+            if (!_activityCache.TryGetValue(acct.AccountId, out var snap)) continue;
+
+            // Combine entries in order: active, errors, pending
+            foreach (var entry in snap.ActiveEntries)
+                allEntries.Add((acct.DisplayName, acct.AccountId, acct.LoginId, entry));
+            foreach (var entry in snap.ErrorEntries)
+                allEntries.Add((acct.DisplayName, acct.AccountId, acct.LoginId, entry));
+            foreach (var entry in snap.PendingEntries)
+                allEntries.Add((acct.DisplayName, acct.AccountId, acct.LoginId, entry));
+
+            if (snap.ActiveDownloads is { } dls)
+                foreach (var dl in dls)
+                    allDownloads.Add((acct.DisplayName, acct.AccountId, acct.LoginId, dl));
         }
 
+        // Filter by tree selection
+        var node = _treeView.SelectedNode;
+        if (node?.Tag is AccountNode selAccount)
+        {
+            allEntries = allEntries.Where(e => e.AccountId == selAccount.AccountId).ToList();
+            allDownloads = allDownloads.Where(d => d.AccountId == selAccount.AccountId).ToList();
+        }
+        else if (node?.Tag is LoginNode selLogin)
+        {
+            allEntries = allEntries.Where(e => e.LoginId == selLogin.LoginId).ToList();
+            allDownloads = allDownloads.Where(d => d.LoginId == selLogin.LoginId).ToList();
+        }
+
+        RefreshActivityList(allEntries, allDownloads);
+    }
+
+    private async void FetchInitialActivity()
+    {
         try
         {
-            var tasks = syncedAccounts.Select(a => _serviceClient.GetOutboxAsync(a.AccountId)).ToList();
-            var snapshots = await Task.WhenAll(tasks);
+            var accounts = _serviceClient.Accounts;
+            var tasks = accounts.Select(a => _serviceClient.GetActivityAsync(a.AccountId)).ToList();
+            var results = await Task.WhenAll(tasks);
 
-            var allEntries = new List<(string DisplayName, string AccountId, string LoginId, OutboxEntry Entry)>();
-            var allDownloads = new List<(string DisplayName, string AccountId, string LoginId, ActiveDownloadEntry Download)>();
-            for (int i = 0; i < snapshots.Length; i++)
-            {
-                var acct = syncedAccounts[i];
-                foreach (var entry in snapshots[i].Entries)
-                    allEntries.Add((acct.DisplayName, acct.AccountId, acct.LoginId, entry));
-                if (snapshots[i].ActiveDownloads is { } dls)
-                    foreach (var dl in dls)
-                        allDownloads.Add((acct.DisplayName, acct.AccountId, acct.LoginId, dl));
-            }
+            for (int i = 0; i < results.Length; i++)
+                _activityCache[results[i].AccountId] = results[i];
 
-            // Filter by tree selection
-            var node = _treeView.SelectedNode;
-            if (node?.Tag is AccountNode selAccount)
-            {
-                allEntries = allEntries.Where(e => e.AccountId == selAccount.AccountId).ToList();
-                allDownloads = allDownloads.Where(d => d.AccountId == selAccount.AccountId).ToList();
-            }
-            else if (node?.Tag is LoginNode selLogin)
-            {
-                allEntries = allEntries.Where(e => e.LoginId == selLogin.LoginId).ToList();
-                allDownloads = allDownloads.Where(d => d.LoginId == selLogin.LoginId).ToList();
-            }
-
-            RefreshActivityList(allEntries, allDownloads);
+            RefreshActivityFromCache();
         }
         catch
         {
-            // IPC not available — leave list as-is
+            // IPC not available
         }
     }
 
@@ -818,7 +832,6 @@ sealed class ManageAccountsForm : Form
             _activityListView.Visible = false;
             _activityEmptyLabel.Visible = true;
             _activityListView.Items.Clear();
-            _hasActiveTransfers = false;
             return;
         }
 
@@ -880,7 +893,6 @@ sealed class ManageAccountsForm : Form
             _activityListView.Items.RemoveAt(_activityListView.Items.Count - 1);
 
         _activityListView.EndUpdate();
-        _hasActiveTransfers = entries.Any(e => e.Entry.IsProcessing) || downloads.Count > 0;
     }
 
     private void UpdateItemFields(ListViewItem item,
@@ -1344,7 +1356,7 @@ sealed class ManageAccountsForm : Form
         _displayedLoginId = null;
         _displayedAccountId = null;
 
-        // (outbox timer runs globally, not tied to selection)
+        // (activity pushes run globally, not tied to selection)
 
         if (node == null)
         {
@@ -1358,7 +1370,7 @@ sealed class ManageAccountsForm : Form
                 // No selection — show all activity (unfiltered)
                 _noSelectionLabel.Visible = false;
             }
-            _outboxDirty = true;
+            FetchInitialActivity();
             return;
         }
 
@@ -1400,6 +1412,8 @@ sealed class ManageAccountsForm : Form
         {
             _noSelectionLabel.Visible = true;
         }
+
+        FetchInitialActivity();
     }
 
     private void UpdateSyncedAccountLabels(AccountNode accountNode)
@@ -1892,8 +1906,7 @@ sealed class ManageAccountsForm : Form
         base.OnVisibleChanged(e);
         if (Visible)
         {
-            _outboxDirty = true;
-            _outboxTimer.Start();
+            FetchInitialActivity();
             EnsureOnScreen();
             // Briefly set TopMost to ensure the panel appears above other windows
             TopMost = true;
@@ -1901,7 +1914,7 @@ sealed class ManageAccountsForm : Form
         }
         else
         {
-            _outboxTimer.Stop();
+            _activityCache.Clear();
         }
     }
 
@@ -2014,8 +2027,8 @@ sealed class ManageAccountsForm : Form
             Hide();
             return;
         }
-        _outboxTimer.Stop();
-        _outboxTimer.Dispose();
+        _activityDebounceTimer.Stop();
+        _activityDebounceTimer.Dispose();
         _refreshTimer.Stop();
         _refreshTimer.Dispose();
         _statusDebounceTimer.Stop();

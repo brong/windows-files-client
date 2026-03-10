@@ -498,26 +498,42 @@ public class OutboxProcessor : IDisposable
         return true;
     }
 
+    private const int StallTimeoutSeconds = 30;
+
     private async Task<string> UploadFileContentAsync(
         PendingChange change, FileStream fileStream, string contentType, CancellationToken ct)
     {
         var fileLength = fileStream.Length;
         var chunkSize = _jmapClient.ChunkSize;
-        var timeoutSeconds = (int)(fileLength / 25_000) + 120;
         using var uploadCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        uploadCts.CancelAfter(TimeSpan.FromSeconds(timeoutSeconds));
+
+        // Stall timer: cancel if no bytes move for StallTimeoutSeconds.
+        // Reset on every progress callback (fires each 1% of file size).
+        var stallTimeout = TimeSpan.FromSeconds(StallTimeoutSeconds);
+        using var stallTimer = new Timer(_ =>
+        {
+            Log.Info($"{_logPrefix} Outbox: upload stalled for {Path.GetFileName(change.LocalPath)}, cancelling");
+            try { uploadCts.Cancel(); } catch { }
+        }, null, stallTimeout, Timeout.InfiniteTimeSpan);
+
+        void ResetStall() { try { stallTimer.Change(stallTimeout, Timeout.InfiniteTimeSpan); } catch { } }
+
+        void OnProgress(int percent)
+        {
+            _outbox.UpdateProgress(change.Id, percent);
+            ResetStall();
+        }
 
         if (chunkSize.HasValue && fileLength > chunkSize.Value)
         {
             return await _queue.EnqueueAsync(QueuePriority.Background,
                 () => _jmapClient.UploadBlobChunkedAsync(
                     fileStream, contentType, fileLength,
-                    percent => _outbox.UpdateProgress(change.Id, percent),
+                    OnProgress,
                     uploadCts.Token), ct);
         }
 
-        using var stream = new ProgressStream(fileStream, fileLength,
-            percent => _outbox.UpdateProgress(change.Id, percent));
+        using var stream = new ProgressStream(fileStream, fileLength, OnProgress, ResetStall);
         return await _queue.EnqueueAsync(QueuePriority.Background,
             () => _jmapClient.UploadBlobAsync(stream, contentType, uploadCts.Token), ct);
     }

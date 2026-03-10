@@ -64,6 +64,7 @@ public class SyncOutbox : IDisposable
     private readonly ConcurrentDictionary<Guid, int> _uploadProgress = new();
 
     public event Action<int>? PendingCountChanged;
+    public event Action? Changed;
 
     private readonly string _logPrefix;
 
@@ -485,7 +486,11 @@ public class SyncOutbox : IDisposable
     }
 
     /// <summary>Update transient upload progress for a pending change.</summary>
-    public void UpdateProgress(Guid id, int percent) => _uploadProgress[id] = percent;
+    public void UpdateProgress(Guid id, int percent)
+    {
+        _uploadProgress[id] = percent;
+        Log.SafeInvoke(() => Changed?.Invoke(), "SyncOutbox.UpdateProgress.Changed");
+    }
 
     /// <summary>Get current upload progress for a pending change, if any.</summary>
     public int? GetProgress(Guid id) => _uploadProgress.TryGetValue(id, out var p) ? p : null;
@@ -625,7 +630,8 @@ public class SyncOutbox : IDisposable
 
     private void RaisePendingCountChanged()
     {
-        PendingCountChanged?.Invoke(PendingCount);
+        Log.SafeInvoke(() => PendingCountChanged?.Invoke(PendingCount), "SyncOutbox.PendingCountChanged");
+        Log.SafeInvoke(() => Changed?.Invoke(), "SyncOutbox.Changed");
     }
 
     public void Dispose()

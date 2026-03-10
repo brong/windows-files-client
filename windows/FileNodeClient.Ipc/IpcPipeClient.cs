@@ -56,7 +56,11 @@ public sealed class IpcPipeClient : IDisposable
         var tcs = new TaskCompletionSource<IpcMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
         _pending[id] = tcs;
 
-        using var reg = ct.Register(() =>
+        // Combine caller's token with a 60-second timeout to prevent orphaned requests
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeoutCts.CancelAfter(TimeSpan.FromSeconds(60));
+
+        using var reg = timeoutCts.Token.Register(() =>
         {
             if (_pending.TryRemove(id, out var removed))
                 removed.TrySetCanceled();
@@ -111,13 +115,13 @@ public sealed class IpcPipeClient : IDisposable
                 {
                     wasConnected = false;
                     FailAllPending();
-                    ConnectionChanged?.Invoke(false);
+                    Log.SafeInvoke(() => ConnectionChanged?.Invoke(false), "IpcPipeClient.Disconnected");
                     await Task.Delay(IpcConstants.ReconnectDelayMs, ct);
                 }
 
                 await ConnectAsync(ct);
                 wasConnected = true;
-                ConnectionChanged?.Invoke(true);
+                Log.SafeInvoke(() => ConnectionChanged?.Invoke(true), "IpcPipeClient.Connected");
 
                 // Request initial status — fire result as a push so consumers handle it uniformly
                 _ = Task.Run(async () =>
@@ -126,7 +130,7 @@ public sealed class IpcPipeClient : IDisposable
                     {
                         var result = await CallAsync("getStatus", null, ct);
                         if (result is IpcResponse response)
-                            PushReceived?.Invoke(new IpcPush("statusSnapshot", response.Result));
+                            Log.SafeInvoke(() => PushReceived?.Invoke(new IpcPush("statusSnapshot", response.Result)), "IpcPipeClient.InitialStatus");
                     }
                     catch (Exception ex)
                     {
@@ -209,7 +213,7 @@ public sealed class IpcPipeClient : IDisposable
 
                             case IpcPush push:
                                 Log.Debug($"[IPC Client] Push method={push.Method}");
-                                PushReceived?.Invoke(push);
+                                Log.SafeInvoke(() => PushReceived?.Invoke(push), "IpcPipeClient.PushReceived");
                                 break;
                         }
                     }
@@ -240,7 +244,7 @@ public sealed class IpcPipeClient : IDisposable
         FailAllPending();
         Cleanup();
         if (wasConnected)
-            ConnectionChanged?.Invoke(false);
+            Log.SafeInvoke(() => ConnectionChanged?.Invoke(false), "IpcPipeClient.FinalDisconnect");
     }
 
     private void FailAllPending()

@@ -50,6 +50,7 @@ sealed class AccountSupervisor : IDisposable
     public event Action<AccountSupervisor>? StatusDetailChanged;
     public event Action<AccountSupervisor>? PendingCountChanged;
     public event Action<AccountSupervisor>? QuotaChanged;
+    public event Action<AccountSupervisor>? ActivityChanged;
 
     public AccountSupervisor(IJmapClient jmapClient, string syncRootPath, string displayName, bool debug)
     {
@@ -78,6 +79,7 @@ sealed class AccountSupervisor : IDisposable
         _engine.StatusDetailChanged += OnEngineStatusDetailChanged;
         _engine.PendingCountChanged += OnEnginePendingCountChanged;
         _engine.ActiveDownloadCountChanged += OnEngineActiveDownloadCountChanged;
+        _engine.ActivityChanged += OnEngineActivityChanged;
 
         // Register sync root
         Log.Info($"[{_displayName}] Registering sync root...");
@@ -161,13 +163,13 @@ sealed class AccountSupervisor : IDisposable
         {
             Log.Warn($"[{_displayName}] Disk space low ({freeBytes / (1024 * 1024)}MB free) — pausing sync");
             _engine?.Pause(SyncPauseReason.DiskFull);
-            StatusChanged?.Invoke(this);
+            Log.SafeInvoke(() => StatusChanged?.Invoke(this), "AccountSupervisor.DiskLow.StatusChanged");
         }
         else if (isPausedForDisk && freeBytes > DiskResumeThresholdBytes)
         {
             Log.Info($"[{_displayName}] Disk space restored ({freeBytes / (1024 * 1024)}MB free) — resuming sync");
             _engine?.Resume(SyncPauseReason.DiskFull);
-            StatusChanged?.Invoke(this);
+            Log.SafeInvoke(() => StatusChanged?.Invoke(this), "AccountSupervisor.DiskResume.StatusChanged");
         }
     }
 
@@ -250,27 +252,30 @@ sealed class AccountSupervisor : IDisposable
     private void OnEngineStatusChanged(SyncStatus status)
     {
         Status = status;
-        StatusChanged?.Invoke(this);
+        Log.SafeInvoke(() => StatusChanged?.Invoke(this), "AccountSupervisor.StatusChanged");
     }
 
     private void OnEngineStatusDetailChanged(string? detail)
     {
         StatusDetail = detail;
-        StatusDetailChanged?.Invoke(this);
+        Log.SafeInvoke(() => StatusDetailChanged?.Invoke(this), "AccountSupervisor.StatusDetailChanged");
     }
 
     private void OnEnginePendingCountChanged(int count)
     {
         PendingCount = count;
-        PendingCountChanged?.Invoke(this);
+        Log.SafeInvoke(() => PendingCountChanged?.Invoke(this), "AccountSupervisor.PendingCountChanged");
     }
 
     private void OnEngineActiveDownloadCountChanged(int count)
     {
         // When downloads start/stop, fire StatusChanged so the tray icon
         // reflects Syncing (blue) while downloads are active.
-        StatusChanged?.Invoke(this);
+        Log.SafeInvoke(() => StatusChanged?.Invoke(this), "AccountSupervisor.ActiveDownloadCountChanged");
     }
+
+    private void OnEngineActivityChanged() =>
+        Log.SafeInvoke(() => ActivityChanged?.Invoke(this), "AccountSupervisor.ActivityChanged");
 
     private void UpdateQuota(Quota[]? quotas)
     {
@@ -292,7 +297,7 @@ sealed class AccountSupervisor : IDisposable
         QuotaLimit = octetsQuota.HardLimit;
 
         if (oldUsed != QuotaUsed || oldLimit != QuotaLimit)
-            QuotaChanged?.Invoke(this);
+            Log.SafeInvoke(() => QuotaChanged?.Invoke(this), "AccountSupervisor.QuotaChanged");
     }
 
     public void Dispose()

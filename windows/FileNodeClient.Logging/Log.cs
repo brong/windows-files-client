@@ -16,4 +16,24 @@ public static class Log
     {
         if (level >= MinLevel) Sink?.Invoke(level, msg);
     }
+
+    /// <summary>
+    /// Invoke a delegate safely, catching and logging any subscriber exception.
+    /// Prevents unhandled exceptions from crashing the process when firing events.
+    /// </summary>
+    public static void SafeInvoke(Action action, string context)
+    {
+        try { action(); }
+        catch (Exception ex) { Error($"[{context}] Event handler threw: {ex.Message}"); }
+    }
+
+    /// <summary>
+    /// Await a fire-and-forget task safely, catching and logging any exception.
+    /// Prevents unobserved task exceptions from crashing the process.
+    /// </summary>
+    public static async void FireAndForget(Task task, string context)
+    {
+        try { await task.ConfigureAwait(false); }
+        catch (Exception ex) { Error($"[{context}] Fire-and-forget task failed: {ex.Message}"); }
+    }
 }

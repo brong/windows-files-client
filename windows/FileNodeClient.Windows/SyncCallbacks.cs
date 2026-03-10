@@ -23,13 +23,13 @@ internal class SyncCallbacks
     /// to avoid re-uploading a file that was just downloaded while still
     /// detecting real edits.
     /// </summary>
-    public ConcurrentDictionary<string, DateTime> RecentlyHydrated { get; } = new();
+    public ConcurrentDictionary<string, (DateTime Mtime, DateTime AddedAt)> RecentlyHydrated { get; } = new();
 
     /// <summary>
     /// In-flight hydration requests keyed by TransferKey, so CANCEL_FETCH_DATA
     /// can cancel the corresponding download.
     /// </summary>
-    private readonly ConcurrentDictionary<long, (CancellationTokenSource Cts, string? NodeId)> _inFlightFetches = new();
+    private readonly ConcurrentDictionary<long, (CancellationTokenSource Cts, string? NodeId, DateTime StartedAt)> _inFlightFetches = new();
 
     /// <summary>
     /// Whether the server supports HTTP Range requests. Set to false after
@@ -69,7 +69,7 @@ internal class SyncCallbacks
     /// </summary>
     public bool IsHydrating(string nodeId)
     {
-        foreach (var (_, (_, nid)) in _inFlightFetches)
+        foreach (var (_, (_, nid, _)) in _inFlightFetches)
         {
             if (nid == nodeId)
                 return true;
@@ -98,6 +98,43 @@ internal class SyncCallbacks
 
     public record DirectoryPopulatedInfo(string DirectoryPath);
     public event Action<DirectoryPopulatedInfo>? OnDirectoryPopulated;
+
+    /// <summary>
+    /// Remove stale entries from unbounded collections. Called periodically by SyncEngine.
+    /// </summary>
+    public void CleanupStaleEntries()
+    {
+        var cutoff = DateTime.UtcNow.AddMinutes(-10);
+        var fetchCutoff = DateTime.UtcNow.AddMinutes(-30);
+
+        // Clean RecentlyHydrated entries older than 10 minutes
+        foreach (var kvp in RecentlyHydrated)
+        {
+            if (kvp.Value.AddedAt < cutoff)
+                RecentlyHydrated.TryRemove(kvp.Key, out _);
+        }
+
+        // Clean stale in-flight fetches older than 30 minutes (cancelled + removed)
+        foreach (var kvp in _inFlightFetches)
+        {
+            if (kvp.Value.StartedAt < fetchCutoff)
+            {
+                if (_inFlightFetches.TryRemove(kvp.Key, out var entry))
+                {
+                    try { entry.Cts.Cancel(); } catch { }
+                    entry.Cts.Dispose();
+                }
+            }
+        }
+
+        // Clean stale open file tracking entries older than 24 hours
+        var openCutoff = DateTime.UtcNow.AddHours(-24);
+        foreach (var kvp in _openFiles)
+        {
+            if (kvp.Value.LastWriteTimeAtOpen < openCutoff)
+                _openFiles.TryRemove(kvp.Key, out _);
+        }
+    }
 
     public SyncCallbacks(IJmapClient jmapClient, JmapQueue queue, string logPrefix)
     {
@@ -209,7 +246,7 @@ internal class SyncCallbacks
 
             // Notify SyncEngine so it can hydrate pinned files in this directory
             var dirPath = ExtractFullPath(callbackInfo);
-            OnDirectoryPopulated?.Invoke(new DirectoryPopulatedInfo(dirPath));
+            Log.SafeInvoke(() => OnDirectoryPopulated?.Invoke(new DirectoryPopulatedInfo(dirPath)), "SyncCallbacks.OnDirectoryPopulated");
         }
         catch (Exception ex)
         {
@@ -221,7 +258,7 @@ internal class SyncCallbacks
     {
         var transferKey = callbackInfo->TransferKey;
         var cts = new CancellationTokenSource();
-        _inFlightFetches[transferKey] = (cts, null);
+        _inFlightFetches[transferKey] = (cts, null, DateTime.UtcNow);
 
         var fullPath = callbackInfo->NormalizedPath.ToString();
         var fileName = Path.GetFileName(fullPath);
@@ -255,7 +292,7 @@ internal class SyncCallbacks
             }
 
             // Store node ID so CancelFetchesWhere can match by node
-            _inFlightFetches[transferKey] = (cts, nodeId);
+            _inFlightFetches[transferKey] = (cts, nodeId, DateTime.UtcNow);
 
             // Log the requesting process so we can understand what triggers
             // FETCH_DATA (e.g. Explorer thumbnails, Search indexer, etc.)
@@ -313,7 +350,7 @@ internal class SyncCallbacks
             if (nodeId != null)
             {
                 var hydratedPath = callbackInfo->NormalizedPath.ToString();
-                RecentlyHydrated[nodeId] = GetLastWriteTimeSafe(hydratedPath);
+                RecentlyHydrated[nodeId] = (GetLastWriteTimeSafe(hydratedPath), DateTime.UtcNow);
             }
         }
         catch (OperationCanceledException)
@@ -420,7 +457,7 @@ internal class SyncCallbacks
     {
         foreach (var kvp in _inFlightFetches)
         {
-            var (cts, nodeId) = kvp.Value;
+            var (cts, nodeId, _) = kvp.Value;
             if (nodeId != null && shouldCancel(nodeId))
             {
                 Log.Info($"{_logPrefix} Cancelling in-flight download for node {nodeId}");
@@ -526,7 +563,7 @@ internal class SyncCallbacks
             Log.Info($"{_logPrefix} NOTIFY_FILE_CLOSE_COMPLETION: node={nodeId}, path={fullPath}, openCount={newCount}, modified={wasModified}");
 
             if (wasModified)
-                OnFileCloseCompleted?.Invoke(nodeId, fullPath);
+                Log.SafeInvoke(() => OnFileCloseCompleted?.Invoke(nodeId, fullPath), "SyncCallbacks.OnFileCloseCompleted");
         }
         catch (Exception ex)
         {
@@ -915,7 +952,7 @@ internal class SyncCallbacks
 
                 if (nodeId != null)
                 {
-                    RecentlyHydrated[nodeId] = GetLastWriteTimeSafe(fullPath);
+                    RecentlyHydrated[nodeId] = (GetLastWriteTimeSafe(fullPath), DateTime.UtcNow);
                 }
             }
             catch (OperationCanceledException)

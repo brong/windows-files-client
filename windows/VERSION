@@ -2,6 +2,10 @@
 #   1. This file (VERSION)
 #   2. windows/FileNodeClient.Package/AppxManifest.xml  (<Identity Version="...">)
 
+1.0.16.0 2026-03-10  Stall-based upload timeout (30s idle), fix activity list layout
+1.0.15.0 2026-03-10  Fix activity list layout (Z-order for Fill docking)
+1.0.14.0 2026-03-10  Push-based activity feed, remove polling, push quota/pause changes
+1.0.13.0 2026-03-10  Fix premature folder hydration icon (wait for all children)
 1.0.12.0 2026-03-10  Skip dehydrated placeholders in outbox, limit IOException retries
 1.0.11.0 2026-03-10  Retry sync root registration, validate icon path, fix tree status updates
 1.0.9.0  2026-03-10  Throttle IPC broadcasts, cap activity list, "Setting up" state, OAuth bring-to-front

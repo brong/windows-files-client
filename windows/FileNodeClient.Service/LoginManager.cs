@@ -95,7 +95,7 @@ sealed class LoginManager : IDisposable
             foreach (var login in storedLogins)
                 _connectingLoginIds.Add(login.LoginId);
         }
-        AccountsChanged?.Invoke();
+        Log.SafeInvoke(() => AccountsChanged?.Invoke(), "LoginManager.AccountsChanged");
 
         foreach (var login in storedLogins)
         {
@@ -120,7 +120,7 @@ sealed class LoginManager : IDisposable
             {
                 lock (_lock)
                     _connectingLoginIds.Remove(login.LoginId);
-                AccountsChanged?.Invoke();
+                Log.SafeInvoke(() => AccountsChanged?.Invoke(), "LoginManager.AccountsChanged");
             }
         }
 
@@ -128,7 +128,7 @@ sealed class LoginManager : IDisposable
         AuditOrphanedSyncRoots();
 
         // Periodically retry failed logins (e.g. server briefly unreachable at startup)
-        _retryTimer = new Timer(_ => _ = RetryFailedLoginsAsync(), null,
+        _retryTimer = new Timer(_ => Log.FireAndForget(RetryFailedLoginsAsync(), "RetryFailedLogins"), null,
             TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
     }
 
@@ -217,7 +217,7 @@ sealed class LoginManager : IDisposable
         // partial cleanup failures (e.g. error 5 from cfapi).
         AuditOrphanedSyncRoots();
 
-        AccountsChanged?.Invoke();
+        Log.SafeInvoke(() => AccountsChanged?.Invoke(), "LoginManager.AccountsChanged");
         RaiseAggregateStatus();
     }
 
@@ -271,7 +271,7 @@ sealed class LoginManager : IDisposable
         // partial cleanup failures (e.g. error 5 from cfapi).
         AuditOrphanedSyncRoots();
 
-        AccountsChanged?.Invoke();
+        Log.SafeInvoke(() => AccountsChanged?.Invoke(), "LoginManager.AccountsChanged");
         RaiseAggregateStatus();
     }
 
@@ -372,7 +372,7 @@ sealed class LoginManager : IDisposable
         {
             lock (_lock)
                 _connectingLoginIds.Add(loginId);
-            AccountsChanged?.Invoke();
+            Log.SafeInvoke(() => AccountsChanged?.Invoke(), "LoginManager.AccountsChanged");
 
             try
             {
@@ -386,7 +386,7 @@ sealed class LoginManager : IDisposable
             {
                 lock (_lock)
                     _connectingLoginIds.Remove(loginId);
-                AccountsChanged?.Invoke();
+                Log.SafeInvoke(() => AccountsChanged?.Invoke(), "LoginManager.AccountsChanged");
             }
             return;
         }
@@ -548,7 +548,7 @@ sealed class LoginManager : IDisposable
             oauthHandler?.RefreshToken ?? refreshToken, tokenEndpoint, clientId,
             oauthHandler != null ? oauthHandler.ExpiresAt.ToUnixTimeSeconds() : expiresAtUnixSeconds);
 
-        AccountsChanged?.Invoke();
+        Log.SafeInvoke(() => AccountsChanged?.Invoke(), "LoginManager.AccountsChanged");
         RaiseAggregateStatus();
     }
 
@@ -606,7 +606,7 @@ sealed class LoginManager : IDisposable
                 session.RefreshToken, session.TokenEndpoint, session.ClientId, session.ExpiresAtUnixSeconds);
         }
 
-        AccountsChanged?.Invoke();
+        Log.SafeInvoke(() => AccountsChanged?.Invoke(), "LoginManager.AccountsChanged");
         RaiseAggregateStatus();
     }
 
@@ -673,7 +673,7 @@ sealed class LoginManager : IDisposable
             throw;
         }
 
-        AccountsChanged?.Invoke();
+        Log.SafeInvoke(() => AccountsChanged?.Invoke(), "LoginManager.AccountsChanged");
         RaiseAggregateStatus();
     }
 
@@ -747,7 +747,7 @@ sealed class LoginManager : IDisposable
             throw;
         }
 
-        AccountsChanged?.Invoke();
+        Log.SafeInvoke(() => AccountsChanged?.Invoke(), "LoginManager.AccountsChanged");
         RaiseAggregateStatus();
     }
 
@@ -813,7 +813,7 @@ sealed class LoginManager : IDisposable
         _credentialStore.Save(loginId, session.Token, session.SessionUrl, enabled,
             session.RefreshToken, session.TokenEndpoint, session.ClientId, session.ExpiresAtUnixSeconds);
 
-        AccountsChanged?.Invoke();
+        Log.SafeInvoke(() => AccountsChanged?.Invoke(), "LoginManager.AccountsChanged");
         RaiseAggregateStatus();
     }
 
@@ -984,7 +984,7 @@ sealed class LoginManager : IDisposable
         _credentialStore.Save(loginId, session.Token, session.SessionUrl, enabledAccountIds,
             session.RefreshToken, session.TokenEndpoint, session.ClientId, session.ExpiresAtUnixSeconds);
 
-        AccountsChanged?.Invoke();
+        Log.SafeInvoke(() => AccountsChanged?.Invoke(), "LoginManager.AccountsChanged");
         RaiseAggregateStatus();
     }
 
@@ -1123,7 +1123,7 @@ sealed class LoginManager : IDisposable
             _credentialStore.Save(loginId, token, sessionUrl, enabledAccountIds,
                 refreshToken, tokenEndpoint, clientId, expiresAtUnixSeconds);
 
-        AccountsChanged?.Invoke();
+        Log.SafeInvoke(() => AccountsChanged?.Invoke(), "LoginManager.AccountsChanged");
         RaiseAggregateStatus();
         return loginId;
     }
@@ -1336,7 +1336,7 @@ sealed class LoginManager : IDisposable
             }
 
             // Retry failed logins
-            _ = RetryFailedLoginsAsync();
+            Log.FireAndForget(RetryFailedLoginsAsync(), "RetryFailedLoginsOnRestore");
         }
 
         // Handle metered state changes — pause outbox + background sync, but allow hydration
@@ -1381,7 +1381,7 @@ sealed class LoginManager : IDisposable
                     _connectingLoginIds.Add(f.LoginId);
             }
 
-            AccountsChanged?.Invoke();
+            Log.SafeInvoke(() => AccountsChanged?.Invoke(), "LoginManager.AccountsChanged");
 
             foreach (var f in toRetry)
             {
@@ -1404,7 +1404,7 @@ sealed class LoginManager : IDisposable
                 {
                     lock (_lock)
                         _connectingLoginIds.Remove(f.LoginId);
-                    AccountsChanged?.Invoke();
+                    Log.SafeInvoke(() => AccountsChanged?.Invoke(), "LoginManager.AccountsChanged");
                 }
             }
         }
@@ -1417,7 +1417,7 @@ sealed class LoginManager : IDisposable
     private void RaiseAggregateStatus()
     {
         var status = GetAggregateStatus();
-        AggregateStatusChanged?.Invoke(status);
+        Log.SafeInvoke(() => AggregateStatusChanged?.Invoke(status), "LoginManager.AggregateStatusChanged");
     }
 
     public SyncStatus GetAggregateStatus()

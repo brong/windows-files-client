@@ -1,4 +1,5 @@
 using FileNodeClient.Ipc;
+using FileNodeClient.Logging;
 
 namespace FileNodeClient.App;
 
@@ -58,6 +59,7 @@ sealed class ServiceClient : IDisposable
     public event Action? AccountsChanged;
     public event Action? StatusChanged;
     public event Action<bool>? ConnectionChanged;
+    public event Action<ActivitySnapshot>? ActivityChanged;
 
     public ServiceClient()
     {
@@ -139,6 +141,11 @@ sealed class ServiceClient : IDisposable
     public async Task<OutboxResult> GetOutboxAsync(string accountId, CancellationToken ct = default)
     {
         return await CallAsync<OutboxResult>("getOutbox", new { accountId }, ct);
+    }
+
+    public async Task<ActivitySnapshot> GetActivityAsync(string accountId, CancellationToken ct = default)
+    {
+        return await CallAsync<ActivitySnapshot>("getActivity", new { accountId }, ct);
     }
 
     public async Task UpdateLoginAsync(string loginId, string sessionUrl,
@@ -234,69 +241,97 @@ sealed class ServiceClient : IDisposable
             }
         }
 
-        ConnectionChanged?.Invoke(connected);
-        AccountsChanged?.Invoke();
-        StatusChanged?.Invoke();
+        Log.SafeInvoke(() => ConnectionChanged?.Invoke(connected), "ServiceClient.ConnectionChanged");
+        Log.SafeInvoke(() => AccountsChanged?.Invoke(), "ServiceClient.ConnectionChanged.Accounts");
+        Log.SafeInvoke(() => StatusChanged?.Invoke(), "ServiceClient.ConnectionChanged.Status");
     }
 
     private void OnPushReceived(IpcPush push)
     {
-        switch (push.Method)
+        try
         {
-            case "statusSnapshot":
+            switch (push.Method)
             {
-                var snapshot = IpcSerializer.Deserialize<StatusSnapshotResult>(push.Params);
-                lock (_lock)
+                case "statusSnapshot":
                 {
-                    _accounts = snapshot.Accounts;
-                    _connectingLoginIds = snapshot.ConnectingLoginIds;
-                    _failedLogins = snapshot.FailedLogins;
-                    _connectedLoginIds = snapshot.ConnectedLoginIds ?? new();
-                    _aggregateStatus = snapshot.AggregateStatus;
-                    _aggregatePendingCount = snapshot.AggregatePendingCount;
-                }
-                AccountsChanged?.Invoke();
-                StatusChanged?.Invoke();
-                break;
-            }
-
-            case "accountStatusChanged":
-            {
-                var statusEvt = IpcSerializer.Deserialize<AccountStatusPush>(push.Params);
-                lock (_lock)
-                {
-                    var idx = _accounts.FindIndex(a => a.AccountId == statusEvt.AccountId);
-                    if (idx >= 0)
+                    var snapshot = IpcSerializer.Deserialize<StatusSnapshotResult>(push.Params);
+                    lock (_lock)
                     {
-                        var old = _accounts[idx];
-                        _accounts[idx] = old with
-                        {
-                            Status = statusEvt.Status,
-                            StatusDetail = statusEvt.StatusDetail,
-                            PendingCount = statusEvt.PendingCount,
-                        };
+                        _accounts = snapshot.Accounts;
+                        _connectingLoginIds = snapshot.ConnectingLoginIds;
+                        _failedLogins = snapshot.FailedLogins;
+                        _connectedLoginIds = snapshot.ConnectedLoginIds ?? new();
+                        _aggregateStatus = snapshot.AggregateStatus;
+                        _aggregatePendingCount = snapshot.AggregatePendingCount;
                     }
-                    RecalcAggregate();
+                    Log.SafeInvoke(() => AccountsChanged?.Invoke(), "ServiceClient.StatusSnapshot.Accounts");
+                    Log.SafeInvoke(() => StatusChanged?.Invoke(), "ServiceClient.StatusSnapshot.Status");
+                    // Fetch initial activity for all accounts after status is populated
+                    Log.FireAndForget(FetchInitialActivityAsync(snapshot.Accounts), "FetchInitialActivity");
+                    break;
                 }
-                StatusChanged?.Invoke();
-                break;
-            }
 
-            case "accountsChanged":
-            {
-                var accountsEvt = IpcSerializer.Deserialize<AccountsChangedPush>(push.Params);
-                lock (_lock)
+                case "accountStatusChanged":
                 {
-                    _accounts = accountsEvt.Accounts;
-                    _connectingLoginIds = accountsEvt.ConnectingLoginIds;
-                    _failedLogins = accountsEvt.FailedLogins;
-                    _connectedLoginIds = accountsEvt.ConnectedLoginIds ?? new();
-                    RecalcAggregate();
+                    var statusEvt = IpcSerializer.Deserialize<AccountStatusPush>(push.Params);
+                    lock (_lock)
+                    {
+                        var idx = _accounts.FindIndex(a => a.AccountId == statusEvt.AccountId);
+                        if (idx >= 0)
+                        {
+                            var old = _accounts[idx];
+                            _accounts[idx] = old with
+                            {
+                                Status = statusEvt.Status,
+                                StatusDetail = statusEvt.StatusDetail,
+                                PendingCount = statusEvt.PendingCount,
+                                QuotaUsed = statusEvt.QuotaUsed ?? old.QuotaUsed,
+                                QuotaLimit = statusEvt.QuotaLimit ?? old.QuotaLimit,
+                                PauseReason = statusEvt.PauseReason,
+                            };
+                        }
+                        RecalcAggregate();
+                    }
+                    Log.SafeInvoke(() => StatusChanged?.Invoke(), "ServiceClient.AccountStatusChanged");
+                    break;
                 }
-                AccountsChanged?.Invoke();
-                StatusChanged?.Invoke();
-                break;
+
+                case "activityChanged":
+                {
+                    var activity = IpcSerializer.Deserialize<ActivitySnapshot>(push.Params);
+                    Log.SafeInvoke(() => ActivityChanged?.Invoke(activity), "ServiceClient.ActivityChanged");
+                    break;
+                }
+
+                case "accountsChanged":
+                {
+                    var accountsEvt = IpcSerializer.Deserialize<AccountsChangedPush>(push.Params);
+                    lock (_lock)
+                    {
+                        _accounts = accountsEvt.Accounts;
+                        _connectingLoginIds = accountsEvt.ConnectingLoginIds;
+                        _failedLogins = accountsEvt.FailedLogins;
+                        _connectedLoginIds = accountsEvt.ConnectedLoginIds ?? new();
+                        RecalcAggregate();
+                    }
+                    Log.SafeInvoke(() => AccountsChanged?.Invoke(), "ServiceClient.AccountsChanged.Accounts");
+                    Log.SafeInvoke(() => StatusChanged?.Invoke(), "ServiceClient.AccountsChanged.Status");
+                    break;
+                }
             }
+        }
+        catch (Exception ex)
+        {
+            Log.Error($"[ServiceClient] Failed to handle push '{push.Method}': {ex.Message}");
+        }
+    }
+
+    private async Task FetchInitialActivityAsync(List<AccountInfo> accounts)
+    {
+        foreach (var acct in accounts)
+        {
+            var snapshot = await GetActivityAsync(acct.AccountId);
+            Log.SafeInvoke(() => ActivityChanged?.Invoke(snapshot), "ServiceClient.FetchInitialActivity");
         }
     }
 

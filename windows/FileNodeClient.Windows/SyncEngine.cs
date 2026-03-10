@@ -78,12 +78,15 @@ public class SyncEngine : IDisposable
     public event Action<string?>? StatusDetailChanged;
     public event Action<int>? PendingCountChanged;
     public event Action<int>? ActiveDownloadCountChanged;
+    public event Action? ActivityChanged;
 
     private readonly ConcurrentDictionary<long, (string FileName, DateTime StartedAt, long? TotalSize)> _activeDownloads = new();
     private readonly ConcurrentDictionary<long, int> _downloadProgress = new();
     // Files queued for pin-hydration (not yet started). Keyed by file path.
     private readonly ConcurrentDictionary<string, (string FileName, long? Size)> _pendingHydrations = new(StringComparer.OrdinalIgnoreCase);
     private string? _downloadDetail;
+    // Periodic cleanup timer for unbounded collections (5 minute interval)
+    private readonly Timer _cleanupTimer;
 
     public int ActiveDownloadCount => _activeDownloads.Count + _pendingHydrations.Count;
 
@@ -150,7 +153,7 @@ public class SyncEngine : IDisposable
             CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_DISCONNECTED => SyncStatus.Disconnected,
             _ => SyncStatus.Error,
         };
-        StatusChanged?.Invoke(syncStatus);
+        Log.SafeInvoke(() => StatusChanged?.Invoke(syncStatus), "SyncEngine.ReportStatus");
     }
 
     public void ReportConnectivityLost()
@@ -180,7 +183,7 @@ public class SyncEngine : IDisposable
             var message = GetPauseStatusMessage();
             _syncRoot.ReportSyncStatus(SyncStatusError, message);
         }
-        StatusChanged?.Invoke(SyncStatus.Paused);
+        Log.SafeInvoke(() => StatusChanged?.Invoke(SyncStatus.Paused), "SyncEngine.Pause");
     }
 
     public void Resume(SyncPauseReason reason)
@@ -243,12 +246,14 @@ public class SyncEngine : IDisposable
             ? $"Downloading {fileName} (and {count - 1} more)"
             : $"Downloading {fileName}";
         ReportTransferDetail();
-        ActiveDownloadCountChanged?.Invoke(count);
+        Log.SafeInvoke(() => ActiveDownloadCountChanged?.Invoke(count), "SyncEngine.OnDownloadStarted.CountChanged");
+        Log.SafeInvoke(() => ActivityChanged?.Invoke(), "SyncEngine.OnDownloadStarted.ActivityChanged");
     }
 
     private void OnDownloadProgress(long transferKey, int percent)
     {
         _downloadProgress[transferKey] = percent;
+        Log.SafeInvoke(() => ActivityChanged?.Invoke(), "SyncEngine.OnDownloadProgress");
     }
 
     private void OnDownloadCompleted(long transferKey)
@@ -268,12 +273,13 @@ public class SyncEngine : IDisposable
                 : $"Downloading {first.Value.FileName}";
         }
         ReportTransferDetail();
-        ActiveDownloadCountChanged?.Invoke(count);
+        Log.SafeInvoke(() => ActiveDownloadCountChanged?.Invoke(count), "SyncEngine.OnDownloadCompleted.CountChanged");
+        Log.SafeInvoke(() => ActivityChanged?.Invoke(), "SyncEngine.OnDownloadCompleted.ActivityChanged");
     }
 
     private void ReportTransferDetail()
     {
-        StatusDetailChanged?.Invoke(_downloadDetail);
+        Log.SafeInvoke(() => StatusDetailChanged?.Invoke(_downloadDetail), "SyncEngine.StatusDetailChanged");
     }
 
     private void OnFileCloseCompleted(string? nodeId, string fullPath)
@@ -286,8 +292,8 @@ public class SyncEngine : IDisposable
             var currentMtime = File.GetLastWriteTimeUtc(fullPath);
 
             if (nodeId != null
-                && _syncCallbacks.RecentlyHydrated.TryGetValue(nodeId, out var hydratedMtime)
-                && currentMtime == hydratedMtime)
+                && _syncCallbacks.RecentlyHydrated.TryGetValue(nodeId, out var hydratedEntry)
+                && currentMtime == hydratedEntry.Mtime)
                 return;
 
             if (_recentlyUploaded.TryGetValue(fullPath, out var uploadedMtime)
@@ -359,8 +365,36 @@ public class SyncEngine : IDisposable
         _scopeKey = scopeKey;
         _outbox = new SyncOutbox(scopeKey, _logPrefix);
         _outbox.Load();
-        _outbox.PendingCountChanged += count => PendingCountChanged?.Invoke(count);
+        _outbox.PendingCountChanged += count => Log.SafeInvoke(() => PendingCountChanged?.Invoke(count), "SyncEngine.PendingCountChanged");
+        _outbox.Changed += () => Log.SafeInvoke(() => ActivityChanged?.Invoke(), "SyncEngine.OutboxChanged.ActivityChanged");
         _outboxProcessor = new OutboxProcessor(_outbox, this, jmapClient, queue, _logPrefix);
+        _cleanupTimer = new Timer(CleanupStaleEntries, null, TimeSpan.FromMinutes(5), TimeSpan.FromMinutes(5));
+    }
+
+    private void CleanupStaleEntries(object? state)
+    {
+        var cutoff = DateTime.UtcNow.AddMinutes(-10);
+        var downloadCutoff = DateTime.UtcNow.AddMinutes(-30);
+
+        // Delegate to SyncCallbacks for its collections
+        _syncCallbacks.CleanupStaleEntries();
+
+        // Clean stale _activeDownloads entries older than 30 minutes (safety net)
+        foreach (var kvp in _activeDownloads)
+        {
+            if (kvp.Value.StartedAt < downloadCutoff)
+            {
+                _activeDownloads.TryRemove(kvp.Key, out _);
+                _downloadProgress.TryRemove(kvp.Key, out _);
+            }
+        }
+
+        // Clean stale _recentlyUploaded entries (keep last 10 minutes)
+        foreach (var kvp in _recentlyUploaded)
+        {
+            if (kvp.Value < cutoff)
+                _recentlyUploaded.TryRemove(kvp.Key, out _);
+        }
     }
 
     /// <summary>Clear persisted outbox state (e.g. after --clean). Call before PopulateAsync.</summary>
@@ -1285,7 +1319,7 @@ public class SyncEngine : IDisposable
                 {
                     try
                     {
-                        if (File.GetLastWriteTimeUtc(change.FullPath) == hydratedWriteTime)
+                        if (File.GetLastWriteTimeUtc(change.FullPath) == hydratedWriteTime.Mtime)
                             continue;
                     }
                     catch
@@ -1847,7 +1881,8 @@ public class SyncEngine : IDisposable
             if (dehydratedFiles.Count > 0)
             {
                 Log.Info($"{_logPrefix} Queued {dehydratedFiles.Count} files for hydration in {directoryPath}");
-                ActiveDownloadCountChanged?.Invoke(ActiveDownloadCount);
+                Log.SafeInvoke(() => ActiveDownloadCountChanged?.Invoke(ActiveDownloadCount), "SyncEngine.HydrateQueued.CountChanged");
+                Log.SafeInvoke(() => ActivityChanged?.Invoke(), "SyncEngine.HydrateQueued.ActivityChanged");
             }
 
             foreach (var filePath in dehydratedFiles)
@@ -1867,6 +1902,7 @@ public class SyncEngine : IDisposable
                     // Remove from pending BEFORE hydrating — the transition is
                     // pending → active (tracked by _activeDownloads via FETCH_DATA)
                     _pendingHydrations.TryRemove(filePath, out _);
+                    Log.SafeInvoke(() => ActivityChanged?.Invoke(), "SyncEngine.HydratePending.ActivityChanged");
                     HydratePlaceholder(filePath);
                     count++;
                 }
@@ -1874,6 +1910,7 @@ public class SyncEngine : IDisposable
                 {
                     Log.Error($"{_logPrefix}  Hydration failed for {Path.GetFileName(filePath)}: {ex.Message}");
                     _pendingHydrations.TryRemove(filePath, out _);
+                    Log.SafeInvoke(() => ActivityChanged?.Invoke(), "SyncEngine.HydrateFailed.ActivityChanged");
                     failed.Add(filePath);
                 }
             }
@@ -1961,7 +1998,7 @@ public class SyncEngine : IDisposable
                     _pendingHydrations.TryRemove(key, out _);
             }
             if (_pendingHydrations.IsEmpty && _activeDownloads.IsEmpty)
-                ActiveDownloadCountChanged?.Invoke(0);
+                Log.SafeInvoke(() => ActiveDownloadCountChanged?.Invoke(0), "SyncEngine.HydrateDone.CountChanged");
 
             return (count, allHydrated);
         }
@@ -2474,6 +2511,10 @@ public class SyncEngine : IDisposable
         }
         _pinnedDirectories.Clear();
 
+        _cleanupTimer.Dispose();
+        _activeDownloads.Clear();
+        _downloadProgress.Clear();
+        _pendingHydrations.Clear();
         _hydrationGate.Dispose();
         _outboxProcessor.Dispose();
         _outbox.Dispose();

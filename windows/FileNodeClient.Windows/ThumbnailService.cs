@@ -154,7 +154,7 @@ public static class ThumbnailService
             return;
 
         // Fire and forget — each TCS will be completed
-        _ = Task.Run(() => ProcessBatchAsync(batch));
+        Log.FireAndForget(Task.Run(() => ProcessBatchAsync(batch)), "ThumbnailBatchProcess");
     }
 
     private static async Task ProcessBatchAsync(List<PendingRequest> batch)

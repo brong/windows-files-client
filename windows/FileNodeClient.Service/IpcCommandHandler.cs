@@ -35,6 +35,7 @@ sealed class IpcCommandHandler
                 "cleanUpAccount" => await HandleCleanUpAccountAsync(request),
                 "configureLogin" => await HandleConfigureLoginAsync(request, ct),
                 "getOutbox" => HandleGetOutbox(request),
+                "getActivity" => HandleGetActivity(request),
                 "getLoginAccounts" => HandleGetLoginAccounts(request),
                 "refreshLoginAccounts" => await HandleRefreshLoginAccountsAsync(request, ct),
                 "updateLogin" => await HandleUpdateLoginAsync(request, ct),
@@ -95,7 +96,10 @@ sealed class IpcCommandHandler
             supervisor.AccountId,
             status,
             supervisor.StatusDetail,
-            supervisor.PendingCount);
+            supervisor.PendingCount,
+            supervisor.QuotaUsed,
+            supervisor.QuotaLimit,
+            supervisor.PauseReason != SyncPauseReason.None ? supervisor.PauseReason.ToString() : null);
     }
 
     private async Task<string> HandleAddLoginAsync(IpcRequest request, CancellationToken ct)
@@ -174,6 +178,15 @@ sealed class IpcCommandHandler
 
         return IpcSerializer.SerializeResponse(request.Id,
             new OutboxResult(p.AccountId, outboxEntries, activeDownloads));
+    }
+
+    private string HandleGetActivity(IpcRequest request)
+    {
+        var p = Deserialize<AccountIdParams>(request.Params);
+        var supervisor = _loginManager.Supervisors.FirstOrDefault(s => s.AccountId == p.AccountId);
+        var snapshot = supervisor != null ? BuildActivitySnapshot(supervisor) : null;
+        return IpcSerializer.SerializeResponse(request.Id,
+            snapshot ?? new ActivitySnapshot(p.AccountId, new(), new(), new(), null, 0, 0));
     }
 
     private string HandleGetLoginAccounts(IpcRequest request)
@@ -257,6 +270,53 @@ sealed class IpcCommandHandler
         var p = Deserialize<AccountIdParams>(request.Params);
         _loginManager.SyncNow(p.AccountId);
         return IpcSerializer.SerializeResponse(request.Id);
+    }
+
+    public ActivitySnapshot? BuildActivitySnapshot(AccountSupervisor supervisor)
+    {
+        if (supervisor.Outbox == null) return null;
+        var (entries, processingIds) = supervisor.Outbox.GetSnapshot();
+
+        var active = new List<OutboxEntry>();
+        var errors = new List<OutboxEntry>();
+        var pending = new List<OutboxEntry>();
+        foreach (var e in entries)
+        {
+            var oe = new OutboxEntry(
+                e.Id, e.LocalPath, e.NodeId, e.IsFolder,
+                e.IsDirtyContent, e.IsDirtyLocation, e.IsDeleted,
+                e.CreatedAt, e.UpdatedAt, e.AttemptCount,
+                e.LastError, e.NextRetryAfter,
+                processingIds.Contains(e.Id),
+                supervisor.Outbox.GetProgress(e.Id));
+
+            if (oe.IsProcessing) active.Add(oe);
+            else if (oe.LastError != null) errors.Add(oe);
+            else pending.Add(oe);
+        }
+
+        var downloadSnapshot = supervisor.GetActiveDownloadSnapshot();
+        List<ActiveDownloadEntry>? downloads = null;
+        if (downloadSnapshot.Count > 0)
+        {
+            downloads = new List<ActiveDownloadEntry>();
+            int pendingDlCount = 0;
+            foreach (var d in downloadSnapshot)
+            {
+                if (d.IsPending && pendingDlCount >= 10) continue;
+                if (d.IsPending) pendingDlCount++;
+                downloads.Add(new ActiveDownloadEntry(d.FileName, d.StartedAt, d.Progress, d.TotalSize, d.IsPending));
+            }
+        }
+
+        return new ActivitySnapshot(
+            supervisor.AccountId,
+            active,
+            errors,
+            pending.Take(10).ToList(),
+            downloads,
+            entries.Length,
+            downloadSnapshot.Count);
     }
 
     private static T Deserialize<T>(JsonElement? element) => IpcSerializer.Deserialize<T>(element);

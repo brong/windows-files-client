@@ -69,10 +69,21 @@ public record StatusSnapshotResult(List<AccountInfo> Accounts, List<string> Conn
 // ---- Push payload records ----
 
 public record AccountStatusPush(string AccountId, AccountStatus Status,
-    string? StatusDetail, int PendingCount);
+    string? StatusDetail, int PendingCount,
+    long? QuotaUsed = null, long? QuotaLimit = null,
+    string? PauseReason = null);
 
 public record AccountsChangedPush(List<AccountInfo> Accounts, List<string> ConnectingLoginIds,
     List<FailedLogin> FailedLogins, List<string>? ConnectedLoginIds = null);
+
+public record ActivitySnapshot(
+    string AccountId,
+    List<OutboxEntry> ActiveEntries,
+    List<OutboxEntry> ErrorEntries,
+    List<OutboxEntry> PendingEntries,
+    List<ActiveDownloadEntry>? ActiveDownloads,
+    int TotalPendingCount,
+    int TotalDownloadCount);
 
 // ---- Exception type ----
 
