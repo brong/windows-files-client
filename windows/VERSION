@@ -2,6 +2,7 @@
 #   1. This file (VERSION)
 #   2. windows/FileNodeClient.Package/AppxManifest.xml  (<Identity Version="...">)
 
+1.0.44.0 2026-03-10  Diagnostic logging (Info level) for download activity display
 1.0.43.0 2026-03-10  Diagnostic logging for download activity display
 1.0.42.0 2026-03-10  Regular window, fix UI flicker (incremental tree, stable panels)
 1.0.41.0 2026-03-10  Fix download tracking gap: keep pending until OnDownloadStarted

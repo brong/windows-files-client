@@ -1035,8 +1035,7 @@ sealed partial class ManageAccountsForm : Form
     private void OnActivityPushed(ActivitySnapshot snapshot)
     {
         if (InvokeRequired) { BeginInvoke(() => OnActivityPushed(snapshot)); return; }
-        if (snapshot.ActiveDownloads is { Count: > 0 })
-            Log.Debug($"[Activity Push] {snapshot.AccountId}: {snapshot.ActiveDownloads.Count} downloads, {snapshot.TotalDownloadCount} total");
+        Log.Info($"[Activity Push] {snapshot.AccountId}: downloads={snapshot.ActiveDownloads?.Count ?? 0}, totalDl={snapshot.TotalDownloadCount}, active={snapshot.ActiveEntries.Count}, pending={snapshot.PendingEntries.Count}");
         _vm.ActivityCache[snapshot.AccountId] = snapshot;
         ScheduleRender();
     }
