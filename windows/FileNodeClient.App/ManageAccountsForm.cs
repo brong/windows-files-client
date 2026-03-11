@@ -11,6 +11,7 @@ sealed partial class ManageAccountsForm : Form
     private readonly CancellationTokenSource _appCts;
     private readonly TreeView _treeView;
     private readonly Panel _detailPanel;
+    private readonly Panel _detailTopPanel;
     private readonly System.Windows.Forms.Timer _refreshTimer;
     private readonly System.Windows.Forms.Timer _renderTimer;
     private readonly ViewModel _vm = new();
@@ -399,16 +400,16 @@ sealed partial class ManageAccountsForm : Form
         };
 
         // Split detail area into two containers:
-        // 1. _detailTopPanel (Top, AutoSize) — holds whichever detail panel is active
-        // 2. _activityPanel (Fill) — holds only the activity list and empty label
-        // This prevents docking fights and scroll position corruption.
-        var detailTopPanel = new Panel
+        // 1. _detailTopPanel (Top, AutoSize) — holds only the ACTIVE detail panel
+        // 2. activityPanel (Fill) — holds only the activity list and empty label
+        // ShowPanel() swaps which panel is in _detailTopPanel so hidden panels
+        // don't affect its height calculation.
+        _detailTopPanel = new Panel
         {
             Dock = DockStyle.Top,
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
         };
-        detailTopPanel.Controls.AddRange([_loginPanel, _syncedAccountPanel, _availableAccountPanel, _noSelectionLabel]);
 
         var activityPanel = new Panel
         {
@@ -418,7 +419,7 @@ sealed partial class ManageAccountsForm : Form
         _activityListView.BringToFront();
         _activityEmptyLabel.BringToFront();
 
-        _detailPanel.Controls.Add(detailTopPanel);
+        _detailPanel.Controls.Add(_detailTopPanel);
         _detailPanel.Controls.Add(activityPanel);
         // Fill must be at front (docked last) so Top panel gets its space first
         activityPanel.BringToFront();
@@ -822,13 +823,18 @@ sealed partial class ManageAccountsForm : Form
         _renderedLoginId = _vm.SelectedLoginId;
         _renderedAccountId = _vm.SelectedAccountId;
 
-        // Only toggle panel visibility — set desired panel visible, hide others
-        void ShowPanel(Control? target)
+        // Swap the active panel into _detailTopPanel — only one child at a time
+        // so AutoSize reflects only the visible panel's height.
+        void ShowPanel(Control target)
         {
-            if (_loginPanel.Visible != (_loginPanel == target)) _loginPanel.Visible = _loginPanel == target;
-            if (_syncedAccountPanel.Visible != (_syncedAccountPanel == target)) _syncedAccountPanel.Visible = _syncedAccountPanel == target;
-            if (_availableAccountPanel.Visible != (_availableAccountPanel == target)) _availableAccountPanel.Visible = _availableAccountPanel == target;
-            if (_noSelectionLabel.Visible != (_noSelectionLabel == target)) _noSelectionLabel.Visible = _noSelectionLabel == target;
+            if (_detailTopPanel.Controls.Count == 1 && _detailTopPanel.Controls[0] == target)
+                return;
+            _detailTopPanel.SuspendLayout();
+            _detailTopPanel.Controls.Clear();
+            target.Dock = DockStyle.Top;
+            target.Visible = true;
+            _detailTopPanel.Controls.Add(target);
+            _detailTopPanel.ResumeLayout(true);
         }
 
         if (selectedNode?.Tag is LoginNode loginNode)
