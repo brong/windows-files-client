@@ -702,6 +702,31 @@ public class JmapClient : IJmapClient
             // timeout window without being cancelled prematurely.
             onProgress?.Invoke(totalSize);
 
+            // Verify chunk blobIds exist before combining
+            var verifyIds = chunkBlobIds.Select(c => c.BlobId).ToArray();
+            try
+            {
+                var verifyResult = await callAsync(BlobUsing, "Blob/get", new
+                {
+                    accountId,
+                    ids = verifyIds,
+                    properties = new[] { "id", "size" },
+                });
+                var verifyResponse = verifyResult.Deserialize<BlobGetResponse>(JmapSerializerOptions.Default);
+                if (verifyResponse != null)
+                {
+                    var found = verifyResponse.List.Select(b => b.Id).ToHashSet();
+                    var notFoundIds = verifyResponse.NotFound;
+                    Log.Info($"[ChunkedUpload] Blob/get verify: {found.Count}/{verifyIds.Length} found, notFound=[{string.Join(", ", notFoundIds)}]");
+                    foreach (var b in verifyResponse.List)
+                        Log.Info($"[ChunkedUpload]   blob {b.Id} size={b.Size}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Info($"[ChunkedUpload] Blob/get verify failed: {ex.Message}");
+            }
+
             // Combine chunks via Blob/upload
             Log.Info($"[ChunkedUpload] Combining {chunkBlobIds.Count} chunks for account {accountId}, includeShaDigest={includeShaDigest}, blobIds=[{string.Join(", ", chunkBlobIds.Select(c => c.BlobId))}]");
             var dataArray = chunkBlobIds.Select(c =>
