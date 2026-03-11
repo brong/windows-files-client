@@ -78,8 +78,8 @@ sealed partial class ManageAccountsForm : Form
         Text = "FileNodeClient";
         MinimumSize = new Size(700, 400);
         StartPosition = FormStartPosition.Manual;
-        ShowInTaskbar = false;
-        FormBorderStyle = FormBorderStyle.SizableToolWindow;
+        ShowInTaskbar = true;
+        FormBorderStyle = FormBorderStyle.Sizable;
         AppIcon.Apply(this);
 
         // --- TreeView on the left ---
@@ -568,154 +568,227 @@ sealed partial class ManageAccountsForm : Form
         var connectedLoginIds = _vm.ConnectedLoginIds;
         var serviceConnected = _vm.IsConnected;
 
-        _suppressSelectionChanged = true;
-
-        _treeView.BeginUpdate();
-        _treeView.Nodes.Clear();
+        // Build desired tree state as flat list of (loginId, accountId?, text, color, tag)
+        var desired = new List<(string LoginId, List<(string Text, Color Color, object Tag)> Children)>();
 
         if (!serviceConnected)
         {
-            _treeView.Nodes.Add(new TreeNode("Service not running")
-                { ForeColor = Color.Gray });
-            _treeView.EndUpdate();
-            _suppressSelectionChanged = false;
-            return;
+            // Special case: show "Service not running" as a single root node
         }
-
-        // Group synced accounts by loginId
-        var byLogin = accounts
-            .Where(a => !string.IsNullOrEmpty(a.LoginId))
-            .GroupBy(a => a.LoginId)
-            .ToDictionary(g => g.Key, g => g.ToList());
-
-        var allLoginIds = byLogin.Keys
-            .Union(_vm.DiscoveredAccounts.Keys)
-            .Union(connectingIds)
-            .Union(connectedLoginIds)
-            .Union(failedLogins.Select(f => f.LoginId))
-            .Distinct()
-            .OrderBy(id => id)
-            .ToList();
-
-        foreach (var loginId in allLoginIds)
+        else
         {
-            var syncedAccounts = byLogin.GetValueOrDefault(loginId) ?? new List<AccountInfo>();
-            var syncedIds = syncedAccounts.Select(a => a.AccountId).ToHashSet();
+            var byLogin = accounts
+                .Where(a => !string.IsNullOrEmpty(a.LoginId))
+                .GroupBy(a => a.LoginId)
+                .ToDictionary(g => g.Key, g => g.ToList());
 
-            var parts = loginId.Split('@');
-            var displayText = parts.Length >= 3
-                ? $"{parts[0]}@{parts[1]} ({parts[2]})"
-                : loginId;
+            var allLoginIds = byLogin.Keys
+                .Union(_vm.DiscoveredAccounts.Keys)
+                .Union(connectingIds)
+                .Union(connectedLoginIds)
+                .Union(failedLogins.Select(f => f.LoginId))
+                .Distinct()
+                .OrderBy(id => id)
+                .ToList();
 
-            var loginTreeNode = new TreeNode(displayText)
+            foreach (var loginId in allLoginIds)
             {
-                Tag = new LoginNode(loginId),
-                NodeFont = new Font(_treeView.Font, FontStyle.Bold),
-            };
+                var syncedAccounts = byLogin.GetValueOrDefault(loginId) ?? new List<AccountInfo>();
+                var syncedIds = syncedAccounts.Select(a => a.AccountId).ToHashSet();
+                var children = new List<(string Text, Color Color, object Tag)>();
 
-            var failedInfo = failedLogins.FirstOrDefault(f => f.LoginId == loginId);
+                var failedInfo = failedLogins.FirstOrDefault(f => f.LoginId == loginId);
 
-            if (connectingIds.Contains(loginId) && syncedAccounts.Count == 0)
-            {
-                loginTreeNode.Nodes.Add(new TreeNode("Connecting...") { ForeColor = Color.Gray });
-            }
-            else if (failedInfo != null && syncedAccounts.Count == 0)
-            {
-                loginTreeNode.Nodes.Add(new TreeNode($"Connection failed: {failedInfo.Error}")
-                    { ForeColor = Color.Red });
-            }
-            else
-            {
-                var discoveredIds = _vm.DiscoveredAccounts.TryGetValue(loginId, out var disc)
-                    ? disc.Select(d => d.AccountId).ToHashSet() : null;
-                var loginRefreshed = _vm.RefreshedLogins.Contains(loginId);
-
-                foreach (var account in syncedAccounts)
+                if (connectingIds.Contains(loginId) && syncedAccounts.Count == 0)
                 {
-                    var isMissing = loginRefreshed && discoveredIds != null
-                        && !discoveredIds.Contains(account.AccountId);
-
-                    var rejCount = _serviceClient.GetRejectedCount(account.AccountId);
-                    var statusText = isMissing ? "Missing on server" : account.Status switch
-                    {
-                        AccountStatus.Paused when account.PauseReason?.Contains("DiskFull") == true => "Disk full",
-                        AccountStatus.Paused when account.PauseReason?.Contains("UserRequested") == true => "Paused",
-                        AccountStatus.Paused when account.PauseReason?.Contains("MeteredConnection") == true => "Metered",
-                        AccountStatus.Idle when account.PendingCount > 0 => $"{account.PendingCount} pending",
-                        AccountStatus.Idle when rejCount > 0 => rejCount == 1 ? "1 file rejected" : $"{rejCount} files rejected",
-                        AccountStatus.Idle => "Up to date",
-                        AccountStatus.Syncing => "Syncing",
-                        AccountStatus.Error => "Error",
-                        AccountStatus.Disconnected => "Offline",
-                        _ => "Unknown",
-                    };
-
-                    var node = new TreeNode($"{account.DisplayName} \u2014 {statusText}")
-                    {
-                        Tag = new AccountNode(loginId, account.AccountId, account.DisplayName,
-                            IsSynced: true, IsMissing: isMissing, SyncInfo: account),
-                        ForeColor = isMissing ? Color.FromArgb(200, 120, 0) : default,
-                    };
-                    loginTreeNode.Nodes.Add(node);
+                    children.Add(("Connecting...", Color.Gray, (object)"connecting"));
                 }
-
-                if (disc != null)
+                else if (failedInfo != null && syncedAccounts.Count == 0)
                 {
-                    foreach (var d in disc.Where(d => !syncedIds.Contains(d.AccountId)))
+                    children.Add(($"Connection failed: {failedInfo.Error}", Color.Red, (object)"failed"));
+                }
+                else
+                {
+                    var discoveredIds = _vm.DiscoveredAccounts.TryGetValue(loginId, out var disc)
+                        ? disc.Select(d => d.AccountId).ToHashSet() : null;
+                    var loginRefreshed = _vm.RefreshedLogins.Contains(loginId);
+
+                    foreach (var account in syncedAccounts)
                     {
-                        var isSettingUp = _vm.SettingUpAccounts.Contains(d.AccountId);
-                        var label = isSettingUp ? "Setting up" : "Not synced";
-                        var node = new TreeNode($"{d.Name} \u2014 {label}")
+                        var isMissing = loginRefreshed && discoveredIds != null
+                            && !discoveredIds.Contains(account.AccountId);
+
+                        var rejCount = _serviceClient.GetRejectedCount(account.AccountId);
+                        var statusText = isMissing ? "Missing on server" : account.Status switch
                         {
-                            Tag = new AccountNode(loginId, d.AccountId, d.Name,
-                                IsSynced: false, IsMissing: false, SyncInfo: null),
-                            ForeColor = isSettingUp ? Color.DodgerBlue : Color.Gray,
+                            AccountStatus.Paused when account.PauseReason?.Contains("DiskFull") == true => "Disk full",
+                            AccountStatus.Paused when account.PauseReason?.Contains("UserRequested") == true => "Paused",
+                            AccountStatus.Paused when account.PauseReason?.Contains("MeteredConnection") == true => "Metered",
+                            AccountStatus.Idle when account.PendingCount > 0 => $"{account.PendingCount} pending",
+                            AccountStatus.Idle when rejCount > 0 => rejCount == 1 ? "1 file rejected" : $"{rejCount} files rejected",
+                            AccountStatus.Idle => "Up to date",
+                            AccountStatus.Syncing => "Syncing",
+                            AccountStatus.Error => "Error",
+                            AccountStatus.Disconnected => "Offline",
+                            _ => "Unknown",
                         };
-                        loginTreeNode.Nodes.Add(node);
+
+                        children.Add(($"{account.DisplayName} \u2014 {statusText}",
+                            isMissing ? Color.FromArgb(200, 120, 0) : default,
+                            new AccountNode(loginId, account.AccountId, account.DisplayName,
+                                IsSynced: true, IsMissing: isMissing, SyncInfo: account)));
                     }
+
+                    if (disc != null)
+                    {
+                        foreach (var d in disc.Where(d => !syncedIds.Contains(d.AccountId)))
+                        {
+                            var isSettingUp = _vm.SettingUpAccounts.Contains(d.AccountId);
+                            var label = isSettingUp ? "Setting up" : "Not synced";
+                            children.Add(($"{d.Name} \u2014 {label}",
+                                isSettingUp ? Color.DodgerBlue : Color.Gray,
+                                new AccountNode(loginId, d.AccountId, d.Name,
+                                    IsSynced: false, IsMissing: false, SyncInfo: null)));
+                        }
+                    }
+
+                    // Clear setting-up flag for accounts that are now synced
+                    foreach (var acct in syncedAccounts)
+                        _vm.SettingUpAccounts.Remove(acct.AccountId);
                 }
 
-                // Clear setting-up flag for accounts that are now synced
-                foreach (var acct in syncedAccounts)
-                    _vm.SettingUpAccounts.Remove(acct.AccountId);
+                desired.Add((loginId, children));
             }
-
-            _treeView.Nodes.Add(loginTreeNode);
         }
 
-        _treeView.ExpandAll();
-
-        // Restore selection from ViewModel
-        if (_vm.SelectedLoginId != null || _vm.SelectedAccountId != null)
+        // Check if tree structure changed (login count + child counts)
+        bool structureChanged = !serviceConnected || _treeView.Nodes.Count != desired.Count;
+        if (!structureChanged)
         {
-            foreach (TreeNode loginTn in _treeView.Nodes)
+            for (int i = 0; i < desired.Count; i++)
             {
-                if (loginTn.Tag is LoginNode restoredLn && restoredLn.LoginId == _vm.SelectedLoginId)
+                var loginTn = _treeView.Nodes[i];
+                if (loginTn.Tag is not LoginNode ln || ln.LoginId != desired[i].LoginId
+                    || loginTn.Nodes.Count != desired[i].Children.Count)
                 {
-                    _treeView.SelectedNode = loginTn;
+                    structureChanged = true;
                     break;
                 }
-                foreach (TreeNode accountTn in loginTn.Nodes)
+                for (int j = 0; j < desired[i].Children.Count; j++)
                 {
-                    if (accountTn.Tag is AccountNode restoredAn && restoredAn.AccountId == _vm.SelectedAccountId)
+                    var childTag = desired[i].Children[j].Tag;
+                    var existingTag = loginTn.Nodes[j].Tag;
+                    // Compare by account ID if both are AccountNode, otherwise by reference type
+                    if (childTag is AccountNode desiredAn && existingTag is AccountNode existingAn)
                     {
-                        _treeView.SelectedNode = accountTn;
+                        if (desiredAn.AccountId != existingAn.AccountId)
+                        {
+                            structureChanged = true;
+                            break;
+                        }
+                    }
+                    else if (childTag.GetType() != existingTag?.GetType())
+                    {
+                        structureChanged = true;
                         break;
                     }
                 }
+                if (structureChanged) break;
             }
         }
-        _treeView.EndUpdate();
+
+        if (!serviceConnected)
+        {
+            if (_treeView.Nodes.Count != 1 || _treeView.Nodes[0].Text != "Service not running")
+            {
+                _suppressSelectionChanged = true;
+                _treeView.BeginUpdate();
+                _treeView.Nodes.Clear();
+                _treeView.Nodes.Add(new TreeNode("Service not running")
+                    { ForeColor = Color.Gray });
+                _treeView.EndUpdate();
+                _suppressSelectionChanged = false;
+            }
+            return;
+        }
+
+        _suppressSelectionChanged = true;
+
+        if (structureChanged)
+        {
+            // Full rebuild — structure changed
+            _treeView.BeginUpdate();
+            _treeView.Nodes.Clear();
+
+            foreach (var (loginId, children) in desired)
+            {
+                var parts = loginId.Split('@');
+                var displayText = parts.Length >= 3
+                    ? $"{parts[0]}@{parts[1]} ({parts[2]})"
+                    : loginId;
+
+                var loginTreeNode = new TreeNode(displayText)
+                {
+                    Tag = new LoginNode(loginId),
+                    NodeFont = new Font(_treeView.Font, FontStyle.Bold),
+                };
+
+                foreach (var (text, color, tag) in children)
+                    loginTreeNode.Nodes.Add(new TreeNode(text) { Tag = tag, ForeColor = color });
+
+                _treeView.Nodes.Add(loginTreeNode);
+            }
+
+            _treeView.ExpandAll();
+
+            // Restore selection from ViewModel
+            if (_vm.SelectedLoginId != null || _vm.SelectedAccountId != null)
+            {
+                foreach (TreeNode loginTn in _treeView.Nodes)
+                {
+                    if (loginTn.Tag is LoginNode restoredLn && restoredLn.LoginId == _vm.SelectedLoginId)
+                    {
+                        _treeView.SelectedNode = loginTn;
+                        break;
+                    }
+                    foreach (TreeNode accountTn in loginTn.Nodes)
+                    {
+                        if (accountTn.Tag is AccountNode restoredAn && restoredAn.AccountId == _vm.SelectedAccountId)
+                        {
+                            _treeView.SelectedNode = accountTn;
+                            break;
+                        }
+                    }
+                }
+            }
+            _treeView.EndUpdate();
+        }
+        else
+        {
+            // Incremental update — just update text, color, and tag of existing nodes
+            for (int i = 0; i < desired.Count; i++)
+            {
+                var loginTn = _treeView.Nodes[i];
+                for (int j = 0; j < desired[i].Children.Count; j++)
+                {
+                    var (text, color, tag) = desired[i].Children[j];
+                    var childTn = loginTn.Nodes[j];
+                    if (childTn.Text != text) childTn.Text = text;
+                    if (childTn.ForeColor != color) childTn.ForeColor = color;
+                    childTn.Tag = tag;
+                }
+            }
+        }
+
         _suppressSelectionChanged = false;
 
-        // Clear selection if nothing was previously selected — must happen
-        // AFTER EndUpdate because the TreeView can auto-select the first
-        // node during EndUpdate's internal processing.
+        // Clear selection if nothing was previously selected
         if (_vm.SelectedLoginId == null && _vm.SelectedAccountId == null)
             _treeView.SelectedNode = null;
 
         // If any login doesn't have discovered accounts yet, kick off discovery.
-        var undiscoveredLogins = allLoginIds
+        var allIds = desired.Select(d => d.LoginId).ToList();
+        var undiscoveredLogins = allIds
             .Where(id => !_vm.DiscoveredAccounts.ContainsKey(id) && !connectingIds.Contains(id))
             .ToList();
         if (undiscoveredLogins.Count > 0)
@@ -732,15 +805,18 @@ sealed partial class ManageAccountsForm : Form
         _renderedLoginId = _vm.SelectedLoginId;
         _renderedAccountId = _vm.SelectedAccountId;
 
-        // Always set panel visibility — hide all, then show the right one
-        _loginPanel.Visible = false;
-        _syncedAccountPanel.Visible = false;
-        _availableAccountPanel.Visible = false;
-        _noSelectionLabel.Visible = false;
+        // Only toggle panel visibility — set desired panel visible, hide others
+        void ShowPanel(Control? target)
+        {
+            if (_loginPanel.Visible != (_loginPanel == target)) _loginPanel.Visible = _loginPanel == target;
+            if (_syncedAccountPanel.Visible != (_syncedAccountPanel == target)) _syncedAccountPanel.Visible = _syncedAccountPanel == target;
+            if (_availableAccountPanel.Visible != (_availableAccountPanel == target)) _availableAccountPanel.Visible = _availableAccountPanel == target;
+            if (_noSelectionLabel.Visible != (_noSelectionLabel == target)) _noSelectionLabel.Visible = _noSelectionLabel == target;
+        }
 
         if (selectedNode?.Tag is LoginNode loginNode)
         {
-            _loginPanel.Visible = true;
+            ShowPanel(_loginPanel);
             if (selectionChanged)
             {
                 _loginIdLabel.Text = loginNode.LoginId;
@@ -757,18 +833,18 @@ sealed partial class ManageAccountsForm : Form
         {
             if (accountNode.IsSynced && accountNode.SyncInfo != null)
             {
-                _syncedAccountPanel.Visible = true;
+                ShowPanel(_syncedAccountPanel);
                 UpdateSyncedAccountLabels(accountNode);
             }
             else if (_vm.SettingUpAccounts.Contains(accountNode.AccountId))
             {
-                _availableAccountPanel.Visible = true;
+                ShowPanel(_availableAccountPanel);
                 _availableAccountLabel.Text = $"{accountNode.Name} is being set up...";
                 _addAccountButton.Visible = false;
             }
             else
             {
-                _availableAccountPanel.Visible = true;
+                ShowPanel(_availableAccountPanel);
                 _availableAccountLabel.Text = $"{accountNode.Name} is not currently synced.";
                 _addAccountButton.Visible = true;
             }
@@ -784,7 +860,7 @@ sealed partial class ManageAccountsForm : Form
             {
                 UpdateVersionDisplay();
             }
-            _noSelectionLabel.Visible = true;
+            ShowPanel(_noSelectionLabel);
         }
     }
 
@@ -2001,30 +2077,11 @@ sealed partial class ManageAccountsForm : Form
             Render();
             FetchInitialActivity();
             EnsureOnScreen();
-            // Briefly set TopMost to ensure the panel appears above other windows
-            TopMost = true;
-            BeginInvoke(() => TopMost = false);
         }
         else
         {
             _vm.ActivityCache.Clear();
         }
-    }
-
-    protected override void OnDeactivate(EventArgs e)
-    {
-        base.OnDeactivate(e);
-        // Dropbox-style: hide when user clicks elsewhere.
-        // Don't hide during operations (OAuth, re-auth), modal dialogs, or
-        // when a child form (AddAccountForm, MessageBox) owns focus.
-        BeginInvoke(() =>
-        {
-            if (_operationInProgress)
-                return;
-            if (ContainsFocus || OwnedForms.Length > 0)
-                return;
-            Hide();
-        });
     }
 
     private void PositionNearTray()

@@ -2,6 +2,7 @@
 #   1. This file (VERSION)
 #   2. windows/FileNodeClient.Package/AppxManifest.xml  (<Identity Version="...">)
 
+1.0.42.0 2026-03-10  Regular window, fix UI flicker (incremental tree, stable panels)
 1.0.41.0 2026-03-10  Fix download tracking gap: keep pending until OnDownloadStarted
 1.0.40.0 2026-03-10  Fix collection-modified crash: defensive list copies in ServiceClient
 1.0.39.0 2026-03-10  Stabilize activity list: 1s entry rebuild, fill with pending entries

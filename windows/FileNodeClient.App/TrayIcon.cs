@@ -366,7 +366,7 @@ sealed class TrayIcon : IDisposable
     {
         if (_manageForm != null && !_manageForm.IsDisposed && _manageForm.Visible)
         {
-            _manageForm.Hide();
+            _manageForm.Activate();
             return;
         }
 
@@ -374,6 +374,7 @@ sealed class TrayIcon : IDisposable
             _manageForm = new ManageAccountsForm(_serviceClient, _cts);
 
         _manageForm.Show();
+        _manageForm.Activate();
     }
 
     public void Dispose()
