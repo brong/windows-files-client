@@ -28,6 +28,10 @@ public interface IJmapClient : IDisposable
     /// </summary>
     long? MaxSizeBlobSet { get; }
     /// <summary>
+    /// Whether the server supports urn:ietf:params:jmap:blob (Blob/upload, Blob/get).
+    /// </summary>
+    bool HasBlob { get; }
+    /// <summary>
     /// Whether the server supports Blob/convert (blobext capability).
     /// </summary>
     bool HasBlobConvert { get; }

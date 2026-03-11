@@ -103,7 +103,9 @@ public class JmapClient : IJmapClient
         }
     }
 
-    public bool HasBlobConvert => Session.HasAccountCapability(AccountId, BlobExtCapability);
+    public bool HasBlob => Session.HasAccountCapability(AccountId, BlobCapability);
+    public bool HasBlobExt => Session.HasAccountCapability(AccountId, BlobExtCapability);
+    public bool HasBlobConvert => HasBlobExt;
 
     public string? TrashUrl
     {
@@ -518,7 +520,9 @@ public class JmapClient : IJmapClient
         List<UploadedChunkInfo>? previousChunks = null,
         CancellationToken ct = default)
     {
-        var baseChunkSize = ChunkSize ?? throw new InvalidOperationException("ChunkSize not available");
+        // Use BlobExt chunkSize if available, otherwise default to MaxChunkSize.
+        // Blob/upload works with the base Blob capability; BlobExt adds digest:sha.
+        var baseChunkSize = ChunkSize ?? MaxChunkSize;
 
         // Reject files that exceed the server's max combined blob size
         var maxSize = MaxSizeBlobSet;
@@ -542,14 +546,16 @@ public class JmapClient : IJmapClient
         if (effectiveChunkSize > MaxChunkSize)
             effectiveChunkSize = MaxChunkSize;
 
+        var hasBlobExt = HasBlobExt;
         return UploadBlobChunkedInternalAsync(_http, Session.GetUploadUrl(AccountId), AccountId,
-            effectiveChunkSize,
+            effectiveChunkSize, hasBlobExt,
             (caps, method, args) => CallAsync(caps, method, args, ct),
             data, contentType, totalSize, onProgress, onChunkUploaded, previousChunks, ct);
     }
 
     internal static async Task<string> UploadBlobChunkedInternalAsync(
         HttpClient http, string uploadUrl, string accountId, long chunkSize,
+        bool includeShaDigest,
         Func<string[], string, object, Task<JsonElement>> callAsync,
         Stream data, string contentType, long totalSize,
         Action<long>? onProgress, Action<UploadedChunkInfo>? onChunkUploaded,
@@ -608,7 +614,7 @@ public class JmapClient : IJmapClient
                 // All chunks expired — start from scratch
                 data.Position = 0;
                 return await UploadBlobChunkedInternalAsync(http, uploadUrl, accountId,
-                    chunkSize, callAsync, data, contentType, totalSize,
+                    chunkSize, includeShaDigest, callAsync, data, contentType, totalSize,
                     onProgress, onChunkUploaded, null, ct);
             }
 
@@ -639,7 +645,7 @@ public class JmapClient : IJmapClient
                         data.Position = 0;
                         ArrayPool<byte>.Shared.Return(hashBuf);
                         return await UploadBlobChunkedInternalAsync(http, uploadUrl, accountId,
-                            chunkSize, callAsync, data, contentType, totalSize,
+                            chunkSize, includeShaDigest, callAsync, data, contentType, totalSize,
                             onProgress, onChunkUploaded, null, ct);
                     }
 
@@ -698,10 +704,12 @@ public class JmapClient : IJmapClient
             onProgress?.Invoke(totalSize);
 
             // Combine chunks via Blob/upload
-            var dataArray = chunkBlobIds.Select(c => new Dictionary<string, object?>
+            var dataArray = chunkBlobIds.Select(c =>
             {
-                ["blobId"] = c.BlobId,
-                ["digest:sha"] = c.Sha1Base64,
+                var item = new Dictionary<string, object?> { ["blobId"] = c.BlobId };
+                if (includeShaDigest)
+                    item["digest:sha"] = c.Sha1Base64;
+                return item;
             }).ToArray();
 
             var createId = Guid.NewGuid().ToString("N")[..12];
@@ -709,10 +717,12 @@ public class JmapClient : IJmapClient
             {
                 ["data"] = dataArray,
                 ["type"] = contentType,
-                ["digest:sha"] = overallSha1Base64,
             };
+            if (includeShaDigest)
+                createItem["digest:sha"] = overallSha1Base64;
 
-            var result = await callAsync(BlobExtUsing, "Blob/upload", new
+            var combineCapabilities = includeShaDigest ? BlobExtUsing : BlobUsing;
+            var result = await callAsync(combineCapabilities, "Blob/upload", new
             {
                 accountId,
                 create = new Dictionary<string, object> { [createId] = createItem },

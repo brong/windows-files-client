@@ -93,7 +93,9 @@ public class AccountScopedJmapClient : IJmapClient
         }
     }
 
-    public bool HasBlobConvert => _parent.Session.HasAccountCapability(_accountId, JmapClient.BlobExtCapability);
+    public bool HasBlob => _parent.Session.HasAccountCapability(_accountId, JmapClient.BlobCapability);
+    public bool HasBlobExt => _parent.Session.HasAccountCapability(_accountId, JmapClient.BlobExtCapability);
+    public bool HasBlobConvert => HasBlobExt;
 
     public string? TrashUrl
     {
@@ -483,7 +485,7 @@ public class AccountScopedJmapClient : IJmapClient
         List<JmapClient.UploadedChunkInfo>? previousChunks = null,
         CancellationToken ct = default)
     {
-        var baseChunkSize = ChunkSize ?? throw new InvalidOperationException("ChunkSize not available");
+        var baseChunkSize = ChunkSize ?? JmapClient.MaxChunkSize;
 
         var maxSize = MaxSizeBlobSet;
         if (maxSize.HasValue && totalSize > maxSize.Value)
@@ -503,8 +505,9 @@ public class AccountScopedJmapClient : IJmapClient
         if (effectiveChunkSize > JmapClient.MaxChunkSize)
             effectiveChunkSize = JmapClient.MaxChunkSize;
 
+        var hasBlobExt = HasBlobExt;
         return JmapClient.UploadBlobChunkedInternalAsync(Http, Session.GetUploadUrl(_accountId), _accountId,
-            effectiveChunkSize,
+            effectiveChunkSize, hasBlobExt,
             (caps, method, args) => CallAsync(caps, method, args, ct),
             data, contentType, totalSize, onProgress, onChunkUploaded, previousChunks, ct);
     }

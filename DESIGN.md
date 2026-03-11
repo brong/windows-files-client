@@ -87,11 +87,11 @@ The **Jmap** and **Logging** layers are cross-platform (no OS dependencies). The
 |-----------|-----|-----------------|
 | JMAP Core | `urn:ietf:params:jmap:core` | Method call limits, upload limits |
 | FileNode | `urn:ietf:params:jmap:filenode` (or dev URI) | File sync API |
-| Blob | `urn:ietf:params:jmap:blob` | Inline blob fetch + digest verification (RFC 9404) |
-| BlobExt | `urn:ietf:params:jmap:blobext` | `Blob/convert` for thumbnails, chunked upload |
+| Blob | `urn:ietf:params:jmap:blob` | `Blob/upload` (chunked combine), `Blob/get` (inline fetch + digest verification), `maxDataSources`, `maxSizeBlobSet` (RFC 9404) |
+| BlobExt | `urn:ietf:params:jmap:blobext` | `Blob/convert` for thumbnails, `chunkSize` hint, `digest:sha` verification on chunks |
 | Quota | `urn:ietf:params:jmap:quota` | Storage quota reporting (RFC 9425) |
 
-Always check for capability presence before using its methods. The server may not support all capabilities, and the client must degrade gracefully. For example, if `Blob` capability is absent, skip digest verification. If `BlobExt` is absent, skip thumbnail fetching via `Blob/convert`.
+Always check for capability presence before using its methods. The server may not support all capabilities, and the client must degrade gracefully. For example, if `Blob` capability is absent, fall back to simple uploads (no chunked combine). If `BlobExt` is absent, skip thumbnail fetching via `Blob/convert` and omit `digest:sha` fields from chunked upload combine requests.
 
 ### FileNode Data Model
 
@@ -329,14 +329,15 @@ Skip an entry if its parent folder is still pending creation (it'll be processed
 
 ### Chunked Upload (Large Files)
 
-Files larger than the server's suggested `chunkSize` (from `blobext` capability) are uploaded in chunks and reassembled via `Blob/set` combine:
+Chunked uploads require the `urn:ietf:params:jmap:blob` capability (`Blob/upload` with `dataSourceObjects`). The `blobext` capability is **not** required — it only adds `chunkSize` (a server-suggested chunk size hint) and `digest:sha` verification on individual chunks. When only the base Blob capability is available, use a default chunk size (64MB) and omit `digest:sha` fields from the combine request.
 
-1. Calculate effective chunk size: start from the server-suggested size (already a power of 2), double until `ceil(fileSize / chunkSize) <= maxDataSources` (from `urn:ietf:params:jmap:blob`), clamp to [1MB, 64MB]
-2. If fileSize > `maxSizeBlobSet`, reject immediately — the file cannot be uploaded
-3. Upload each chunk as a separate blob POST, collecting `(chunkIndex, blobId)` pairs
-4. Persist chunk blobIds with the outbox entry for resumability
-5. `Blob/set create` with `dataSourceList` referencing all chunk blobIds → final blobId
-6. Create the FileNode with the combined blobId
+1. Gate on `HasBlob` (not `ChunkSize` or `HasBlobExt`) — use chunked upload whenever `urn:ietf:params:jmap:blob` is available
+2. Calculate effective chunk size: start from `chunkSize` (from `blobext` capability, or 64MB default), double until `ceil(fileSize / chunkSize) <= maxDataSources` (from `urn:ietf:params:jmap:blob`), clamp to [1MB, 64MB]
+3. If fileSize > `maxSizeBlobSet`, reject immediately — the file cannot be uploaded
+4. Upload each chunk as a separate blob POST, collecting `(chunkIndex, blobId)` pairs
+5. Persist chunk blobIds with the outbox entry for resumability
+6. `Blob/upload create` with `data` array referencing all chunk blobIds → final blobId. Include `digest:sha` fields only when the `blobext` capability is present
+7. Create the FileNode with the combined blobId
 
 Force HTTP/1.1 for chunk uploads (see §3 Concurrency Control). Insert `Task.Yield()` between chunks to let interactive work proceed.
 
@@ -860,7 +861,7 @@ Fetch the content digest via `Blob/get` in parallel with the content download. D
 HTTP/2 multiplexes all requests to the same origin over a single TCP connection. When the client is rapidly uploading small chunks (each a separate POST), the upload stream saturates the shared connection and interactive downloads (user opening a file) get no bandwidth. The fix: force uploads to use HTTP/1.1 (`HttpRequestMessage.Version = HttpVersion.Version11`), which creates separate TCP connections per upload. This leaves the HTTP/2 connection free for interactive traffic (downloads, JMAP method calls, SSE). Also insert `Task.Yield()` between upload chunks so the async scheduler can dispatch interactive work between chunk uploads.
 
 **23. Chunk size must respect `maxDataSources` from the Blob capability.**
-The `urn:ietf:params:jmap:blob` capability includes `maxDataSources` (maximum number of data sources in a `Blob/set` combine call) and `maxSizeBlobSet` (maximum total size for blob operations). The server-suggested `chunkSize` from `blobext` may be too small for large files — if `ceil(fileSize / chunkSize) > maxDataSources`, the upload will fail. Calculate the effective chunk size by doubling the base chunk size until the file fits within `maxDataSources` chunks, clamped to `[1MB, 64MB]`. Reject files exceeding `maxSizeBlobSet` outright — they cannot be uploaded.
+The `urn:ietf:params:jmap:blob` capability includes `maxDataSources` (maximum number of data sources in a `Blob/upload` combine call) and `maxSizeBlobSet` (maximum total size for blob operations). The server-suggested `chunkSize` from `blobext` may be too small for large files — if `ceil(fileSize / chunkSize) > maxDataSources`, the upload will fail. Calculate the effective chunk size by doubling the base chunk size until the file fits within `maxDataSources` chunks, clamped to `[1MB, 64MB]`. Reject files exceeding `maxSizeBlobSet` outright — they cannot be uploaded.
 
 **24. Distinguish permanent rejections from temporary errors — and never give up on retriable files.**
 When an upload fails, the user needs to know whether to wait or to act. Use two tiers: **temporary errors** (orange, auto-retry with backoff — timeouts, 5xx, 400, 403, network errors, I/O) and **permanent rejections** (red, persist until user fixes — HTTP 413, `maxSizeBlobSet` exceeded). Only reject permanently when the *file itself* is the problem. A 403 is a bad token, not a bad file. A 400 might be a rate limit (`urn:ietf:params:jmap:error:limit`). These must retry indefinitely (backoff caps at 60s). Keep permanent rejections with `IsRejected=true` and a human-readable `RejectionReason`. Show them in the activity list (red, below active transfers). Mark the file not-in-sync in the file system (Explorer overlay icon). Turn the tray icon red. Auto-clear the rejection when the user modifies or deletes the file. Temporary errors stay visible in the activity list (orange) so the user can see retries in progress, but don't affect the tray icon.
@@ -887,3 +888,9 @@ If the stall timer starts ticking when the upload is *enqueued* rather than when
 
 **31. Report upload progress as bytes, not percentage.**
 Shipping percentage (int 0-100) over IPC loses precision for large files and makes it impossible to show bytes/total in the UI. With a 2GB file, each 1% is 20MB — the progress bar appears frozen for long stretches. Report cumulative bytes uploaded and file size separately; the UI calculates percentage locally. Throttle progress callbacks from the upload streams (100ms) to avoid flooding the IPC channel — without throttling, every 8KB socket write generates a callback that propagates through the outbox, IPC broadcast, and UI render path.
+
+**32. Use SocketsHttpHandler with connection lifetime limits — HttpClientHandler poisons the pool.**
+`HttpClientHandler` has no `PooledConnectionLifetime` control. When a server closes a TCP connection during a long transfer (e.g., nginx timeout), the dead connection stays in the pool and subsequent requests fail with `SocketException: An operation was attempted on something that is not a socket`. This is especially catastrophic for large file uploads where the server-side timeout fires before the upload completes. Use `SocketsHttpHandler` with `PooledConnectionLifetime` (5 minutes) and `PooledConnectionIdleTimeout` (2 minutes) to recycle connections before they go stale. This applies to all HTTP handler chains — both `DelegatingHandler` subclasses (token auth, OAuth) should create `SocketsHttpHandler` as their inner handler.
+
+**33. Chunked upload requires Blob capability, not BlobExt — `digest:sha` is optional.**
+`Blob/upload` with `dataSourceObjects` (combining chunks into a final blob) is part of the base `urn:ietf:params:jmap:blob` capability (RFC 9404). The `blobext` capability adds two things: a server-suggested `chunkSize` and the ability to include `digest:sha` fields for per-chunk and overall SHA verification. When only the base Blob capability is present: use a default chunk size (64MB), omit all `digest:sha` fields from the combine request, and use `["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:blob"]` as the capability list (not `blobext`). Gate chunked uploads on `HasBlob`, not on `ChunkSize` or `HasBlobExt`.

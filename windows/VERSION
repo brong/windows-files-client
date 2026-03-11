@@ -2,6 +2,7 @@
 #   1. This file (VERSION)
 #   2. windows/FileNodeClient.Package/AppxManifest.xml  (<Identity Version="...">)
 
+1.0.49.0 2026-03-10  Chunked upload with base Blob capability, digest:sha only when BlobExt available
 1.0.48.0 2026-03-10  Fix connection pool poisoning: use SocketsHttpHandler with lifetime limits
 1.0.47.0 2026-03-10  Fix detail panel: swap active panel instead of show/hide siblings
 1.0.46.0 2026-03-10  Fix activity layout: split detail/activity into separate containers
