@@ -874,9 +874,9 @@ sealed partial class ManageAccountsForm : Form
             return;
         }
 
-        // No activity display when no selection or login selected
+        // No activity display when nothing selected
         var selectedNode = _treeView.SelectedNode;
-        if (selectedNode == null || selectedNode.Tag is LoginNode)
+        if (selectedNode == null)
         {
             _activityListView.Visible = false;
             _activityEmptyLabel.Visible = false;
@@ -917,7 +917,8 @@ sealed partial class ManageAccountsForm : Form
             allDownloads = allDownloads.Where(d => d.LoginId == _vm.SelectedLoginId).ToList();
         }
 
-        bool hasSyncedSelection = selectedNode?.Tag is AccountNode selAcct && selAcct.IsSynced;
+        bool hasSyncedSelection = selectedNode?.Tag is AccountNode selAcct && selAcct.IsSynced
+            || (selectedNode?.Tag is LoginNode && _vm.Accounts.Any(a => a.LoginId == _vm.SelectedLoginId));
 
         RefreshActivityList(allEntries, allDownloads, hasSyncedSelection);
     }
@@ -1035,7 +1036,6 @@ sealed partial class ManageAccountsForm : Form
     private void OnActivityPushed(ActivitySnapshot snapshot)
     {
         if (InvokeRequired) { BeginInvoke(() => OnActivityPushed(snapshot)); return; }
-        Log.Info($"[Activity Push] {snapshot.AccountId}: downloads={snapshot.ActiveDownloads?.Count ?? 0}, totalDl={snapshot.TotalDownloadCount}, active={snapshot.ActiveEntries.Count}, pending={snapshot.PendingEntries.Count}");
         _vm.ActivityCache[snapshot.AccountId] = snapshot;
         ScheduleRender();
     }

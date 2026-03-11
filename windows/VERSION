@@ -2,6 +2,7 @@
 #   1. This file (VERSION)
 #   2. windows/FileNodeClient.Package/AppxManifest.xml  (<Identity Version="...">)
 
+1.0.45.0 2026-03-10  Fix: show downloads when login node selected (not just account node)
 1.0.44.0 2026-03-10  Diagnostic logging (Info level) for download activity display
 1.0.43.0 2026-03-10  Diagnostic logging for download activity display
 1.0.42.0 2026-03-10  Regular window, fix UI flicker (incremental tree, stable panels)
