@@ -56,7 +56,7 @@ public class SyncEngine : IDisposable
     // Limits concurrent pin-hydration work to prevent thread pool starvation.
     // CfHydratePlaceholder blocks a thread pool thread while streaming downloads
     // also need thread pool threads — too many concurrent hydrations = deadlock.
-    private readonly SemaphoreSlim _hydrationGate = new(2);
+    private readonly SemaphoreSlim _hydrationGate = new(4);
     // Files recently uploaded — stores the LastWriteTimeUtc at upload time so we
     // can suppress the FileSystemWatcher echo that fires when
     // ConvertToPlaceholder / UpdatePlaceholderIdentity changes file attributes.
@@ -1889,34 +1889,44 @@ public class SyncEngine : IDisposable
                 Log.SafeInvoke(() => ActivityChanged?.Invoke(), "SyncEngine.HydrateQueued.ActivityChanged");
             }
 
+            // Hydrate files in parallel, limited by _hydrationGate (semaphore).
+            // CfHydratePlaceholder blocks the calling thread until the file is
+            // fully downloaded, so parallelism gives us concurrent downloads.
+            var tasks = new List<Task>();
             foreach (var filePath in dehydratedFiles)
             {
                 ct.ThrowIfCancellationRequested();
-                try
+                tasks.Add(Task.Run(() =>
                 {
-                    // Re-check in case another path hydrated it
-                    var attrs = File.GetAttributes(filePath);
-                    if ((attrs & dehydratedFlag) == 0)
+                    try
                     {
-                        _pendingHydrations.TryRemove(filePath, out _);
-                        continue;
-                    }
+                        _hydrationGate.Wait(ct);
+                        try
+                        {
+                            // Re-check in case another path hydrated it
+                            var attrs = File.GetAttributes(filePath);
+                            if ((attrs & dehydratedFlag) == 0)
+                            {
+                                _pendingHydrations.TryRemove(filePath, out _);
+                                return;
+                            }
 
-                    Log.Info($"{_logPrefix} Hydrating pinned file: {Path.GetFileName(filePath)}");
-                    // Keep in _pendingHydrations until OnDownloadStarted fires —
-                    // that moves it atomically from pending to _activeDownloads,
-                    // avoiding a gap where the file is in neither collection.
-                    HydratePlaceholder(filePath);
-                    count++;
-                }
-                catch (Exception ex) when (ex is not OperationCanceledException)
-                {
-                    Log.Error($"{_logPrefix}  Hydration failed for {Path.GetFileName(filePath)}: {ex.Message}");
-                    _pendingHydrations.TryRemove(filePath, out _);
-                    Log.SafeInvoke(() => ActivityChanged?.Invoke(), "SyncEngine.HydrateFailed.ActivityChanged");
-                    failed.Add(filePath);
-                }
+                            Log.Info($"{_logPrefix} Hydrating pinned file: {Path.GetFileName(filePath)}");
+                            HydratePlaceholder(filePath);
+                            Interlocked.Increment(ref count);
+                        }
+                        finally { _hydrationGate.Release(); }
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        Log.Error($"{_logPrefix}  Hydration failed for {Path.GetFileName(filePath)}: {ex.Message}");
+                        _pendingHydrations.TryRemove(filePath, out _);
+                        Log.SafeInvoke(() => ActivityChanged?.Invoke(), "SyncEngine.HydrateFailed.ActivityChanged");
+                        lock (failed) { failed.Add(filePath); }
+                    }
+                }, ct));
             }
+            Task.WhenAll(tasks).Wait(ct);
 
             // Retry failed hydrations (e.g. transient network errors)
             for (int retry = 1; retry <= 3 && failed.Count > 0; retry++)

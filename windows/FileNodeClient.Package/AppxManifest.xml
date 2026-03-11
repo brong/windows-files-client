@@ -13,7 +13,7 @@
   <Identity
     Name="Fastmail.FileNodeClient"
     Publisher="CN=Fastmail Pty Ltd"
-    Version="1.0.52.0"
+    Version="1.0.53.0"
     ProcessorArchitecture="x64" />
 
   <Properties>
