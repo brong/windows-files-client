@@ -320,6 +320,8 @@ sealed class IpcCommandHandler
 
         // Downloads always get fresh data (progress changes rapidly)
         var downloadSnapshot = supervisor.GetActiveDownloadSnapshot();
+        if (downloadSnapshot.Count > 0)
+            Log.Debug($"[Activity] {supervisor.AccountId}: {downloadSnapshot.Count} downloads (active={downloadSnapshot.Count(d => !d.IsPending)}, pending={downloadSnapshot.Count(d => d.IsPending)})");
         List<ActiveDownloadEntry>? downloads = null;
         if (downloadSnapshot.Count > 0)
         {
