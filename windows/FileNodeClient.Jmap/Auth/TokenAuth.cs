@@ -5,7 +5,12 @@ public class TokenAuth : DelegatingHandler
     private readonly string _token;
 
     public TokenAuth(string token)
-        : base(new HttpClientHandler())
+        : base(new SocketsHttpHandler
+        {
+            PooledConnectionLifetime = TimeSpan.FromMinutes(5),
+            PooledConnectionIdleTimeout = TimeSpan.FromMinutes(2),
+            EnableMultipleHttp2Connections = true,
+        })
     {
         _token = token;
     }

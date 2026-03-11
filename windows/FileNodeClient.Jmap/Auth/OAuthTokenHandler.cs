@@ -31,7 +31,12 @@ public class OAuthTokenHandler : DelegatingHandler
 
     public OAuthTokenHandler(string accessToken, string refreshToken,
         string tokenEndpoint, string clientId, DateTimeOffset expiresAt)
-        : base(new HttpClientHandler())
+        : base(new SocketsHttpHandler
+        {
+            PooledConnectionLifetime = TimeSpan.FromMinutes(5),
+            PooledConnectionIdleTimeout = TimeSpan.FromMinutes(2),
+            EnableMultipleHttp2Connections = true,
+        })
     {
         _accessToken = accessToken;
         _refreshToken = refreshToken;
