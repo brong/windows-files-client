@@ -2,6 +2,7 @@
 #   1. This file (VERSION)
 #   2. windows/FileNodeClient.Package/AppxManifest.xml  (<Identity Version="...">)
 
+1.0.39.0 2026-03-10  Stabilize activity list: 1s entry rebuild, fill with pending entries
 1.0.38.0 2026-03-10  Throttle post-hydration SetInSync to avoid overwhelming Explorer
 1.0.37.0 2026-03-10  Fix beta button overlap, safer reauth session URL handling
 1.0.36.0 2026-03-10  Beta server OAuth button, reauth preserves session URL

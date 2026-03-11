@@ -14,6 +14,11 @@ sealed class IpcCommandHandler
     private readonly LoginManager _loginManager;
     public string? IconPath { get; set; }
 
+    // Activity snapshot stabilization: only rebuild the entry list once per second
+    // to avoid flickering when many small files complete in rapid succession.
+    // Progress updates on already-visible entries flow through immediately.
+    private readonly Dictionary<string, (ActivitySnapshot Snapshot, DateTime BuiltAt)> _lastActivity = new();
+
     public IpcCommandHandler(LoginManager loginManager, string? iconPath)
     {
         _loginManager = loginManager;
@@ -299,8 +304,58 @@ sealed class IpcCommandHandler
     public ActivitySnapshot? BuildActivitySnapshot(AccountSupervisor supervisor)
     {
         if (supervisor.Outbox == null) return null;
+
+        var now = DateTime.UtcNow;
+        var fullRebuild = true;
+
+        // Check if we can reuse the previous snapshot's entry list (< 1s old)
+        // and just update progress on already-visible entries.
+        if (_lastActivity.TryGetValue(supervisor.AccountId, out var cached)
+            && (now - cached.BuiltAt).TotalMilliseconds < 1000)
+        {
+            fullRebuild = false;
+        }
+
         var (entries, processingIds) = supervisor.Outbox.GetSnapshot();
 
+        // Downloads always get fresh data (progress changes rapidly)
+        var downloadSnapshot = supervisor.GetActiveDownloadSnapshot();
+        List<ActiveDownloadEntry>? downloads = null;
+        if (downloadSnapshot.Count > 0)
+        {
+            downloads = new List<ActiveDownloadEntry>();
+            int pendingDlCount = 0;
+            foreach (var d in downloadSnapshot)
+            {
+                if (d.IsPending && pendingDlCount >= 10) continue;
+                if (d.IsPending) pendingDlCount++;
+                downloads.Add(new ActiveDownloadEntry(d.FileName, d.StartedAt, d.Progress, d.TotalSize, d.IsPending));
+            }
+        }
+
+        if (!fullRebuild)
+        {
+            // Quick update: reuse previous entry lists but refresh progress
+            // on already-visible active entries.
+            var prev = cached.Snapshot;
+            var updatedActive = prev.ActiveEntries.Select(ae =>
+            {
+                var progress = supervisor.Outbox.GetProgress(ae.Id);
+                return ae with { UploadedBytes = progress, IsProcessing = processingIds.Contains(ae.Id) };
+            }).ToList();
+
+            return new ActivitySnapshot(
+                supervisor.AccountId,
+                updatedActive,
+                prev.ErrorEntries,
+                prev.PendingEntries,
+                prev.RejectedEntries,
+                downloads,
+                entries.Length,
+                downloadSnapshot.Count);
+        }
+
+        // Full rebuild: categorize all entries
         var active = new List<OutboxEntry>();
         var errors = new List<OutboxEntry>();
         var pending = new List<OutboxEntry>();
@@ -326,6 +381,16 @@ sealed class IpcCommandHandler
             else pending.Add(oe);
         }
 
+        // Always include a few pending entries in the active list so there's
+        // always something visible during rapid small-file processing.
+        // This prevents the "empty flash" between one file completing and
+        // the next starting.
+        if (active.Count == 0 && pending.Count > 0)
+        {
+            active.AddRange(pending.Take(3));
+            pending = pending.Skip(3).ToList();
+        }
+
         // Rejected entries (kept separately, not in normal processing queue)
         var rejectedEntries = supervisor.Outbox.GetRejectedSnapshot();
         var rejected = rejectedEntries.Select(e =>
@@ -343,21 +408,7 @@ sealed class IpcCommandHandler
                 false, null, fs, true, e.RejectionReason);
         }).ToList();
 
-        var downloadSnapshot = supervisor.GetActiveDownloadSnapshot();
-        List<ActiveDownloadEntry>? downloads = null;
-        if (downloadSnapshot.Count > 0)
-        {
-            downloads = new List<ActiveDownloadEntry>();
-            int pendingDlCount = 0;
-            foreach (var d in downloadSnapshot)
-            {
-                if (d.IsPending && pendingDlCount >= 10) continue;
-                if (d.IsPending) pendingDlCount++;
-                downloads.Add(new ActiveDownloadEntry(d.FileName, d.StartedAt, d.Progress, d.TotalSize, d.IsPending));
-            }
-        }
-
-        return new ActivitySnapshot(
+        var snapshot = new ActivitySnapshot(
             supervisor.AccountId,
             active,
             errors,
@@ -366,6 +417,9 @@ sealed class IpcCommandHandler
             downloads,
             entries.Length,
             downloadSnapshot.Count);
+
+        _lastActivity[supervisor.AccountId] = (snapshot, now);
+        return snapshot;
     }
 
     private static T Deserialize<T>(JsonElement? element) => IpcSerializer.Deserialize<T>(element);
