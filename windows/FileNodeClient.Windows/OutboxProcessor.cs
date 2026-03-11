@@ -515,9 +515,9 @@ public class OutboxProcessor : IDisposable
             ResetStall();
         }
 
-        // Use chunked upload whenever Blob capability is available. The effective
-        // chunk size is clamped to 1MB-64MB inside UploadBlobChunkedAsync, so even
-        // if the server advertises a large chunkSize, we'll chunk at ≤64MB.
+        // Use chunked upload whenever Blob capability is available. Blob/upload
+        // with data array (combining blobId references) is part of urn:ietf:params:jmap:blob
+        // per RFC 9404. BlobExt adds chunkSize hint and digest:sha verification.
         if (_jmapClient.HasBlob)
         {
             // Convert persisted chunks to JmapClient format for resume

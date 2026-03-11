@@ -520,8 +520,6 @@ public class JmapClient : IJmapClient
         List<UploadedChunkInfo>? previousChunks = null,
         CancellationToken ct = default)
     {
-        // Use BlobExt chunkSize if available, otherwise default to MaxChunkSize.
-        // Blob/upload works with the base Blob capability; BlobExt adds digest:sha.
         var baseChunkSize = ChunkSize ?? MaxChunkSize;
 
         // Reject files that exceed the server's max combined blob size

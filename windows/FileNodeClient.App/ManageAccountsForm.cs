@@ -941,7 +941,9 @@ sealed partial class ManageAccountsForm : Form
         }
 
         bool hasSyncedSelection = selectedNode?.Tag is AccountNode selAcct && selAcct.IsSynced
-            || (selectedNode?.Tag is LoginNode && _vm.Accounts.Any(a => a.LoginId == _vm.SelectedLoginId));
+                && selAcct.SyncInfo?.Status != AccountStatus.Disconnected
+            || (selectedNode?.Tag is LoginNode && _vm.Accounts.Any(a => a.LoginId == _vm.SelectedLoginId
+                && a.Status != AccountStatus.Disconnected));
 
         RefreshActivityList(allEntries, allDownloads, hasSyncedSelection);
     }
