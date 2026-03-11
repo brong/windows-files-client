@@ -24,6 +24,7 @@ sealed class LoginManager : IDisposable
     private readonly List<AccountSupervisor> _supervisors = new();
     private readonly List<string> _connectingLoginIds = new();
     private readonly List<FailedLoginInfo> _failedLogins = new();
+    private List<AccountCache.CachedAccount> _cachedAccounts = new();
     private readonly object _lock = new();
     private NetworkMonitor? _networkMonitor;
     private Timer? _retryTimer;
@@ -62,6 +63,15 @@ sealed class LoginManager : IDisposable
         get { lock (_lock) return _sessions.Select(s => s.LoginId).ToList(); }
     }
 
+    /// <summary>
+    /// Accounts from the cache that haven't been replaced by live supervisors yet.
+    /// Used to show accounts immediately on startup before network connects.
+    /// </summary>
+    public IReadOnlyList<AccountCache.CachedAccount> CachedAccounts
+    {
+        get { lock (_lock) return _cachedAccounts.ToList(); }
+    }
+
     public event Action? AccountsChanged;
     public event Action<SyncStatus>? AggregateStatusChanged;
 
@@ -89,12 +99,15 @@ sealed class LoginManager : IDisposable
 
         var storedLogins = _credentialStore.LoadAll();
 
-        // Show all stored logins as "Connecting..." in the UI immediately
+        // Load cached account metadata so accounts appear in the UI immediately
         lock (_lock)
         {
+            _cachedAccounts = AccountCache.Load();
             foreach (var login in storedLogins)
                 _connectingLoginIds.Add(login.LoginId);
         }
+        if (_cachedAccounts.Count > 0)
+            Log.Info($"Loaded {_cachedAccounts.Count} cached account(s) for instant display");
         Log.SafeInvoke(() => AccountsChanged?.Invoke(), "LoginManager.AccountsChanged");
 
         foreach (var login in storedLogins)
@@ -213,6 +226,11 @@ sealed class LoginManager : IDisposable
 
         _credentialStore.Remove(loginId);
 
+        // Remove cached entries for this login
+        lock (_lock)
+            _cachedAccounts.RemoveAll(c => c.LoginId == loginId);
+        SaveAccountCache();
+
         // Clean up any orphaned sync root registrations left behind by
         // partial cleanup failures (e.g. error 5 from cfapi).
         AuditOrphanedSyncRoots();
@@ -280,6 +298,24 @@ sealed class LoginManager : IDisposable
     /// to any active supervisor (e.g. account removed server-side between runs).
     /// Detach orphans so the Explorer nav pane entry is removed.
     /// </summary>
+    /// <summary>
+    /// Persist current live accounts to cache for instant display on next startup.
+    /// </summary>
+    private void SaveAccountCache()
+    {
+        List<AccountCache.CachedAccount> toSave;
+        lock (_lock)
+        {
+            toSave = _supervisors.Select(s => new AccountCache.CachedAccount(
+                s.AccountId,
+                GetLoginIdForAccount(s.AccountId) ?? "",
+                s.DisplayName,
+                s.SyncRootPath,
+                s.Username)).ToList();
+        }
+        AccountCache.Save(toSave);
+    }
+
     private void AuditOrphanedSyncRoots()
     {
         try
@@ -813,6 +849,7 @@ sealed class LoginManager : IDisposable
         _credentialStore.Save(loginId, session.Token, session.SessionUrl, enabled,
             session.RefreshToken, session.TokenEndpoint, session.ClientId, session.ExpiresAtUnixSeconds);
 
+        SaveAccountCache();
         Log.SafeInvoke(() => AccountsChanged?.Invoke(), "LoginManager.AccountsChanged");
         RaiseAggregateStatus();
     }
@@ -1122,6 +1159,14 @@ sealed class LoginManager : IDisposable
         if (persist)
             _credentialStore.Save(loginId, token, sessionUrl, enabledAccountIds,
                 refreshToken, tokenEndpoint, clientId, expiresAtUnixSeconds);
+
+        // Remove cached placeholders for accounts that are now live
+        lock (_lock)
+        {
+            var liveIds = startedSupervisors.Select(s => s.AccountId).ToHashSet();
+            _cachedAccounts.RemoveAll(c => liveIds.Contains(c.AccountId));
+        }
+        SaveAccountCache();
 
         Log.SafeInvoke(() => AccountsChanged?.Invoke(), "LoginManager.AccountsChanged");
         RaiseAggregateStatus();

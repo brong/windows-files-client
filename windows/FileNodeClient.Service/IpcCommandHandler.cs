@@ -75,6 +75,7 @@ sealed class IpcCommandHandler
     {
         var supervisors = _loginManager.Supervisors;
         var accounts = supervisors.Select(BuildAccountInfo).ToList();
+        AppendCachedAccounts(accounts);
 
         return new StatusSnapshotResult(
             accounts,
@@ -89,12 +90,31 @@ sealed class IpcCommandHandler
     {
         var supervisors = _loginManager.Supervisors;
         var accounts = supervisors.Select(BuildAccountInfo).ToList();
+        AppendCachedAccounts(accounts);
 
         return new AccountsChangedPush(
             accounts,
             _loginManager.ConnectingLoginIds.ToList(),
             _loginManager.FailedLogins.Select(f => new FailedLogin(f.LoginId, f.Error)).ToList(),
             _loginManager.ConnectedLoginIds.ToList());
+    }
+
+    /// <summary>
+    /// Append cached (not-yet-connected) accounts so the UI shows them
+    /// immediately on startup. They appear with Disconnected status until
+    /// the real supervisor replaces them.
+    /// </summary>
+    private void AppendCachedAccounts(List<AccountInfo> accounts)
+    {
+        var liveIds = accounts.Select(a => a.AccountId).ToHashSet();
+        foreach (var cached in _loginManager.CachedAccounts)
+        {
+            if (liveIds.Contains(cached.AccountId)) continue;
+            accounts.Add(new AccountInfo(
+                cached.AccountId, cached.LoginId, cached.DisplayName,
+                cached.SyncRootPath, cached.Username,
+                AccountStatus.Disconnected, "Connecting...", 0));
+        }
     }
 
     public AccountStatusPush BuildAccountStatus(AccountSupervisor supervisor)

@@ -398,13 +398,30 @@ sealed partial class ManageAccountsForm : Form
             Padding = new Padding(0, 8, 0, 0),
         };
 
-        _detailPanel.Controls.AddRange([_loginPanel, _syncedAccountPanel, _availableAccountPanel, _noSelectionLabel, _activityEmptyLabel, _activityListView]);
+        // Split detail area into two containers:
+        // 1. _detailTopPanel (Top, AutoSize) — holds whichever detail panel is active
+        // 2. _activityPanel (Fill) — holds only the activity list and empty label
+        // This prevents docking fights and scroll position corruption.
+        var detailTopPanel = new Panel
+        {
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+        };
+        detailTopPanel.Controls.AddRange([_loginPanel, _syncedAccountPanel, _availableAccountPanel, _noSelectionLabel]);
 
-        // WinForms docks back-to-front (highest index first). Fill controls
-        // must be at the front (lowest index, processed last) so they get
-        // the remaining space after all Top panels are laid out.
+        var activityPanel = new Panel
+        {
+            Dock = DockStyle.Fill,
+        };
+        activityPanel.Controls.AddRange([_activityEmptyLabel, _activityListView]);
         _activityListView.BringToFront();
         _activityEmptyLabel.BringToFront();
+
+        _detailPanel.Controls.Add(detailTopPanel);
+        _detailPanel.Controls.Add(activityPanel);
+        // Fill must be at front (docked last) so Top panel gets its space first
+        activityPanel.BringToFront();
 
         // --- Bottom bar ---
         var bottomPanel = new Panel
@@ -1298,6 +1315,11 @@ sealed partial class ManageAccountsForm : Form
             _activityListView.Items.RemoveAt(_activityListView.Items.Count - 1);
 
         _activityListView.EndUpdate();
+
+        // Ensure the list is scrolled to the top — item insertions/removals
+        // can leave the scroll position so that items render above the viewport.
+        if (_activityListView.Items.Count > 0)
+            _activityListView.EnsureVisible(0);
     }
 
     private void UpdateItemFields(ListViewItem item,
