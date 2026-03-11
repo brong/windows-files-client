@@ -260,10 +260,12 @@ sealed class ServiceClient : IDisposable
             _connected = connected;
             if (!connected)
             {
-                _accounts.Clear();
-                _connectingLoginIds.Clear();
-                _failedLogins.Clear();
-                _connectedLoginIds.Clear();
+                // Replace with new lists instead of Clear() to avoid
+                // mutating lists that async code may still be iterating.
+                _accounts = new();
+                _connectingLoginIds = new();
+                _failedLogins = new();
+                _connectedLoginIds = new();
                 _aggregateStatus = AccountStatus.Idle;
                 _aggregatePendingCount = 0;
                 _rejectedFileCount = 0;
@@ -285,19 +287,23 @@ sealed class ServiceClient : IDisposable
                 case "statusSnapshot":
                 {
                     var snapshot = IpcSerializer.Deserialize<StatusSnapshotResult>(push.Params);
+                    List<AccountInfo> accountsCopy;
                     lock (_lock)
                     {
-                        _accounts = snapshot.Accounts;
-                        _connectingLoginIds = snapshot.ConnectingLoginIds;
-                        _failedLogins = snapshot.FailedLogins;
-                        _connectedLoginIds = snapshot.ConnectedLoginIds ?? new();
+                        _accounts = snapshot.Accounts.ToList();
+                        _connectingLoginIds = snapshot.ConnectingLoginIds.ToList();
+                        _failedLogins = snapshot.FailedLogins.ToList();
+                        _connectedLoginIds = snapshot.ConnectedLoginIds?.ToList() ?? new();
                         _aggregateStatus = snapshot.AggregateStatus;
                         _aggregatePendingCount = snapshot.AggregatePendingCount;
+                        accountsCopy = _accounts.ToList();
                     }
                     Log.SafeInvoke(() => AccountsChanged?.Invoke(), "ServiceClient.StatusSnapshot.Accounts");
                     Log.SafeInvoke(() => StatusChanged?.Invoke(), "ServiceClient.StatusSnapshot.Status");
                     // Fetch initial activity for all accounts after status is populated
-                    Log.FireAndForget(FetchInitialActivityAsync(snapshot.Accounts), "FetchInitialActivity");
+                    // Use a separate copy so accountStatusChanged mutations to _accounts
+                    // don't cause "Collection was modified" during iteration.
+                    Log.FireAndForget(FetchInitialActivityAsync(accountsCopy), "FetchInitialActivity");
                     break;
                 }
 
@@ -344,10 +350,10 @@ sealed class ServiceClient : IDisposable
                     var accountsEvt = IpcSerializer.Deserialize<AccountsChangedPush>(push.Params);
                     lock (_lock)
                     {
-                        _accounts = accountsEvt.Accounts;
-                        _connectingLoginIds = accountsEvt.ConnectingLoginIds;
-                        _failedLogins = accountsEvt.FailedLogins;
-                        _connectedLoginIds = accountsEvt.ConnectedLoginIds ?? new();
+                        _accounts = accountsEvt.Accounts.ToList();
+                        _connectingLoginIds = accountsEvt.ConnectingLoginIds.ToList();
+                        _failedLogins = accountsEvt.FailedLogins.ToList();
+                        _connectedLoginIds = accountsEvt.ConnectedLoginIds?.ToList() ?? new();
                         RecalcAggregate();
                     }
                     Log.SafeInvoke(() => AccountsChanged?.Invoke(), "ServiceClient.AccountsChanged.Accounts");
@@ -366,13 +372,20 @@ sealed class ServiceClient : IDisposable
     {
         foreach (var acct in accounts)
         {
-            var snapshot = await GetActivityAsync(acct.AccountId);
-            lock (_lock)
+            try
             {
-                _rejectedByAccount[snapshot.AccountId] = snapshot.RejectedEntries.Count;
-                _rejectedFileCount = _rejectedByAccount.Values.Sum();
+                var snapshot = await GetActivityAsync(acct.AccountId);
+                lock (_lock)
+                {
+                    _rejectedByAccount[snapshot.AccountId] = snapshot.RejectedEntries.Count;
+                    _rejectedFileCount = _rejectedByAccount.Values.Sum();
+                }
+                Log.SafeInvoke(() => ActivityChanged?.Invoke(snapshot), "ServiceClient.FetchInitialActivity");
             }
-            Log.SafeInvoke(() => ActivityChanged?.Invoke(snapshot), "ServiceClient.FetchInitialActivity");
+            catch (Exception ex)
+            {
+                Log.Error($"[FetchInitialActivity] Failed for {acct.AccountId}: {ex.Message}");
+            }
         }
     }
 
