@@ -241,6 +241,10 @@ public class SyncEngine : IDisposable
     private void OnDownloadStarted(long transferKey, string fileName, long? totalSize, string? fullPath)
     {
         _activeDownloads[transferKey] = (fileName, DateTime.UtcNow, totalSize);
+        // Remove from pending queue now that we're actively downloading.
+        // This avoids a gap where the file is in neither collection.
+        if (fullPath != null)
+            _pendingHydrations.TryRemove(fullPath, out _);
         var count = _activeDownloads.Count + _pendingHydrations.Count;
         _downloadDetail = count > 1
             ? $"Downloading {fileName} (and {count - 1} more)"
@@ -1899,10 +1903,9 @@ public class SyncEngine : IDisposable
                     }
 
                     Log.Info($"{_logPrefix} Hydrating pinned file: {Path.GetFileName(filePath)}");
-                    // Remove from pending BEFORE hydrating — the transition is
-                    // pending → active (tracked by _activeDownloads via FETCH_DATA)
-                    _pendingHydrations.TryRemove(filePath, out _);
-                    Log.SafeInvoke(() => ActivityChanged?.Invoke(), "SyncEngine.HydratePending.ActivityChanged");
+                    // Keep in _pendingHydrations until OnDownloadStarted fires —
+                    // that moves it atomically from pending to _activeDownloads,
+                    // avoiding a gap where the file is in neither collection.
                     HydratePlaceholder(filePath);
                     count++;
                 }
