@@ -688,6 +688,7 @@ public class JmapClient : IJmapClient
             var bytesRead = chunkStream.TotalBytesRead;
             chunkBlobIds.Add((upload.BlobId, chunkSha1Base64));
             totalUploaded += bytesRead;
+            Log.Info($"[ChunkedUpload] Chunk {chunkBlobIds.Count} uploaded: blobId={upload.BlobId}, size={bytesRead}, total={totalUploaded}/{totalSize}");
             onChunkUploaded?.Invoke(new UploadedChunkInfo(upload.BlobId, chunkSha1Base64, totalUploaded - bytesRead, bytesRead));
 
             // Yield between chunks so interactive work (downloads) can proceed.
@@ -704,6 +705,7 @@ public class JmapClient : IJmapClient
             onProgress?.Invoke(totalSize);
 
             // Combine chunks via Blob/upload
+            Log.Info($"[ChunkedUpload] Combining {chunkBlobIds.Count} chunks for account {accountId}, includeShaDigest={includeShaDigest}, blobIds=[{string.Join(", ", chunkBlobIds.Select(c => c.BlobId))}]");
             var dataArray = chunkBlobIds.Select(c =>
             {
                 var item = new Dictionary<string, object?> { ["blobId"] = c.BlobId };
@@ -722,6 +724,7 @@ public class JmapClient : IJmapClient
                 createItem["digest:sha"] = overallSha1Base64;
 
             var combineCapabilities = includeShaDigest ? BlobExtUsing : BlobUsing;
+            Log.Info($"[ChunkedUpload] Using capabilities: [{string.Join(", ", combineCapabilities)}]");
             var result = await callAsync(combineCapabilities, "Blob/upload", new
             {
                 accountId,
