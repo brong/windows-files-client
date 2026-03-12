@@ -457,7 +457,7 @@ Users can mark files/folders as "Always keep on this device" (pin) or "Free up s
 4. Hydrate each file sequentially (not in parallel — see pitfalls)
 5. Store a cancellation token per pinned directory
 
-**Sequential hydration is critical.** Parallel hydration of many files starves the thread pool and causes timeout cascades. Process one file at a time, with retries for transient failures.
+**Limit concurrent hydrations.** Each `CfHydratePlaceholder` blocks a thread and consumes an interactive queue slot for the download. Use a semaphore (we use 2) to cap concurrent pin-hydrations below the interactive queue size (4 slots), leaving room for user-initiated file opens. Too many concurrent hydrations starves both the thread pool and the interactive queue.
 
 ### Unpin (Free Up Space)
 
@@ -824,8 +824,8 @@ Converting a file to a placeholder, marking it in-sync, or dehydrating it change
 **12. Pin propagation is asynchronous.**
 When the user unpins a directory, the OS may propagate the attribute to children over time. Don't assume all children are unpinned immediately. Clear pin state explicitly on each file before dehydrating.
 
-**13. Parallel hydration causes thread pool starvation.**
-When the user pins a large folder, don't hydrate all files in parallel. Sequential hydration with retry is more reliable and doesn't starve other operations.
+**13. Unbounded parallel hydration starves the interactive queue.**
+Each `CfHydratePlaceholder` triggers a FETCH_DATA callback that consumes an interactive queue slot. If the interactive queue has N slots and you launch N concurrent pin-hydrations, user-initiated file opens (also interactive) have to wait for a multi-hundred-MB download to finish. Use a semaphore to cap pin-hydrations at N-2 (we use 2 out of 4 interactive slots), leaving headroom for user actions.
 
 **14. Atomic dehydrate-and-mark-in-sync.**
 If you dehydrate a file and then separately mark it in-sync, there's a window where the OS sees a dehydrated, not-in-sync file and immediately tries to re-download it. Always combine these operations atomically.

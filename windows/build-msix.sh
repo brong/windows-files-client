@@ -49,12 +49,24 @@ BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 echo "=== Version: $APP_VERSION  Build: $BUILD_DATE ==="
 VERSION_PROPS="-p:Version=$APP_VERSION -p:InformationalVersion=$APP_VERSION+$BUILD_DATE"
 
+TRIM_PROPS="-p:PublishTrimmed=true -p:TrimMode=partial"
+
 echo "=== Publishing Service ==="
 cd "$BUILDDIR"
-dotnet.exe publish FileNodeClient.Service/FileNodeClient.Service.csproj -c Release -r win-x64 --self-contained -o FileNodeClient.Package/publish $VERSION_PROPS 2>&1 | tail -3
+dotnet.exe publish FileNodeClient.Service/FileNodeClient.Service.csproj -c Release -r win-x64 --self-contained -o FileNodeClient.Package/publish $VERSION_PROPS $TRIM_PROPS 2>&1 | tail -3
 
 echo "=== Publishing App ==="
-dotnet.exe publish FileNodeClient.App/FileNodeClient.App.csproj -c Release -r win-x64 --self-contained -o FileNodeClient.Package/publish $VERSION_PROPS 2>&1 | tail -3
+dotnet.exe publish FileNodeClient.App/FileNodeClient.App.csproj -c Release -r win-x64 --self-contained -o FileNodeClient.Package/publish $VERSION_PROPS $TRIM_PROPS 2>&1 | tail -3
+
+echo "=== Stripping debug/diagnostic/design-time DLLs ==="
+rm -f "$PUBLISHDIR"/mscordaccore*.dll \
+      "$PUBLISHDIR"/mscordbi.dll \
+      "$PUBLISHDIR"/Microsoft.DiaSymReader.Native.amd64.dll \
+      "$PUBLISHDIR"/createdump.exe \
+      "$PUBLISHDIR"/System.Windows.Forms.Design.dll \
+      "$PUBLISHDIR"/System.DirectoryServices.dll \
+      "$PUBLISHDIR"/Microsoft.CSharp.dll
+echo "Removed debug/design-time DLLs"
 
 echo "=== Building native thumbnail DLL ==="
 if [ -f "$WINSRC/FileNodeClient.ThumbnailExtension/ThumbnailHandler.c" ]; then

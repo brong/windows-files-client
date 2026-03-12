@@ -2,6 +2,7 @@
 #   1. This file (VERSION)
 #   2. windows/FileNodeClient.Package/AppxManifest.xml  (<Identity Version="...">)
 
+1.0.54.0 2026-03-11  Parallel hydration (2 concurrent), trimmed MSIX (53MB→20MB)
 1.0.53.0 2026-03-11  Parallel hydration (4 concurrent downloads), fix duplicate activity entry
 1.0.52.0 2026-03-11  Blob/get verify before combine, debug chunk existence
 1.0.51.0 2026-03-11  Fix "Nothing to sync" shown for disconnected accounts, restore HasBlob gate

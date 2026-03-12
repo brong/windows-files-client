@@ -53,10 +53,11 @@ public class SyncEngine : IDisposable
     // Directories currently being hydrated by HydrateDehydratedFiles — used to
     // suppress duplicate hydration from OnDirectoryPopulated firing concurrently.
     private readonly ConcurrentDictionary<string, byte> _hydratingDirectories = new(StringComparer.OrdinalIgnoreCase);
-    // Limits concurrent pin-hydration work to prevent thread pool starvation.
-    // CfHydratePlaceholder blocks a thread pool thread while streaming downloads
-    // also need thread pool threads — too many concurrent hydrations = deadlock.
-    private readonly SemaphoreSlim _hydrationGate = new(4);
+    // Limit concurrent pin-hydrations. Each CfHydratePlaceholder triggers a
+    // FETCH_DATA callback that consumes an interactive queue slot (4 total).
+    // Keep this below the interactive queue size so user-initiated downloads
+    // (opening a file in Explorer) always have slots available.
+    private readonly SemaphoreSlim _hydrationGate = new(2);
     // Files recently uploaded — stores the LastWriteTimeUtc at upload time so we
     // can suppress the FileSystemWatcher echo that fires when
     // ConvertToPlaceholder / UpdatePlaceholderIdentity changes file attributes.
