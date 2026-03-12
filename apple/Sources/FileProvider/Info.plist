@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>FileProviderExtension</string>
+	<key>CFBundleDisplayName</key>
+	<string>Fastmail Files FileProvider</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundlePackageType</key>
+	<string>XPC!</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
+	<key>NSExtension</key>
+	<dict>
+		<key>NSExtensionPointIdentifier</key>
+		<string>com.apple.fileprovider-nonui</string>
+		<key>NSExtensionPrincipalClass</key>
+		<string>$(PRODUCT_MODULE_NAME).FileProviderExtension</string>
+		<key>NSExtensionFileProviderDocumentGroup</key>
+		<string>$(TeamIdentifierPrefix)com.fastmail.files</string>
+		<key>NSExtensionFileProviderSupportsEnumeration</key>
+		<true/>
+	</dict>
+	<key>NSExtensionFileProviderDownloadPipelineDepth</key>
+	<integer>4</integer>
+</dict>
+</plist>

@@ -13,6 +13,9 @@ files-client/
 │   ├── ROADMAP.md         # Windows cfapi feature roadmap
 │   ├── FileNodeClient.sln # .NET solution (7 projects)
 │   └── ...
+├── apple/                 # macOS & iOS client (Swift, FileProvider)
+│   ├── DESIGN.md          # Apple-specific design document
+│   └── ...
 └── linux/                 # Linux FUSE client (Python, pyfuse3)
     └── ...
 ```
@@ -44,6 +47,14 @@ All platforms implement the same JMAP protocol. Key invariants:
 - **Build**: `dotnet.exe build windows/FileNodeClient.sln` (from WSL2)
 - **Status**: Feature-complete (sync, thumbnails, URI source, recycle bin, progressive hydration)
 - See `windows/CLAUDE.md` for detailed build/test instructions
+
+#### Apple (`apple/`)
+- **Language**: Swift 6
+- **File system**: Apple FileProvider framework (`NSFileProviderReplicatedExtension`) — native placeholder/hydration support
+- **Platforms**: macOS 12+ (Finder integration) and iOS 16+ (Files app integration)
+- **Build**: Xcode (open `apple/FastmailFiles/FastmailFiles.xcodeproj`)
+- **Status**: Design phase
+- See `apple/DESIGN.md` for architecture and design decisions
 
 #### Linux (`linux/`)
 - **Language**: Python 3
