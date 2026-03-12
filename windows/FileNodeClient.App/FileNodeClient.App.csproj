@@ -15,11 +15,4 @@
     <ProjectReference Include="..\FileNodeClient.Jmap\FileNodeClient.Jmap.csproj" />
   </ItemGroup>
 
-  <!-- Roots for IL trimming — WinForms relies heavily on reflection -->
-  <ItemGroup Condition="'$(PublishTrimmed)' == 'true'">
-    <TrimmerRootAssembly Include="System.Console" />
-    <TrimmerRootAssembly Include="System.Windows.Forms" />
-    <TrimmerRootAssembly Include="System.Windows.Forms.Primitives" />
-  </ItemGroup>
-
 </Project>

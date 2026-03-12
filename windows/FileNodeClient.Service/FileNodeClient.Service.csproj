@@ -12,18 +12,7 @@
     <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="9.*" />
   </ItemGroup>
 
-  <!-- Roots for IL trimming (PublishTrimmed=true, TrimMode=partial via build script).
-       Even partial mode trims framework assemblies marked [IsTrimmable].
-       DI/hosting use reflection; Console.Error is needed for arg parsing. -->
-  <ItemGroup Condition="'$(PublishTrimmed)' == 'true'">
-    <TrimmerRootAssembly Include="System.Console" />
-    <TrimmerRootAssembly Include="Microsoft.Extensions.Hosting" />
-    <TrimmerRootAssembly Include="Microsoft.Extensions.Hosting.Abstractions" />
-    <TrimmerRootAssembly Include="Microsoft.Extensions.DependencyInjection" />
-    <TrimmerRootAssembly Include="Microsoft.Extensions.DependencyInjection.Abstractions" />
-  </ItemGroup>
-
-  <ItemGroup>
+<ItemGroup>
     <ProjectReference Include="..\FileNodeClient.Jmap\FileNodeClient.Jmap.csproj" />
     <ProjectReference Include="..\FileNodeClient.Windows\FileNodeClient.Windows.csproj" />
     <ProjectReference Include="..\FileNodeClient.Ipc\FileNodeClient.Ipc.csproj" />
