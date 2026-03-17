@@ -23,6 +23,8 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
     private var accountId: String!
     private var homeNodeId: String!
     private var trashNodeId: String?
+    /// Set to true when the domain is being removed — prevents server-side deletes.
+    private var isDomainBeingRemoved = false
 
     // App Group identifier — must match entitlements
     #if os(macOS)
@@ -126,8 +128,9 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
 
     public func invalidate() {
         #if canImport(os)
-        logger.info("Extension invalidating")
+        logger.info("Extension invalidating — suppressing server deletes")
         #endif
+        isDomainBeingRemoved = true
         Task {
             await pushWatcher.stop()
         }
@@ -394,6 +397,14 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
     ) -> Progress {
         Task {
             do {
+                // CRITICAL: When the system is removing the domain (e.g. user removed
+                // account), it sends delete requests for every item. We must NOT forward
+                // those to the server or we'll destroy all the user's files.
+                if isDomainBeingRemoved {
+                    completionHandler(nil)
+                    return
+                }
+
                 let nodeId = identifier.rawValue
 
                 if let trashId = trashNodeId {
