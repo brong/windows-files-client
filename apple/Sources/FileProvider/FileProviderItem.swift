@@ -21,7 +21,7 @@ public final class FileProviderItem: NSObject, NSFileProviderItem {
     public convenience init(node: FileNode, homeNodeId: String, trashNodeId: String?) {
         let entry = NodeCacheEntry(
             parentId: node.parentId,
-            name: node.name,
+            name: node.name ?? "Untitled",
             blobId: node.blobId,
             size: node.size ?? 0,
             modified: node.modified,

@@ -90,9 +90,10 @@ public actor NodeDatabase {
 
     /// Store a FileNode from the server.
     public func upsertFromServer(_ node: FileNode) {
+        guard let name = node.name else { return } // Skip partial nodes without name
         cache.entries[node.id] = NodeCacheEntry(
             parentId: node.parentId,
-            name: node.name,
+            name: name,
             blobId: node.blobId,
             size: node.size ?? 0,
             modified: node.modified,

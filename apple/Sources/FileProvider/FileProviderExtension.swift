@@ -26,9 +26,8 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
 
     // App Group identifier — must match entitlements
     #if os(macOS)
-    // macOS: TEAMID.com.fastmail.files
-    // TODO: Replace TEAMID with actual team identifier
-    private static let appGroupId = "TEAMID.com.fastmail.files"
+    // macOS: BJL34Q426G.com.fastmail.files
+    private static let appGroupId = "BJL34Q426G.com.fastmail.files"
     #else
     // iOS: group.com.fastmail.files
     private static let appGroupId = "group.com.fastmail.files"

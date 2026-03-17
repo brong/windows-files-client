@@ -14,7 +14,7 @@ packages:
 settings:
   base:
     SWIFT_VERSION: "6.0"
-    DEVELOPMENT_TEAM: ""
+    DEVELOPMENT_TEAM: BJL34Q426G
     CODE_SIGN_IDENTITY: "-"
     CODE_SIGN_STYLE: Manual
 

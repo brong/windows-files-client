@@ -101,7 +101,7 @@ public struct FileNode: Codable, Sendable {
     public let id: String
     public let parentId: String?
     public let blobId: String?
-    public let name: String
+    public let name: String?     // Optional: set responses omit fields that match the request
     public let type: String?
     public let size: Int?
     public let created: Date?
@@ -162,7 +162,7 @@ public struct FileNodeChangesResponse: Codable, Sendable {
     public let created: [String]
     public let updated: [String]
     public let destroyed: [String]
-    public let hasMoreChanges: Bool
+    public let hasMoreChanges: Bool?
 }
 
 /// FileNode/set response.

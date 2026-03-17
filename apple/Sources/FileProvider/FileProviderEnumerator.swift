@@ -207,7 +207,7 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
 
             // Finish with new anchor
             let newAnchor = NSFileProviderSyncAnchor(changes.newState.data(using: .utf8)!)
-            observer.finishEnumeratingChanges(upTo: newAnchor, moreComing: changes.hasMoreChanges)
+            observer.finishEnumeratingChanges(upTo: newAnchor, moreComing: changes.hasMoreChanges ?? false)
 
         } catch JmapError.cannotCalculateChanges {
             // State token too old — tell system to restart with full enumeration

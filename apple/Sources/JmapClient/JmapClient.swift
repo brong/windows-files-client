@@ -25,6 +25,10 @@ public actor JmapClient {
     // Store a reference to the token provider's getter
     nonisolated private let tokenGetter: @Sendable () async throws -> String
 
+    /// Optional hook called with (URL, bodyData) before each JMAP API request.
+    /// Used by debug logging to capture body before URLSession converts it to a stream.
+    nonisolated public let requestWillSend: (@Sendable (URL, Data) -> Void)?
+
     // MARK: - JMAP Method Calls
 
     /// Execute a batch of JMAP method calls.
@@ -46,7 +50,9 @@ public actor JmapClient {
         var request = URLRequest(url: apiURL)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try encoder.encode(body)
+        let bodyData = try encoder.encode(body)
+        request.httpBody = bodyData
+        if let url = request.url { requestWillSend?(url, bodyData) }
 
         let (data, httpResponse) = try await authorizedRequest(request, session: interactiveSession)
         try checkHTTPStatus(httpResponse, data: data)
@@ -478,10 +484,13 @@ public actor JmapClient {
     }
 
     /// - Parameter protocolClasses: Custom URL protocol classes for testing (injected into URLSessionConfiguration).
+    /// - Parameter requestWillSend: Optional hook called before each request for debug logging.
     public init(sessionManager: SessionManager, tokenProvider: TokenProvider,
-                protocolClasses: [AnyClass]? = nil) {
+                protocolClasses: [AnyClass]? = nil,
+                requestWillSend: (@Sendable (URL, Data) -> Void)? = nil) {
         self.sessionManager = sessionManager
         self.tokenGetter = { try await tokenProvider.currentToken() }
+        self.requestWillSend = requestWillSend
 
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .custom { decoder in

@@ -34,9 +34,8 @@ class AppState: ObservableObject {
 
     private let defaults: UserDefaults?
 
-    // TODO: Replace with actual team ID
     #if os(macOS)
-    static let appGroupId = "TEAMID.com.fastmail.files"
+    static let appGroupId = "BJL34Q426G.com.fastmail.files"
     #else
     static let appGroupId = "group.com.fastmail.files"
     #endif
