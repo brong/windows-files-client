@@ -23,6 +23,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
     private var accountId: String!
     private var homeNodeId: String!
     private var trashNodeId: String?
+    private var activityTracker: ActivityTracker!
     /// Set to true when the domain is being removed — prevents server-side deletes.
     private var isDomainBeingRemoved = false
 
@@ -116,6 +117,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
         self.sessionManager = SessionManager(sessionURL: sessionURL, tokenProvider: tokenProvider)
         self.client = JmapClient(sessionManager: sessionManager, tokenProvider: tokenProvider)
         self.database = NodeDatabase(containerURL: containerURL, accountId: accountId)
+        self.activityTracker = ActivityTracker(containerURL: containerURL)
 
         // Set up push watcher
         self.pushWatcher = PushWatcher(sessionManager: sessionManager, tokenProvider: tokenProvider, accountId: accountId)
@@ -182,6 +184,11 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                     throw JmapError.invalidResponse
                 }
 
+                let activityId = "dl:\(accountId!):\(nodeId)"
+                await activityTracker.start(
+                    id: activityId, accountId: accountId, fileName: entry.name,
+                    action: .download, fileSize: entry.size)
+
                 let tempDir = containerURL.appendingPathComponent("tmp", isDirectory: true)
                 try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
 
@@ -193,17 +200,22 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                     destinationDir: tempDir
                 ) { downloaded, total in
                     if total > 0 {
-                        progress.completedUnitCount = Int64(Double(downloaded) / Double(total) * 100)
+                        let pct = Double(downloaded) / Double(total)
+                        progress.completedUnitCount = Int64(pct * 100)
+                        Task { await self.activityTracker.updateProgress(id: activityId, progress: pct) }
                     }
                 }
 
                 progress.completedUnitCount = 100
+                await activityTracker.complete(id: activityId)
 
                 let item = FileProviderItem(
                     nodeId: nodeId, entry: entry,
                     homeNodeId: homeNodeId, trashNodeId: trashNodeId)
                 completionHandler(tempURL, item, nil)
             } catch {
+                let activityId = "dl:\(accountId!):\(identifier.rawValue)"
+                await activityTracker.fail(id: activityId, error: error.localizedDescription)
                 completionHandler(nil, nil, mapError(error))
             }
         }

@@ -62,6 +62,12 @@ struct SettingsView: View {
 
             Divider()
 
+            // Activity section
+            if !appState.logins.isEmpty {
+                Divider()
+                ActivityView(appState: appState)
+            }
+
             HStack {
                 Button("Add Login...") {
                     appState.showingAddAccount = true
@@ -84,7 +90,7 @@ struct SettingsView: View {
             }
         }
         .padding()
-        .frame(minWidth: 500, minHeight: 350)
+        .frame(minWidth: 500, minHeight: 450)
         .task {
             await refreshOrphanedDomains()
         }
@@ -607,6 +613,135 @@ private func startOAuthCallbackServer(
         }
 
         continuation.resume(returning: code)
+    }
+}
+
+// MARK: - Activity View
+
+struct ActivityView: View {
+    @ObservedObject var appState: AppState
+    @State private var activities: [ActivityTracker.Activity] = []
+    @State private var refreshTimer: Timer?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Activity")
+                    .font(.headline)
+                Spacer()
+                if !activities.isEmpty {
+                    Text("\(activities.filter { $0.status == .active }.count) active")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            if activities.isEmpty {
+                Text("No active operations")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 4)
+            } else {
+                List {
+                    ForEach(activities.prefix(10)) { activity in
+                        activityRow(activity)
+                    }
+                    if activities.count > 10 {
+                        Text("+ \(activities.count - 10) more...")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .frame(maxHeight: 150)
+            }
+        }
+        .onAppear { startPolling() }
+        .onDisappear { stopPolling() }
+    }
+
+    private func activityRow(_ activity: ActivityTracker.Activity) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: actionIcon(activity.action))
+                .foregroundColor(statusColor(activity.status))
+                .frame(width: 16)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(activity.fileName)
+                    .font(.caption)
+                    .lineLimit(1)
+
+                if let progress = activity.progress, activity.status == .active {
+                    ProgressView(value: progress)
+                        .progressViewStyle(.linear)
+                } else if let error = activity.error {
+                    Text(error)
+                        .font(.caption2)
+                        .foregroundColor(.red)
+                        .lineLimit(1)
+                }
+            }
+
+            Spacer()
+
+            if let size = activity.fileSize, size > 0 {
+                Text(formatSize(size))
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+
+            Text(activity.action.rawValue)
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        }
+    }
+
+    private func actionIcon(_ action: ActivityTracker.Activity.Action) -> String {
+        switch action {
+        case .download: return "arrow.down.circle"
+        case .upload: return "arrow.up.circle"
+        case .sync: return "arrow.triangle.2.circlepath"
+        case .delete: return "trash"
+        }
+    }
+
+    private func statusColor(_ status: ActivityTracker.Activity.Status) -> Color {
+        switch status {
+        case .active: return .blue
+        case .pending: return .gray
+        case .completed: return .green
+        case .error: return .red
+        }
+    }
+
+    private func formatSize(_ bytes: Int) -> String {
+        if bytes < 1024 { return "\(bytes) B" }
+        if bytes < 1024 * 1024 { return "\(bytes / 1024) KB" }
+        return String(format: "%.1f MB", Double(bytes) / (1024 * 1024))
+    }
+
+    private func startPolling() {
+        loadActivities()
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
+            loadActivities()
+        }
+    }
+
+    private func stopPolling() {
+        refreshTimer?.invalidate()
+        refreshTimer = nil
+    }
+
+    private func loadActivities() {
+        guard let containerURL = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: AppState.appGroupId)
+        else { return }
+
+        if let snapshot = ActivityTracker.loadShared(containerURL: containerURL) {
+            DispatchQueue.main.async {
+                activities = snapshot.activities
+            }
+        }
     }
 }
 
