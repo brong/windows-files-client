@@ -263,7 +263,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                     }
 
                     let contentType = itemTemplate.contentType?.preferredMIMEType ?? "application/octet-stream"
-                    let blob = try await client.uploadBlob(
+                    let blob = try await client.uploadBlobChunked(
                         accountId: accountId,
                         fileURL: contentURL,
                         contentType: contentType
@@ -322,7 +322,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                     let contentType = item.contentType?.preferredMIMEType ?? "application/octet-stream"
                     let parentId = resolveNodeId(item.parentItemIdentifier)
 
-                    let blob = try await client.uploadBlob(
+                    let blob = try await client.uploadBlobChunked(
                         accountId: accountId,
                         fileURL: contentURL,
                         contentType: contentType

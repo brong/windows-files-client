@@ -384,6 +384,151 @@ public actor JmapClient {
         return try decoder.decode(BlobUploadResponse.self, from: data)
     }
 
+    // MARK: - Chunked Upload
+
+    private static let minChunkSize = 1_048_576        // 1 MB
+    private static let maxChunkSize = 67_108_864        // 64 MB
+    private static let defaultChunkSize = 67_108_864    // 64 MB
+    private static let chunkThreshold = 5_000_000       // 5 MB — files smaller than this skip chunking
+
+    /// Upload a large file in chunks using Blob/upload (RFC 9404) to combine.
+    /// Falls back to single upload if Blob capability is not available or file is small.
+    public func uploadBlobChunked(
+        accountId: String,
+        fileURL: URL,
+        contentType: String,
+        progress: (@Sendable (Int64, Int64) -> Void)? = nil
+    ) async throws -> BlobUploadResponse {
+        let session = try await sessionManager.session()
+
+        let fileSize = try FileManager.default.attributesOfItem(
+            atPath: fileURL.path)[.size] as? Int64 ?? 0
+
+        // Small files or no Blob capability — use simple upload
+        guard fileSize > Self.chunkThreshold,
+              session.hasBlob(accountId: accountId) else {
+            return try await uploadBlob(
+                accountId: accountId, fileURL: fileURL,
+                contentType: contentType, progress: progress)
+        }
+
+        // Determine chunk size
+        let blobCap = session.accounts[accountId]?.accountCapabilities[JmapCapability.blob]
+        let maxDataSources = blobCap?.dictValue?["maxDataSources"]?.intValue ?? 100
+        var chunkSize = Self.defaultChunkSize
+
+        // Adjust chunk size up if file would exceed maxDataSources chunks
+        while Int(fileSize) / chunkSize + 1 > maxDataSources && chunkSize < Int(fileSize) {
+            chunkSize *= 2
+        }
+        chunkSize = max(Self.minChunkSize, min(chunkSize, max(Self.maxChunkSize, Int(fileSize))))
+
+        guard let uploadURL = session.uploadURL(accountId: accountId) else {
+            throw JmapError.invalidResponse
+        }
+
+        let hasBlobExt = session.hasBlobExt(accountId: accountId)
+
+        // Read file and upload chunks
+        let fileHandle = try FileHandle(forReadingFrom: fileURL)
+        defer { try? fileHandle.close() }
+
+        var chunkBlobIds: [(blobId: String, sha1: String)] = []
+        var totalUploaded: Int64 = 0
+
+        // Incremental SHA1 for overall file digest
+        var overallHashContext = SHA1Context()
+
+        while totalUploaded < fileSize {
+            let remaining = Int(fileSize - totalUploaded)
+            let thisChunkSize = min(chunkSize, remaining)
+
+            guard let chunkData = fileHandle.readData(ofLength: thisChunkSize) as Data?,
+                  !chunkData.isEmpty else { break }
+
+            // Hash this chunk
+            let chunkSha1 = sha1Digest(chunkData)
+            overallHashContext.update(chunkData)
+
+            // Upload chunk
+            let tempChunkFile = FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString)
+            try chunkData.write(to: tempChunkFile)
+            defer { try? FileManager.default.removeItem(at: tempChunkFile) }
+
+            var request = URLRequest(url: uploadURL)
+            request.httpMethod = "POST"
+            request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+
+            let (data, httpResponse) = try await authorizedUpload(
+                request, fromFile: tempChunkFile, session: backgroundSession)
+            try checkHTTPStatus(httpResponse, data: data)
+
+            let uploadResponse = try decoder.decode(BlobUploadResponse.self, from: data)
+            chunkBlobIds.append((uploadResponse.blobId, chunkSha1))
+
+            totalUploaded += Int64(thisChunkSize)
+            progress?(totalUploaded, fileSize)
+        }
+
+        // If only one chunk, no need to combine
+        if chunkBlobIds.count == 1 {
+            return BlobUploadResponse(
+                blobId: chunkBlobIds[0].blobId,
+                size: Int(fileSize), type: contentType)
+        }
+
+        // Combine chunks via Blob/upload
+        let overallSha1 = overallHashContext.finalize()
+
+        var dataSourceObjects: [[String: AnyCodable]] = []
+        for chunk in chunkBlobIds {
+            var obj: [String: AnyCodable] = ["blobId": AnyCodable(chunk.blobId)]
+            if hasBlobExt {
+                obj["digest:sha"] = AnyCodable(chunk.sha1)
+            }
+            dataSourceObjects.append(obj)
+        }
+
+        var createObj: [String: AnyCodable] = [
+            "data": AnyCodable(dataSourceObjects.map { AnyCodable($0) }),
+            "type": AnyCodable(contentType),
+        ]
+        if hasBlobExt {
+            createObj["digest:sha"] = AnyCodable(overallSha1)
+        }
+
+        var capabilities = [JmapCapability.core, JmapCapability.blob]
+        if hasBlobExt {
+            capabilities.append(JmapCapability.blobExt)
+        }
+
+        let responses = try await call([
+            JmapMethodCall(
+                name: "Blob/upload",
+                args: [
+                    "accountId": AnyCodable(accountId),
+                    "create": ["combined": AnyCodable(createObj)],
+                ],
+                callId: "b0"
+            ),
+        ], using: capabilities)
+
+        // Extract the combined blobId from response
+        guard let response = responses.first,
+              response.count >= 3,
+              let argsDict = response[1].dictValue,
+              let created = argsDict["created"]?.dictValue,
+              let combined = created["combined"]?.dictValue,
+              let blobId = combined["blobId"]?.stringValue
+        else {
+            throw JmapError.serverError("blobUpload", "Failed to combine chunks")
+        }
+
+        let size = combined["size"]?.intValue ?? Int(fileSize)
+        return BlobUploadResponse(blobId: blobId, size: size, type: contentType)
+    }
+
     /// Download a blob to a temporary file. Returns the temp file URL.
     public func downloadBlob(
         accountId: String,

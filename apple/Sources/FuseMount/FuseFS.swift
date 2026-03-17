@@ -493,7 +493,7 @@ public final class FileNodeFuseFS: @unchecked Sendable {
                 defer { try? FileManager.default.removeItem(at: tempFile) }
 
                 let contentType = "application/octet-stream"
-                let blob = try await client.uploadBlob(
+                let blob = try await client.uploadBlobChunked(
                     accountId: acctId, fileURL: tempFile, contentType: contentType)
 
                 let node = try await client.createNode(
