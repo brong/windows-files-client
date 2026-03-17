@@ -14,7 +14,7 @@ struct FastmailFilesApp: App {
             Image(systemName: appState.statusIcon)
         }
 
-        Settings {
+        Window("Fastmail Files Settings", id: "settings") {
             SettingsView(appState: appState)
         }
         #else
@@ -31,6 +31,7 @@ struct FastmailFilesApp: App {
 class AppState: ObservableObject {
     @Published var accounts: [AccountInfo] = []
     @Published var isOnline = true
+    @Published var showingAddAccount = false
 
     private let defaults: UserDefaults?
 
@@ -41,10 +42,10 @@ class AppState: ObservableObject {
     #endif
 
     var statusIcon: String {
-        if !isOnline { return "cloud.slash" }
-        if accounts.contains(where: { $0.status == .error }) { return "exclamationmark.cloud" }
-        if accounts.contains(where: { $0.status == .syncing }) { return "arrow.triangle.2.circlepath.cloud" }
-        return "checkmark.cloud"
+        if !isOnline { return "icloud.slash" }
+        if accounts.contains(where: { $0.status == .error }) { return "exclamationmark.icloud" }
+        if accounts.contains(where: { $0.status == .syncing }) { return "arrow.clockwise.icloud" }
+        return "icloud"
     }
 
     init() {
@@ -79,13 +80,69 @@ class AppState: ObservableObject {
         // Store session URL in shared UserDefaults
         defaults?.set(sessionURL, forKey: "sessionURL-\(accountId)")
 
-        // Register FileProvider domain
-        let domain = NSFileProviderDomain(
-            identifier: NSFileProviderDomainIdentifier(rawValue: accountId),
-            displayName: "Fastmail Files (\(account.name))"
+        // Try to register FileProvider domain (may fail if extension isn't embedded yet)
+        do {
+            let domain = NSFileProviderDomain(
+                identifier: NSFileProviderDomainIdentifier(rawValue: accountId),
+                displayName: "Fastmail Files (\(account.name))"
+            )
+            try await NSFileProviderManager.add(domain)
+        } catch {
+            print("FileProvider domain registration skipped: \(error.localizedDescription)")
+        }
+
+        let info = AccountInfo(
+            accountId: accountId,
+            displayName: account.name,
+            status: .idle
         )
 
-        try await NSFileProviderManager.add(domain)
+        accounts.append(info)
+        saveAccounts()
+    }
+
+    func addAccountWithOAuth(sessionURL: String, credential: OAuthCredential) async throws {
+        guard let url = URL(string: sessionURL) else {
+            throw JmapError.invalidResponse
+        }
+
+        let tokenProvider = OAuthTokenProvider(credential: credential)
+        let sessionManager = SessionManager(sessionURL: url, tokenProvider: tokenProvider)
+        let session = try await sessionManager.session()
+
+        guard let accountId = session.fileNodeAccountId() else {
+            throw JmapError.noAccountId
+        }
+
+        guard let account = session.accounts[accountId] else {
+            throw JmapError.noAccountId
+        }
+
+        // Store OAuth credential in shared Keychain (as JSON)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let credData = try encoder.encode(credential)
+        let credString = String(data: credData, encoding: .utf8)!
+        try KeychainTokenProvider.storeToken(
+            credString,
+            account: accountId,
+            accessGroup: Self.appGroupId
+        )
+
+        // Store session URL in shared UserDefaults
+        defaults?.set(sessionURL, forKey: "sessionURL-\(accountId)")
+        defaults?.set("oauth", forKey: "authType-\(accountId)")
+
+        // Try to register FileProvider domain (may fail if extension isn't embedded yet)
+        do {
+            let domain = NSFileProviderDomain(
+                identifier: NSFileProviderDomainIdentifier(rawValue: accountId),
+                displayName: "Fastmail Files (\(account.name))"
+            )
+            try await NSFileProviderManager.add(domain)
+        } catch {
+            print("FileProvider domain registration skipped: \(error.localizedDescription)")
+        }
 
         let info = AccountInfo(
             accountId: accountId,
@@ -98,12 +155,16 @@ class AppState: ObservableObject {
     }
 
     func removeAccount(_ accountId: String) async throws {
-        let domain = NSFileProviderDomain(
-            identifier: NSFileProviderDomainIdentifier(rawValue: accountId),
-            displayName: ""
-        )
-
-        try await NSFileProviderManager.remove(domain)
+        // Try to remove FileProvider domain
+        do {
+            let domain = NSFileProviderDomain(
+                identifier: NSFileProviderDomainIdentifier(rawValue: accountId),
+                displayName: ""
+            )
+            try await NSFileProviderManager.remove(domain)
+        } catch {
+            print("FileProvider domain removal skipped: \(error.localizedDescription)")
+        }
 
         // Clean up stored credentials
         defaults?.removeObject(forKey: "sessionURL-\(accountId)")

@@ -37,6 +37,24 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
     private let logger = Logger(subsystem: "com.fastmail.files", category: "Extension")
     #endif
 
+    // MARK: - Keychain Helper
+
+    /// Read raw data from keychain synchronously (for use in init).
+    private static func readKeychainData(account: String, accessGroup: String) -> Data? {
+        var query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "com.fastmail.files",
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecAttrAccessGroup as String: accessGroup,
+        ]
+        var result: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        guard status == errSecSuccess, let data = result as? Data else { return nil }
+        return data
+    }
+
     // MARK: - Lifecycle
 
     public required init(domain: NSFileProviderDomain) {
@@ -62,11 +80,34 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
             ?? "https://api.fastmail.com/jmap/session"
         guard let sessionURL = URL(string: sessionURLString) else { return }
 
-        // Set up auth
-        let tokenProvider = KeychainTokenProvider(
-            account: accountId,
-            accessGroup: Self.appGroupId
-        )
+        // Set up auth — check if OAuth credential or static token
+        let authType = defaults?.string(forKey: "authType-\(accountId!)")
+        let tokenProvider: TokenProvider
+
+        if authType == "oauth",
+           let credData = Self.readKeychainData(account: accountId, accessGroup: Self.appGroupId) {
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            if let credential = try? decoder.decode(OAuthCredential.self, from: credData) {
+                tokenProvider = OAuthTokenProvider(credential: credential) { [weak self] updated in
+                    // Persist refreshed tokens back to keychain
+                    guard let self = self else { return }
+                    let encoder = JSONEncoder()
+                    encoder.dateEncodingStrategy = .iso8601
+                    if let data = try? encoder.encode(updated),
+                       let str = String(data: data, encoding: .utf8) {
+                        try? KeychainTokenProvider.storeToken(
+                            str, account: self.accountId,
+                            accessGroup: Self.appGroupId)
+                    }
+                }
+            } else {
+                // Credential JSON decode failed — fall back to raw token
+                tokenProvider = KeychainTokenProvider(account: accountId, accessGroup: Self.appGroupId)
+            }
+        } else {
+            tokenProvider = KeychainTokenProvider(account: accountId, accessGroup: Self.appGroupId)
+        }
 
         // Initialize components
         self.sessionManager = SessionManager(sessionURL: sessionURL, tokenProvider: tokenProvider)

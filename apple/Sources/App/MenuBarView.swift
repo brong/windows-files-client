@@ -3,6 +3,7 @@ import SwiftUI
 #if os(macOS)
 struct MenuBarView: View {
     @ObservedObject var appState: AppState
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         if appState.accounts.isEmpty {
@@ -10,8 +11,7 @@ struct MenuBarView: View {
                 .foregroundColor(.secondary)
             Divider()
             Button("Add Account...") {
-                NSApp.activate(ignoringOtherApps: true)
-                NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+                openSettings()
             }
         } else {
             ForEach(appState.accounts) { account in
@@ -33,8 +33,7 @@ struct MenuBarView: View {
             }
             Divider()
             Button("Settings...") {
-                NSApp.activate(ignoringOtherApps: true)
-                NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+                openSettings()
             }
         }
         Divider()
@@ -42,6 +41,11 @@ struct MenuBarView: View {
             NSApplication.shared.terminate(nil)
         }
         .keyboardShortcut("q")
+    }
+
+    private func openSettings() {
+        NSApp.activate(ignoringOtherApps: true)
+        openWindow(id: "settings")
     }
 
     private func statusIcon(for status: SyncStatus) -> String {
