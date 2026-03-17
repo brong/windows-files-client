@@ -128,6 +128,7 @@ public final class KeychainTokenProvider: TokenProvider, @unchecked Sendable {
             kSecAttrAccount as String: account,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecUseDataProtectionKeychain as String: true,
         ]
         if let group = accessGroup {
             query[kSecAttrAccessGroup as String] = group
@@ -158,6 +159,7 @@ public final class KeychainTokenProvider: TokenProvider, @unchecked Sendable {
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
+            kSecUseDataProtectionKeychain as String: true,
         ]
         if let group = accessGroup {
             deleteQuery[kSecAttrAccessGroup as String] = group

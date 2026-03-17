@@ -126,6 +126,7 @@ class AppState: ObservableObject {
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: "com.fastmail.files",
             kSecAttrAccount as String: accountId,
+            kSecUseDataProtectionKeychain as String: true,
         ]
         SecItemDelete(deleteQuery as CFDictionary)
 

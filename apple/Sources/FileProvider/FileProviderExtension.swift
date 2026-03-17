@@ -41,13 +41,14 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
 
     /// Read raw data from keychain synchronously (for use in init).
     private static func readKeychainData(account: String, accessGroup: String) -> Data? {
-        var query: [String: Any] = [
+        let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: "com.fastmail.files",
             kSecAttrAccount as String: account,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
             kSecAttrAccessGroup as String: accessGroup,
+            kSecUseDataProtectionKeychain as String: true,
         ]
         var result: AnyObject?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
