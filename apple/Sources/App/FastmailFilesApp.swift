@@ -11,7 +11,8 @@ struct FastmailFilesApp: App {
         MenuBarExtra {
             MenuBarView(appState: appState)
         } label: {
-            Image(systemName: appState.statusIcon)
+            Image("MenuBarIcon")
+                .renderingMode(.template)
         }
 
         Window("Fastmail Files Settings", id: "settings") {
