@@ -55,6 +55,18 @@ struct SettingsView: View {
     }
 }
 
+// MARK: - Add Account Flow
+
+/// Discovered account info for the picker.
+struct DiscoveredAccount: Identifiable {
+    let accountId: String
+    let name: String
+    let isPrimary: Bool
+    var enabled: Bool
+
+    var id: String { accountId }
+}
+
 struct AddAccountView: View {
     @ObservedObject var appState: AppState
     @State private var showAdvanced = false
@@ -64,7 +76,27 @@ struct AddAccountView: View {
     @State private var statusMessage: String?
     @State private var errorMessage: String?
 
+    // Account picker state
+    @State private var discoveredAccounts: [DiscoveredAccount] = []
+    @State private var pendingCredential: OAuthCredential?
+    @State private var pendingSessionURL: String?
+    @State private var showAccountPicker = false
+
     var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            if showAccountPicker {
+                accountPickerView
+            } else {
+                loginView
+            }
+        }
+        .padding()
+        .frame(width: 420)
+    }
+
+    // MARK: - Login View
+
+    private var loginView: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Add Account")
                 .font(.title2)
@@ -126,9 +158,64 @@ struct AddAccountView: View {
                 .keyboardShortcut(.cancelAction)
             }
         }
-        .padding()
-        .frame(width: 420)
     }
+
+    // MARK: - Account Picker View
+
+    private var accountPickerView: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Select Accounts")
+                .font(.title2)
+                .bold()
+
+            Text("Choose which accounts to sync:")
+                .foregroundColor(.secondary)
+
+            List {
+                ForEach($discoveredAccounts) { $account in
+                    Toggle(isOn: $account.enabled) {
+                        HStack {
+                            Text(account.name.isEmpty ? account.accountId : account.name)
+                                .font(.body)
+                            if account.isPrimary {
+                                Text("(primary)")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                    }
+                }
+            }
+            .frame(minHeight: 100)
+
+            if let error = errorMessage {
+                Text(error)
+                    .foregroundColor(.red)
+                    .font(.caption)
+            }
+
+            HStack {
+                Button("Back") {
+                    showAccountPicker = false
+                    errorMessage = nil
+                }
+
+                Spacer()
+
+                Button("Cancel") {
+                    appState.showingAddAccount = false
+                }
+
+                Button("Add Selected") {
+                    Task { await addSelectedAccounts() }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(isLoading || !discoveredAccounts.contains(where: { $0.enabled }))
+            }
+        }
+    }
+
+    // MARK: - OAuth Login
 
     private func oauthLogin() async {
         isLoading = true
@@ -138,7 +225,6 @@ struct AddAccountView: View {
         do {
             let (sessionUrl, metadata) = try await oauthDiscover()
 
-            // Pick a port for callback
             let port = UInt16.random(in: 49152...65000)
             let redirectURI = "http://127.0.0.1:\(port)/callback"
 
@@ -165,10 +251,8 @@ struct AddAccountView: View {
 
             statusMessage = "Waiting for browser authentication..."
 
-            // Start callback server and open browser
             let code = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
                 startOAuthCallbackServer(port: port, expectedState: state, continuation: continuation)
-
                 #if canImport(AppKit)
                 NSWorkspace.shared.open(authURL)
                 #endif
@@ -192,11 +276,37 @@ struct AddAccountView: View {
                 expiresAt: Date().addingTimeInterval(TimeInterval(tokenResponse.expiresIn))
             )
 
-            statusMessage = "Connecting to account..."
-            try await appState.addAccountWithOAuth(
-                sessionURL: sessionUrl, credential: credential)
+            // Discover accounts
+            statusMessage = "Discovering accounts..."
+            let tokenProvider = OAuthTokenProvider(credential: credential)
+            let sessionManager = SessionManager(
+                sessionURL: URL(string: sessionUrl)!, tokenProvider: tokenProvider)
+            let session = try await sessionManager.session()
 
-            appState.showingAddAccount = false
+            let fileNodeAccounts = session.fileNodeAccounts()
+            if fileNodeAccounts.isEmpty {
+                throw JmapError.noAccountId
+            }
+
+            if fileNodeAccounts.count == 1 {
+                // Single account — add directly
+                let acct = fileNodeAccounts[0]
+                try await appState.addAccountWithOAuth(
+                    accountId: acct.accountId, displayName: acct.name,
+                    sessionURL: sessionUrl, credential: credential)
+                appState.showingAddAccount = false
+            } else {
+                // Multiple accounts — show picker
+                discoveredAccounts = fileNodeAccounts.map { acct in
+                    DiscoveredAccount(
+                        accountId: acct.accountId, name: acct.name,
+                        isPrimary: acct.isPrimary, enabled: true)
+                }
+                pendingCredential = credential
+                pendingSessionURL = sessionUrl
+                showAccountPicker = true
+                statusMessage = nil
+            }
         } catch {
             errorMessage = String(describing: error)
             statusMessage = nil
@@ -204,20 +314,77 @@ struct AddAccountView: View {
         isLoading = false
     }
 
+    // MARK: - Manual Login
+
     private func manualLogin() async {
         isLoading = true
         errorMessage = nil
         do {
-            try await appState.addAccount(sessionURL: sessionURL, token: token)
+            let tokenProvider = StaticTokenProvider(token: token)
+            let sessionManager = SessionManager(
+                sessionURL: URL(string: sessionURL)!, tokenProvider: tokenProvider)
+            let session = try await sessionManager.session()
+
+            let fileNodeAccounts = session.fileNodeAccounts()
+            if fileNodeAccounts.isEmpty {
+                throw JmapError.noAccountId
+            }
+
+            if fileNodeAccounts.count == 1 {
+                let acct = fileNodeAccounts[0]
+                try await appState.addAccount(
+                    accountId: acct.accountId, displayName: acct.name,
+                    sessionURL: sessionURL, token: token)
+                appState.showingAddAccount = false
+            } else {
+                // Show picker — store token info for later
+                discoveredAccounts = fileNodeAccounts.map { acct in
+                    DiscoveredAccount(
+                        accountId: acct.accountId, name: acct.name,
+                        isPrimary: acct.isPrimary, enabled: true)
+                }
+                // Store credential as OAuth with static token for simplicity
+                pendingCredential = nil
+                pendingSessionURL = sessionURL
+                showAccountPicker = true
+            }
+        } catch {
+            errorMessage = String(describing: error)
+        }
+        isLoading = false
+    }
+
+    // MARK: - Add Selected Accounts
+
+    private func addSelectedAccounts() async {
+        isLoading = true
+        errorMessage = nil
+
+        let selected = discoveredAccounts.filter { $0.enabled }
+        guard let sessionUrl = pendingSessionURL else { return }
+
+        do {
+            for acct in selected {
+                if let credential = pendingCredential {
+                    try await appState.addAccountWithOAuth(
+                        accountId: acct.accountId, displayName: acct.name,
+                        sessionURL: sessionUrl, credential: credential)
+                } else {
+                    try await appState.addAccount(
+                        accountId: acct.accountId, displayName: acct.name,
+                        sessionURL: sessionUrl, token: token)
+                }
+            }
             appState.showingAddAccount = false
         } catch {
-            errorMessage = error.localizedDescription
+            errorMessage = String(describing: error)
         }
         isLoading = false
     }
 }
 
-/// Minimal HTTP server for OAuth callback (same approach as CLI).
+// MARK: - OAuth Callback Server
+
 private func startOAuthCallbackServer(
     port: UInt16, expectedState: String,
     continuation: CheckedContinuation<String, Error>

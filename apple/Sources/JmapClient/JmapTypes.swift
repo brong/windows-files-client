@@ -86,6 +86,27 @@ public struct JmapSession: Codable, Sendable {
     public var fileNodeCapabilityURI: String? {
         JmapCapability.allFileNodeURIs.first(where: hasCapability)
     }
+
+    /// Find all accounts that have the FileNode capability.
+    /// Returns (accountId, displayName, isPrimary) for each.
+    public func fileNodeAccounts() -> [(accountId: String, name: String, isPrimary: Bool)] {
+        let primaryId = fileNodeAccountId()
+        var result: [(String, String, Bool)] = []
+        for (accountId, account) in accounts {
+            let hasFileNode = JmapCapability.allFileNodeURIs.contains { uri in
+                account.accountCapabilities[uri] != nil
+            }
+            if hasFileNode {
+                result.append((accountId, account.name, accountId == primaryId))
+            }
+        }
+        // Sort: primary first, then alphabetical
+        result.sort { a, b in
+            if a.2 != b.2 { return a.2 }
+            return a.1 < b.1
+        }
+        return result
+    }
 }
 
 public struct JmapAccount: Codable, Sendable {

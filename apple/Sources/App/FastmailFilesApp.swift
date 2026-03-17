@@ -53,105 +53,56 @@ class AppState: ObservableObject {
         loadAccounts()
     }
 
-    func addAccount(sessionURL: String, token: String) async throws {
-        guard let url = URL(string: sessionURL) else {
-            throw JmapError.invalidResponse
-        }
+    /// Add an account with a static token (app password).
+    func addAccount(accountId: String, displayName: String,
+                    sessionURL: String, token: String) async throws {
+        // Skip if already added
+        guard !accounts.contains(where: { $0.accountId == accountId }) else { return }
 
-        let tokenProvider = StaticTokenProvider(token: token)
-        let sessionManager = SessionManager(sessionURL: url, tokenProvider: tokenProvider)
-        let session = try await sessionManager.session()
-
-        guard let accountId = session.fileNodeAccountId() else {
-            throw JmapError.noAccountId
-        }
-
-        guard let account = session.accounts[accountId] else {
-            throw JmapError.noAccountId
-        }
-
-        // Store token in shared Keychain
         try KeychainTokenProvider.storeToken(
-            token,
-            account: accountId,
-            accessGroup: Self.appGroupId
-        )
+            token, account: accountId, accessGroup: Self.appGroupId)
 
-        // Store session URL in shared UserDefaults
         defaults?.set(sessionURL, forKey: "sessionURL-\(accountId)")
 
-        // Try to register FileProvider domain (may fail if extension isn't embedded yet)
-        do {
-            let domain = NSFileProviderDomain(
-                identifier: NSFileProviderDomainIdentifier(rawValue: accountId),
-                displayName: "Fastmail Files (\(account.name))"
-            )
-            try await NSFileProviderManager.add(domain)
-        } catch {
-            print("FileProvider domain registration skipped: \(error.localizedDescription)")
-        }
+        try await registerDomain(accountId: accountId, displayName: displayName)
 
-        let info = AccountInfo(
-            accountId: accountId,
-            displayName: account.name,
-            status: .idle
-        )
-
-        accounts.append(info)
+        accounts.append(AccountInfo(accountId: accountId, displayName: displayName, status: .idle))
         saveAccounts()
     }
 
-    func addAccountWithOAuth(sessionURL: String, credential: OAuthCredential) async throws {
-        guard let url = URL(string: sessionURL) else {
-            throw JmapError.invalidResponse
-        }
+    /// Add an account with OAuth credentials.
+    func addAccountWithOAuth(accountId: String, displayName: String,
+                             sessionURL: String, credential: OAuthCredential) async throws {
+        // Skip if already added
+        guard !accounts.contains(where: { $0.accountId == accountId }) else { return }
 
-        let tokenProvider = OAuthTokenProvider(credential: credential)
-        let sessionManager = SessionManager(sessionURL: url, tokenProvider: tokenProvider)
-        let session = try await sessionManager.session()
-
-        guard let accountId = session.fileNodeAccountId() else {
-            throw JmapError.noAccountId
-        }
-
-        guard let account = session.accounts[accountId] else {
-            throw JmapError.noAccountId
-        }
-
-        // Store OAuth credential in shared Keychain (as JSON)
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         let credData = try encoder.encode(credential)
         let credString = String(data: credData, encoding: .utf8)!
         try KeychainTokenProvider.storeToken(
-            credString,
-            account: accountId,
-            accessGroup: Self.appGroupId
-        )
+            credString, account: accountId, accessGroup: Self.appGroupId)
 
-        // Store session URL in shared UserDefaults
         defaults?.set(sessionURL, forKey: "sessionURL-\(accountId)")
         defaults?.set("oauth", forKey: "authType-\(accountId)")
 
-        // Try to register FileProvider domain (may fail if extension isn't embedded yet)
+        try await registerDomain(accountId: accountId, displayName: displayName)
+
+        accounts.append(AccountInfo(accountId: accountId, displayName: displayName, status: .idle))
+        saveAccounts()
+    }
+
+    private func registerDomain(accountId: String, displayName: String) async throws {
+        let domainName = displayName.isEmpty ? accountId : "\(displayName) Files"
         do {
             let domain = NSFileProviderDomain(
                 identifier: NSFileProviderDomainIdentifier(rawValue: accountId),
-                displayName: "Fastmail Files (\(account.name))"
+                displayName: domainName
             )
             try await NSFileProviderManager.add(domain)
         } catch {
             print("FileProvider domain registration skipped: \(error.localizedDescription)")
         }
-
-        let info = AccountInfo(
-            accountId: accountId,
-            displayName: account.name,
-            status: .idle
-        )
-
-        accounts.append(info)
-        saveAccounts()
     }
 
     func removeAccount(_ accountId: String) async throws {
