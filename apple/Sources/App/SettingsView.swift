@@ -258,6 +258,11 @@ struct AddAccountView: View {
                 #endif
             }
 
+            // Bring app to front when callback arrives
+            #if canImport(AppKit)
+            NSApp.activate(ignoringOtherApps: true)
+            #endif
+
             statusMessage = "Exchanging code for tokens..."
             let tokenResponse = try await oauthExchangeCode(
                 tokenEndpoint: metadata.tokenEndpoint,
