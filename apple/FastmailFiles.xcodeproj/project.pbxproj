@@ -1,0 +1,524 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		01CD54C5900646D896D50B47 /* FastmailFilesApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 054924ACAC670250C31DF3D2 /* FastmailFilesApp.swift */; };
+		0F38DB4C08F36708EB3B2274 /* JmapClient in Frameworks */ = {isa = PBXBuildFile; productRef = 454F3DDC48B644011C0444EA /* JmapClient */; };
+		4F0C378D5D46F806C36D9034 /* FileProvider.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 50DD1E0837F22C43815E2FB8 /* FileProvider.framework */; };
+		8A63835D72FE8F0771B1259D /* JmapClient in Frameworks */ = {isa = PBXBuildFile; productRef = D1570E748A7CBC329B08D346 /* JmapClient */; };
+		8E2D11B1A1A5FD2DDAA44F3B /* MenuBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9DA41B9C56D4EEA74C31ED58 /* MenuBarView.swift */; };
+		A22B603EDD492089EAC68A7F /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E108CBE185A7E4D7B6F06D1 /* SettingsView.swift */; };
+		A68CA3E4BB74E52F4DB135E7 /* FileProviderExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = BFED148431F2C47FE97F5379 /* FileProviderExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		A81B0E9E3B34D7D3CA74C56F /* FileProviderExtension.swift in Sources */ = {isa = PBXBuildFile; fileRef = 22E24E8899D6F4E64FCDE7A4 /* FileProviderExtension.swift */; };
+		B96F70B9DA2B817B7CA49548 /* FileProviderEnumerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A98E5E0F75ADF331FA078C65 /* FileProviderEnumerator.swift */; };
+		F59F5726DE6B8D480DF3025D /* FileProviderItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = ECC98B8960F04E89C08BAF0F /* FileProviderItem.swift */; };
+		FDEF0E802F693A6800C196AD /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = FDEF0E7F2F693A6800C196AD /* Assets.xcassets */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		9E0C910EAEDD78EAE7142C21 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 0DE3C8AC6034808B0710C058 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 591603BC69F81B98EFE04DC3;
+			remoteInfo = FileProviderExtension;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		2A0CC541B6BE69A4F3F5708A /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				A68CA3E4BB74E52F4DB135E7 /* FileProviderExtension.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXResourcesBuildPhase section */
+		FDEF0E7E2F693A2100C196AD /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				FDEF0E802F693A6800C196AD /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		054924ACAC670250C31DF3D2 /* FastmailFilesApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FastmailFilesApp.swift; sourceTree = "<group>"; };
+		22E24E8899D6F4E64FCDE7A4 /* FileProviderExtension.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileProviderExtension.swift; sourceTree = "<group>"; };
+		50DD1E0837F22C43815E2FB8 /* FileProvider.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = FileProvider.framework; path = System/Library/Frameworks/FileProvider.framework; sourceTree = SDKROOT; };
+		58DD94B8668AAEFD671FF123 /* Fastmail Files.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Fastmail Files.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		6E108CBE185A7E4D7B6F06D1 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		832A354E67646CBCBCB55B51 /* apple */ = {isa = PBXFileReference; lastKnownFileType = folder; name = apple; path = .; sourceTree = SOURCE_ROOT; };
+		9DA41B9C56D4EEA74C31ED58 /* MenuBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarView.swift; sourceTree = "<group>"; };
+		A98E5E0F75ADF331FA078C65 /* FileProviderEnumerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileProviderEnumerator.swift; sourceTree = "<group>"; };
+		AB90E03CDE401BD27EF72145 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		BFED148431F2C47FE97F5379 /* FileProviderExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = FileProviderExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		ECC98B8960F04E89C08BAF0F /* FileProviderItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileProviderItem.swift; sourceTree = "<group>"; };
+		FDEF0E7F2F693A6800C196AD /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; name = Assets.xcassets; path = Resources/Assets.xcassets; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		3E5FD7811C5DCA35E270F267 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				0F38DB4C08F36708EB3B2274 /* JmapClient in Frameworks */,
+				4F0C378D5D46F806C36D9034 /* FileProvider.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		9195D3C99F101BBD8D6EF36D /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				8A63835D72FE8F0771B1259D /* JmapClient in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		17E49049C477D2CAD5B3F3FE /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				50DD1E0837F22C43815E2FB8 /* FileProvider.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		428ED78A9AFCF578FDF9FEBE /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				58DD94B8668AAEFD671FF123 /* Fastmail Files.app */,
+				BFED148431F2C47FE97F5379 /* FileProviderExtension.appex */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		66552E3D3A0E59F69BFAB9DF /* FileProvider */ = {
+			isa = PBXGroup;
+			children = (
+				A98E5E0F75ADF331FA078C65 /* FileProviderEnumerator.swift */,
+				22E24E8899D6F4E64FCDE7A4 /* FileProviderExtension.swift */,
+				ECC98B8960F04E89C08BAF0F /* FileProviderItem.swift */,
+			);
+			name = FileProvider;
+			path = Sources/FileProvider;
+			sourceTree = "<group>";
+		};
+		8CE21AD1FD7E6EEEDA52A91D /* Packages */ = {
+			isa = PBXGroup;
+			children = (
+				832A354E67646CBCBCB55B51 /* apple */,
+			);
+			name = Packages;
+			sourceTree = "<group>";
+		};
+		C7FA296452F5DAB540EB82F6 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				054924ACAC670250C31DF3D2 /* FastmailFilesApp.swift */,
+				AB90E03CDE401BD27EF72145 /* Info.plist */,
+				9DA41B9C56D4EEA74C31ED58 /* MenuBarView.swift */,
+				6E108CBE185A7E4D7B6F06D1 /* SettingsView.swift */,
+			);
+			name = App;
+			path = Sources/App;
+			sourceTree = "<group>";
+		};
+		F064B01F0D8A6D3839C2053B = {
+			isa = PBXGroup;
+			children = (
+				FDEF0E7F2F693A6800C196AD /* Assets.xcassets */,
+				C7FA296452F5DAB540EB82F6 /* App */,
+				66552E3D3A0E59F69BFAB9DF /* FileProvider */,
+				8CE21AD1FD7E6EEEDA52A91D /* Packages */,
+				17E49049C477D2CAD5B3F3FE /* Frameworks */,
+				428ED78A9AFCF578FDF9FEBE /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		591603BC69F81B98EFE04DC3 /* FileProviderExtension */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 300DB621C4D499598B7459C5 /* Build configuration list for PBXNativeTarget "FileProviderExtension" */;
+			buildPhases = (
+				0507C4F1041FE4D4D89580EA /* Sources */,
+				3E5FD7811C5DCA35E270F267 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = FileProviderExtension;
+			packageProductDependencies = (
+				454F3DDC48B644011C0444EA /* JmapClient */,
+			);
+			productName = FileProviderExtension;
+			productReference = BFED148431F2C47FE97F5379 /* FileProviderExtension.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+		8CD186FCCAA22CB14165FBEC /* FastmailFiles */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B962880FF35E28BC261BDA29 /* Build configuration list for PBXNativeTarget "FastmailFiles" */;
+			buildPhases = (
+				DD58B0A0F03B9192DA047C77 /* Sources */,
+				9195D3C99F101BBD8D6EF36D /* Frameworks */,
+				2A0CC541B6BE69A4F3F5708A /* Embed Foundation Extensions */,
+				FDEF0E7E2F693A2100C196AD /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				33F0BDDB80AEF2635604FD78 /* PBXTargetDependency */,
+			);
+			name = FastmailFiles;
+			packageProductDependencies = (
+				D1570E748A7CBC329B08D346 /* JmapClient */,
+			);
+			productName = FastmailFiles;
+			productReference = 58DD94B8668AAEFD671FF123 /* Fastmail Files.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		0DE3C8AC6034808B0710C058 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1500;
+			};
+			buildConfigurationList = 70430143C32C3B6533011D1B /* Build configuration list for PBXProject "FastmailFiles" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = F064B01F0D8A6D3839C2053B;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				796155364EDEF8E6E4B57D39 /* XCLocalSwiftPackageReference "." */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 428ED78A9AFCF578FDF9FEBE /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				8CD186FCCAA22CB14165FBEC /* FastmailFiles */,
+				591603BC69F81B98EFE04DC3 /* FileProviderExtension */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		0507C4F1041FE4D4D89580EA /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B96F70B9DA2B817B7CA49548 /* FileProviderEnumerator.swift in Sources */,
+				A81B0E9E3B34D7D3CA74C56F /* FileProviderExtension.swift in Sources */,
+				F59F5726DE6B8D480DF3025D /* FileProviderItem.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		DD58B0A0F03B9192DA047C77 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				01CD54C5900646D896D50B47 /* FastmailFilesApp.swift in Sources */,
+				8E2D11B1A1A5FD2DDAA44F3B /* MenuBarView.swift in Sources */,
+				A22B603EDD492089EAC68A7F /* SettingsView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		33F0BDDB80AEF2635604FD78 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 591603BC69F81B98EFE04DC3 /* FileProviderExtension */;
+			targetProxy = 9E0C910EAEDD78EAE7142C21 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		0B3E73F02AFFE6EDE33B2907 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = Sources/FileProvider/FileProvider.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				DEVELOPMENT_TEAM = BJL34Q426G;
+				INFOPLIST_FILE = Sources/FileProvider/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.fastmail.files.app.FileProvider;
+				PRODUCT_NAME = FileProviderExtension;
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		1B343BC090357AF2DFFE18AE /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = Sources/FileProvider/FileProvider.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				DEVELOPMENT_TEAM = BJL34Q426G;
+				INFOPLIST_FILE = Sources/FileProvider/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.fastmail.files.app.FileProvider;
+				PRODUCT_NAME = FileProviderExtension;
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		50D37679782A873AD8FB044A /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Sources/App/App.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				DEVELOPMENT_TEAM = BJL34Q426G;
+				INFOPLIST_FILE = Sources/App/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = "@executable_path/../Frameworks";
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.fastmail.files.app;
+				PRODUCT_NAME = "Fastmail Files";
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		55FC78B9C245165E28BDFFEA /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = BJL34Q426G;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		C4995770E0338A6999A23409 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = BJL34Q426G;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		E17A967227D89B443124C2AC /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Sources/App/App.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				DEVELOPMENT_TEAM = BJL34Q426G;
+				INFOPLIST_FILE = Sources/App/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = "@executable_path/../Frameworks";
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.fastmail.files.app;
+				PRODUCT_NAME = "Fastmail Files";
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		300DB621C4D499598B7459C5 /* Build configuration list for PBXNativeTarget "FileProviderExtension" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				1B343BC090357AF2DFFE18AE /* Debug */,
+				0B3E73F02AFFE6EDE33B2907 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		70430143C32C3B6533011D1B /* Build configuration list for PBXProject "FastmailFiles" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C4995770E0338A6999A23409 /* Debug */,
+				55FC78B9C245165E28BDFFEA /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		B962880FF35E28BC261BDA29 /* Build configuration list for PBXNativeTarget "FastmailFiles" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				50D37679782A873AD8FB044A /* Debug */,
+				E17A967227D89B443124C2AC /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		796155364EDEF8E6E4B57D39 /* XCLocalSwiftPackageReference "." */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = .;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		454F3DDC48B644011C0444EA /* JmapClient */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = JmapClient;
+		};
+		D1570E748A7CBC329B08D346 /* JmapClient */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = JmapClient;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = 0DE3C8AC6034808B0710C058 /* Project object */;
+}

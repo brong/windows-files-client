@@ -123,6 +123,11 @@ struct SettingsView: View {
             Spacer()
 
             if account.isSynced {
+                Button("Open") {
+                    openInFinder(accountId: account.accountId)
+                }
+                .font(.caption)
+
                 Button("Sync") {
                     appState.syncNow(account.accountId)
                 }
@@ -150,6 +155,23 @@ struct SettingsView: View {
     }
 
     // MARK: - Helpers
+
+    #if os(macOS)
+    private func openInFinder(accountId: String) {
+        let domain = NSFileProviderDomain(
+            identifier: NSFileProviderDomainIdentifier(rawValue: accountId),
+            displayName: "")
+        if let manager = NSFileProviderManager(for: domain) {
+            manager.getUserVisibleURL(for: .rootContainer) { url, error in
+                if let url = url {
+                    DispatchQueue.main.async {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+            }
+        }
+    }
+    #endif
 
     private func statusColor(_ status: SyncStatus) -> Color {
         switch status {
