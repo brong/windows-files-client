@@ -128,11 +128,17 @@ struct SettingsView: View {
                 }
                 .font(.caption)
 
+                Button("Clean") {
+                    Task { await appState.cleanAccount(loginId: login.loginId, accountId: account.accountId) }
+                }
+                .font(.caption)
+                .foregroundColor(.orange)
+
                 Button("Disable") {
                     Task { await appState.disableAccount(loginId: login.loginId, accountId: account.accountId) }
                 }
                 .font(.caption)
-                .foregroundColor(.orange)
+                .foregroundColor(.red)
             } else {
                 Button("Enable") {
                     Task { await appState.enableAccount(loginId: login.loginId, accountId: account.accountId) }

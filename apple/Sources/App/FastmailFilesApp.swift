@@ -253,6 +253,45 @@ class AppState: ObservableObject {
         saveState()
     }
 
+    /// Clean an account: remove domain, wipe local caches, re-register.
+    /// This forces a full re-fetch from the server.
+    func cleanAccount(loginId: String, accountId: String) async {
+        guard let loginIdx = logins.firstIndex(where: { $0.loginId == loginId }),
+              let acctIdx = logins[loginIdx].accounts.firstIndex(where: { $0.accountId == accountId }),
+              logins[loginIdx].accounts[acctIdx].isSynced
+        else { return }
+
+        let login = logins[loginIdx]
+        let acct = logins[loginIdx].accounts[acctIdx]
+
+        // 1. Remove the FileProvider domain (this clears the system's local state)
+        await removeDomain(accountId: accountId)
+
+        // 2. Wipe the extension's shared container data for this account
+        if let containerURL = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: Self.appGroupId) {
+            // Node database
+            let nodeCache = containerURL.appendingPathComponent("nodes-\(accountId).json")
+            try? FileManager.default.removeItem(at: nodeCache)
+            // Blob cache directory
+            let blobDir = containerURL.appendingPathComponent("blobs-\(accountId)")
+            try? FileManager.default.removeItem(at: blobDir)
+        }
+
+        // 3. Re-register the domain so it starts fresh
+        if login.authType == .oauth, let credential = loadLoginCredential(loginId: loginId) {
+            await registerDomain(accountId: acct.accountId, displayName: acct.displayName,
+                                 loginId: loginId, credential: credential, sessionURL: login.sessionURL)
+        } else if let token = loadLoginToken(loginId: loginId) {
+            await registerDomainWithToken(
+                accountId: acct.accountId, displayName: acct.displayName,
+                loginId: loginId, token: token, sessionURL: login.sessionURL)
+        }
+
+        logins[loginIdx].accounts[acctIdx].status = .idle
+        saveState()
+    }
+
     /// Sync now for a specific account.
     func syncNow(_ accountId: String) {
         let domain = NSFileProviderDomain(
