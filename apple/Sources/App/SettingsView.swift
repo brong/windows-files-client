@@ -11,43 +11,35 @@ struct SettingsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Accounts")
+            Text("Fastmail Files")
                 .font(.title2)
                 .bold()
 
-            if appState.accounts.isEmpty && orphanedDomains.isEmpty {
-                Text("No accounts configured. Add an account to start syncing files.")
+            if appState.logins.isEmpty && orphanedDomains.isEmpty {
+                Text("No accounts configured. Add a login to start syncing files.")
                     .foregroundColor(.secondary)
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding()
             } else {
                 List {
-                    // Active accounts
-                    ForEach(appState.accounts) { account in
-                        HStack {
-                            VStack(alignment: .leading) {
-                                Text(account.displayName.isEmpty ? account.accountId : account.displayName)
-                                    .font(.body)
-                                Text(account.accountId)
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
+                    // Login → Account tree
+                    ForEach(appState.logins) { login in
+                        Section {
+                            ForEach(login.accounts) { acct in
+                                accountRow(login: login, account: acct)
                             }
-                            Spacer()
-                            Button("Remove") {
-                                Task { await appState.removeAccount(account.accountId) }
-                            }
-                            .foregroundColor(.red)
+                        } header: {
+                            loginHeader(login: login)
                         }
                     }
 
-                    // Orphaned domains (registered but not in our list)
+                    // Orphaned domains
                     if !orphanedDomains.isEmpty {
                         Section("Orphaned (no longer in config)") {
                             ForEach(orphanedDomains, id: \.identifier.rawValue) { domain in
                                 HStack {
                                     VStack(alignment: .leading) {
                                         Text(domain.displayName)
-                                            .font(.body)
                                             .foregroundColor(.orange)
                                         Text(domain.identifier.rawValue)
                                             .font(.caption)
@@ -71,7 +63,7 @@ struct SettingsView: View {
             Divider()
 
             HStack {
-                Button("Add Account...") {
+                Button("Add Login...") {
                     appState.showingAddAccount = true
                 }
                 .sheet(isPresented: $appState.showingAddAccount) {
@@ -80,10 +72,10 @@ struct SettingsView: View {
 
                 Spacer()
 
-                if !appState.accounts.isEmpty || !orphanedDomains.isEmpty {
+                if !appState.logins.isEmpty || !orphanedDomains.isEmpty {
                     Button("Remove All") {
                         Task {
-                            await appState.removeAllAccounts()
+                            await appState.removeAll()
                             await refreshOrphanedDomains()
                         }
                     }
@@ -92,15 +84,92 @@ struct SettingsView: View {
             }
         }
         .padding()
-        .frame(minWidth: 450, minHeight: 300)
+        .frame(minWidth: 500, minHeight: 350)
         .task {
             await refreshOrphanedDomains()
         }
     }
 
+    // MARK: - Login Header
+
+    private func loginHeader(login: LoginInfo) -> some View {
+        HStack {
+            Image(systemName: "person.circle")
+            Text(login.displayLabel)
+                .font(.headline)
+            Spacer()
+            Button("Remove Login") {
+                Task { await appState.removeLogin(login.loginId) }
+            }
+            .font(.caption)
+            .foregroundColor(.red)
+        }
+    }
+
+    // MARK: - Account Row
+
+    private func accountRow(login: LoginInfo, account: AccountInfo) -> some View {
+        HStack {
+            Image(systemName: account.isSynced ? "checkmark.circle.fill" : "circle")
+                .foregroundColor(account.isSynced ? statusColor(account.status) : .gray)
+
+            VStack(alignment: .leading) {
+                Text(account.displayName.isEmpty ? account.accountId : account.displayName)
+                Text(account.isSynced ? statusText(account.status) : "Not synced")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            Spacer()
+
+            if account.isSynced {
+                Button("Sync") {
+                    appState.syncNow(account.accountId)
+                }
+                .font(.caption)
+
+                Button("Disable") {
+                    Task { await appState.disableAccount(loginId: login.loginId, accountId: account.accountId) }
+                }
+                .font(.caption)
+                .foregroundColor(.orange)
+            } else {
+                Button("Enable") {
+                    Task { await appState.enableAccount(loginId: login.loginId, accountId: account.accountId) }
+                }
+                .font(.caption)
+                .foregroundColor(.blue)
+            }
+        }
+    }
+
+    // MARK: - Helpers
+
+    private func statusColor(_ status: SyncStatus) -> Color {
+        switch status {
+        case .idle: return .green
+        case .syncing: return .blue
+        case .error: return .red
+        case .offline: return .gray
+        case .paused: return .orange
+        case .notSynced: return .gray
+        }
+    }
+
+    private func statusText(_ status: SyncStatus) -> String {
+        switch status {
+        case .idle: return "Up to date"
+        case .syncing: return "Syncing..."
+        case .error: return "Error"
+        case .offline: return "Offline"
+        case .paused: return "Paused"
+        case .notSynced: return "Not synced"
+        }
+    }
+
     private func refreshOrphanedDomains() async {
         let domains = await appState.listDomains()
-        let knownIds = Set(appState.accounts.map { $0.accountId })
+        let knownIds = Set(appState.logins.flatMap { $0.accounts.map { $0.accountId } })
         orphanedDomains = domains.filter { !knownIds.contains($0.identifier.rawValue) }
     }
 }
@@ -130,6 +199,7 @@ struct AddAccountView: View {
     @State private var discoveredAccounts: [DiscoveredAccount] = []
     @State private var pendingCredential: OAuthCredential?
     @State private var pendingSessionURL: String?
+    @State private var pendingLoginId: String?
     @State private var showAccountPicker = false
 
     var body: some View {
@@ -148,11 +218,10 @@ struct AddAccountView: View {
 
     private var loginView: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Add Account")
+            Text("Add Login")
                 .font(.title2)
                 .bold()
 
-            // Primary: OAuth
             VStack(spacing: 12) {
                 Button(action: { Task { await oauthLogin() } }) {
                     HStack {
@@ -177,15 +246,12 @@ struct AddAccountView: View {
                 }
             }
 
-            // Advanced: manual token
             DisclosureGroup("Advanced: Use App Password", isExpanded: $showAdvanced) {
                 VStack(alignment: .leading, spacing: 8) {
                     TextField("Session URL", text: $sessionURL)
                         .textFieldStyle(.roundedBorder)
-
                     SecureField("API Token", text: $token)
                         .textFieldStyle(.roundedBorder)
-
                     Button("Add with Token") {
                         Task { await manualLogin() }
                     }
@@ -226,7 +292,6 @@ struct AddAccountView: View {
                     Toggle(isOn: $account.enabled) {
                         HStack {
                             Text(account.name.isEmpty ? account.accountId : account.name)
-                                .font(.body)
                             if account.isPrimary {
                                 Text("(primary)")
                                     .font(.caption)
@@ -249,13 +314,10 @@ struct AddAccountView: View {
                     showAccountPicker = false
                     errorMessage = nil
                 }
-
                 Spacer()
-
                 Button("Cancel") {
                     appState.showingAddAccount = false
                 }
-
                 Button("Add Selected") {
                     Task { await addSelectedAccounts() }
                 }
@@ -308,7 +370,6 @@ struct AddAccountView: View {
                 #endif
             }
 
-            // Bring app to front when callback arrives
             #if canImport(AppKit)
             NSApp.activate(ignoringOtherApps: true)
             #endif
@@ -343,25 +404,20 @@ struct AddAccountView: View {
                 throw JmapError.noAccountId
             }
 
-            if fileNodeAccounts.count == 1 {
-                // Single account — add directly
-                let acct = fileNodeAccounts[0]
-                try await appState.addAccountWithOAuth(
-                    accountId: acct.accountId, displayName: acct.name,
-                    sessionURL: sessionUrl, credential: credential)
-                appState.showingAddAccount = false
-            } else {
-                // Multiple accounts — show picker
-                discoveredAccounts = fileNodeAccounts.map { acct in
-                    DiscoveredAccount(
-                        accountId: acct.accountId, name: acct.name,
-                        isPrimary: acct.isPrimary, enabled: true)
-                }
-                pendingCredential = credential
-                pendingSessionURL = sessionUrl
-                showAccountPicker = true
-                statusMessage = nil
+            // Derive loginId from primary account name or first account
+            let loginId = fileNodeAccounts.first(where: { $0.isPrimary })?.name
+                ?? fileNodeAccounts.first?.name ?? "unknown"
+
+            // Go to account picker (even for single account, for consistency)
+            discoveredAccounts = fileNodeAccounts.map { acct in
+                DiscoveredAccount(accountId: acct.accountId, name: acct.name,
+                                  isPrimary: acct.isPrimary, enabled: true)
             }
+            pendingCredential = credential
+            pendingSessionURL = sessionUrl
+            pendingLoginId = loginId
+            showAccountPicker = true
+            statusMessage = nil
         } catch {
             errorMessage = String(describing: error)
             statusMessage = nil
@@ -385,24 +441,17 @@ struct AddAccountView: View {
                 throw JmapError.noAccountId
             }
 
-            if fileNodeAccounts.count == 1 {
-                let acct = fileNodeAccounts[0]
-                try await appState.addAccount(
-                    accountId: acct.accountId, displayName: acct.name,
-                    sessionURL: sessionURL, token: token)
-                appState.showingAddAccount = false
-            } else {
-                // Show picker — store token info for later
-                discoveredAccounts = fileNodeAccounts.map { acct in
-                    DiscoveredAccount(
-                        accountId: acct.accountId, name: acct.name,
-                        isPrimary: acct.isPrimary, enabled: true)
-                }
-                // Store credential as OAuth with static token for simplicity
-                pendingCredential = nil
-                pendingSessionURL = sessionURL
-                showAccountPicker = true
+            let loginId = fileNodeAccounts.first(where: { $0.isPrimary })?.name
+                ?? fileNodeAccounts.first?.name ?? "unknown"
+
+            discoveredAccounts = fileNodeAccounts.map { acct in
+                DiscoveredAccount(accountId: acct.accountId, name: acct.name,
+                                  isPrimary: acct.isPrimary, enabled: true)
             }
+            pendingCredential = nil
+            pendingSessionURL = sessionURL
+            pendingLoginId = loginId
+            showAccountPicker = true
         } catch {
             errorMessage = String(describing: error)
         }
@@ -415,20 +464,19 @@ struct AddAccountView: View {
         isLoading = true
         errorMessage = nil
 
-        let selected = discoveredAccounts.filter { $0.enabled }
-        guard let sessionUrl = pendingSessionURL else { return }
+        guard let sessionUrl = pendingSessionURL, let loginId = pendingLoginId else { return }
+        let selectedIds = Set(discoveredAccounts.filter { $0.enabled }.map { $0.accountId })
+        let allAccounts = discoveredAccounts.map { ($0.accountId, $0.name, $0.isPrimary) }
 
         do {
-            for acct in selected {
-                if let credential = pendingCredential {
-                    try await appState.addAccountWithOAuth(
-                        accountId: acct.accountId, displayName: acct.name,
-                        sessionURL: sessionUrl, credential: credential)
-                } else {
-                    try await appState.addAccount(
-                        accountId: acct.accountId, displayName: acct.name,
-                        sessionURL: sessionUrl, token: token)
-                }
+            if let credential = pendingCredential {
+                try await appState.addLogin(
+                    loginId: loginId, sessionURL: sessionUrl, credential: credential,
+                    discoveredAccounts: allAccounts, selectedAccountIds: selectedIds)
+            } else {
+                try await appState.addLoginWithToken(
+                    loginId: loginId, sessionURL: sessionUrl, token: token,
+                    discoveredAccounts: allAccounts, selectedAccountIds: selectedIds)
             }
             appState.showingAddAccount = false
         } catch {

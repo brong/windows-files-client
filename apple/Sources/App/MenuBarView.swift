@@ -6,32 +6,33 @@ struct MenuBarView: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        if appState.accounts.isEmpty {
+        if appState.logins.isEmpty {
             Text("No accounts configured")
                 .foregroundColor(.secondary)
             Divider()
-            Button("Add Account...") {
+            Button("Add Login...") {
                 openSettings()
             }
         } else {
-            ForEach(appState.accounts) { account in
-                HStack {
-                    Image(systemName: statusIcon(for: account.status))
-                        .foregroundColor(statusColor(for: account.status))
-                    VStack(alignment: .leading) {
-                        Text(account.displayName)
-                            .font(.body)
-                        Text(statusText(for: account.status))
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                }
+            ForEach(appState.logins) { login in
+                Text(login.displayLabel)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
 
-                Button("Sync Now") {
-                    appState.syncNow(account.accountId)
+                ForEach(login.accounts.filter { $0.isSynced }) { account in
+                    HStack {
+                        Image(systemName: statusIcon(for: account.status))
+                            .foregroundColor(statusColor(for: account.status))
+                        Text(account.displayName.isEmpty ? account.accountId : account.displayName)
+                    }
                 }
             }
             Divider()
+            Button("Sync All") {
+                for acct in appState.syncedAccounts {
+                    appState.syncNow(acct.accountId)
+                }
+            }
             Button("Settings...") {
                 openSettings()
             }
@@ -55,6 +56,7 @@ struct MenuBarView: View {
         case .error: return "exclamationmark.triangle.fill"
         case .offline: return "wifi.slash"
         case .paused: return "pause.circle.fill"
+        case .notSynced: return "circle"
         }
     }
 
@@ -65,16 +67,7 @@ struct MenuBarView: View {
         case .error: return .red
         case .offline: return .gray
         case .paused: return .orange
-        }
-    }
-
-    private func statusText(for status: SyncStatus) -> String {
-        switch status {
-        case .idle: return "Up to date"
-        case .syncing: return "Syncing..."
-        case .error: return "Error — check settings"
-        case .offline: return "Offline"
-        case .paused: return "Paused"
+        case .notSynced: return .gray
         }
     }
 }
