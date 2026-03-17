@@ -1,4 +1,5 @@
 import SwiftUI
+import FileProvider
 import JmapClient
 #if canImport(AppKit)
 import AppKit

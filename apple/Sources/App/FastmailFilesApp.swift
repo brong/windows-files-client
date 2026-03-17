@@ -157,9 +157,10 @@ class AppState: ObservableObject {
 
     /// List all registered FileProvider domains.
     func listDomains() async -> [NSFileProviderDomain] {
-        await withCheckedContinuation { continuation in
-            NSFileProviderManager.getDomainsWithCompletionHandler { domains, error in
-                continuation.resume(returning: domains)
+        await withUnsafeContinuation { continuation in
+            NSFileProviderManager.getDomainsWithCompletionHandler { domains, _ in
+                nonisolated(unsafe) let result = domains
+                continuation.resume(returning: result)
             }
         }
     }
