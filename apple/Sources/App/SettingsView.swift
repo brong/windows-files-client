@@ -6,6 +6,7 @@ import AppKit
 
 struct SettingsView: View {
     @ObservedObject var appState: AppState
+    @State private var orphanedDomains: [NSFileProviderDomain] = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -13,17 +14,18 @@ struct SettingsView: View {
                 .font(.title2)
                 .bold()
 
-            if appState.accounts.isEmpty {
+            if appState.accounts.isEmpty && orphanedDomains.isEmpty {
                 Text("No accounts configured. Add an account to start syncing files.")
                     .foregroundColor(.secondary)
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding()
             } else {
                 List {
+                    // Active accounts
                     ForEach(appState.accounts) { account in
                         HStack {
                             VStack(alignment: .leading) {
-                                Text(account.displayName)
+                                Text(account.displayName.isEmpty ? account.accountId : account.displayName)
                                     .font(.body)
                                 Text(account.accountId)
                                     .font(.caption)
@@ -31,11 +33,35 @@ struct SettingsView: View {
                             }
                             Spacer()
                             Button("Remove") {
-                                Task {
-                                    try? await appState.removeAccount(account.accountId)
-                                }
+                                Task { await appState.removeAccount(account.accountId) }
                             }
                             .foregroundColor(.red)
+                        }
+                    }
+
+                    // Orphaned domains (registered but not in our list)
+                    if !orphanedDomains.isEmpty {
+                        Section("Orphaned (no longer in config)") {
+                            ForEach(orphanedDomains, id: \.identifier.rawValue) { domain in
+                                HStack {
+                                    VStack(alignment: .leading) {
+                                        Text(domain.displayName)
+                                            .font(.body)
+                                            .foregroundColor(.orange)
+                                        Text(domain.identifier.rawValue)
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                    }
+                                    Spacer()
+                                    Button("Remove") {
+                                        Task {
+                                            try? await NSFileProviderManager.remove(domain)
+                                            await refreshOrphanedDomains()
+                                        }
+                                    }
+                                    .foregroundColor(.red)
+                                }
+                            }
                         }
                     }
                 }
@@ -43,15 +69,38 @@ struct SettingsView: View {
 
             Divider()
 
-            Button("Add Account...") {
-                appState.showingAddAccount = true
-            }
-            .sheet(isPresented: $appState.showingAddAccount) {
-                AddAccountView(appState: appState)
+            HStack {
+                Button("Add Account...") {
+                    appState.showingAddAccount = true
+                }
+                .sheet(isPresented: $appState.showingAddAccount) {
+                    AddAccountView(appState: appState)
+                }
+
+                Spacer()
+
+                if !appState.accounts.isEmpty || !orphanedDomains.isEmpty {
+                    Button("Remove All") {
+                        Task {
+                            await appState.removeAllAccounts()
+                            await refreshOrphanedDomains()
+                        }
+                    }
+                    .foregroundColor(.red)
+                }
             }
         }
         .padding()
         .frame(minWidth: 450, minHeight: 300)
+        .task {
+            await refreshOrphanedDomains()
+        }
+    }
+
+    private func refreshOrphanedDomains() async {
+        let domains = await appState.listDomains()
+        let knownIds = Set(appState.accounts.map { $0.accountId })
+        orphanedDomains = domains.filter { !knownIds.contains($0.identifier.rawValue) }
     }
 }
 

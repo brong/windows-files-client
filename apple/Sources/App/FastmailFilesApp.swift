@@ -105,8 +105,8 @@ class AppState: ObservableObject {
         }
     }
 
-    func removeAccount(_ accountId: String) async throws {
-        // Try to remove FileProvider domain
+    func removeAccount(_ accountId: String) async {
+        // Remove FileProvider domain
         do {
             let domain = NSFileProviderDomain(
                 identifier: NSFileProviderDomainIdentifier(rawValue: accountId),
@@ -114,14 +114,54 @@ class AppState: ObservableObject {
             )
             try await NSFileProviderManager.remove(domain)
         } catch {
-            print("FileProvider domain removal skipped: \(error.localizedDescription)")
+            print("FileProvider domain removal failed: \(error.localizedDescription)")
         }
 
-        // Clean up stored credentials
+        // Clean up stored credentials and config
         defaults?.removeObject(forKey: "sessionURL-\(accountId)")
+        defaults?.removeObject(forKey: "authType-\(accountId)")
+
+        // Remove from keychain (best effort)
+        let deleteQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "com.fastmail.files",
+            kSecAttrAccount as String: accountId,
+        ]
+        SecItemDelete(deleteQuery as CFDictionary)
 
         accounts.removeAll { $0.accountId == accountId }
         saveAccounts()
+    }
+
+    /// Remove all accounts and clean up all FileProvider domains.
+    func removeAllAccounts() async {
+        let allAccounts = accounts
+        for account in allAccounts {
+            await removeAccount(account.accountId)
+        }
+        // Also clean up any orphaned domains
+        await cleanupOrphanedDomains()
+    }
+
+    /// Find and remove FileProvider domains that aren't in our account list.
+    func cleanupOrphanedDomains() async {
+        let domains = await listDomains()
+        let knownIds = Set(accounts.map { $0.accountId })
+        for domain in domains {
+            if !knownIds.contains(domain.identifier.rawValue) {
+                print("Removing orphaned domain: \(domain.displayName) (\(domain.identifier.rawValue))")
+                try? await NSFileProviderManager.remove(domain)
+            }
+        }
+    }
+
+    /// List all registered FileProvider domains.
+    func listDomains() async -> [NSFileProviderDomain] {
+        await withCheckedContinuation { continuation in
+            NSFileProviderManager.getDomainsWithCompletionHandler { domains, error in
+                continuation.resume(returning: domains)
+            }
+        }
     }
 
     func syncNow(_ accountId: String) {
