@@ -10,65 +10,69 @@ struct SettingsView: View {
     @State private var orphanedDomains: [NSFileProviderDomain] = []
 
     var body: some View {
-        ScrollView {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Fastmail Files")
-                .font(.title2)
-                .bold()
+        VStack(spacing: 0) {
+            // Scrollable content
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Fastmail Files")
+                        .font(.title2)
+                        .bold()
 
-            if appState.logins.isEmpty && orphanedDomains.isEmpty {
-                Text("No accounts configured. Add a login to start syncing files.")
-                    .foregroundColor(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .padding()
-            } else {
-                // Flat layout — no nested scroll views
-                ForEach(appState.logins) { login in
-                    loginHeader(login: login)
-                    ForEach(login.accounts) { acct in
-                        accountRow(login: login, account: acct)
-                            .padding(.leading, 24)
-                    }
-                    Divider()
-                }
-
-                // Orphaned domains
-                if !orphanedDomains.isEmpty {
-                    Text("Orphaned (no longer in config)")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .textCase(.uppercase)
-                    ForEach(orphanedDomains, id: \.identifier.rawValue) { domain in
-                        HStack {
-                            VStack(alignment: .leading) {
-                                Text(domain.displayName)
-                                    .foregroundColor(.orange)
-                                Text(domain.identifier.rawValue)
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
+                    if appState.logins.isEmpty && orphanedDomains.isEmpty {
+                        Text("No accounts configured. Add a login to start syncing files.")
+                            .foregroundColor(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                            .padding()
+                    } else {
+                        ForEach(appState.logins) { login in
+                            loginHeader(login: login)
+                            ForEach(login.accounts) { acct in
+                                accountRow(login: login, account: acct)
+                                    .padding(.leading, 24)
                             }
-                            Spacer()
-                            Button("Remove") {
-                                Task {
-                                    try? await NSFileProviderManager.remove(domain)
-                                    await refreshOrphanedDomains()
-                                }
-                            }
-                            .foregroundColor(.red)
+                            Divider()
                         }
-                        .padding(.leading, 24)
+
+                        if !orphanedDomains.isEmpty {
+                            Text("Orphaned (no longer in config)")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .textCase(.uppercase)
+                            ForEach(orphanedDomains, id: \.identifier.rawValue) { domain in
+                                HStack {
+                                    VStack(alignment: .leading) {
+                                        Text(domain.displayName)
+                                            .foregroundColor(.orange)
+                                        Text(domain.identifier.rawValue)
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                    }
+                                    Spacer()
+                                    Button("Remove") {
+                                        Task {
+                                            try? await NSFileProviderManager.remove(domain)
+                                            await refreshOrphanedDomains()
+                                        }
+                                    }
+                                    .foregroundColor(.red)
+                                }
+                                .padding(.leading, 24)
+                            }
+                        }
+                    }
+
+                    // Activity section
+                    if !appState.logins.isEmpty {
+                        Divider()
+                        ActivityView(appState: appState)
                     }
                 }
+                .padding()
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
 
+            // Fixed bottom bar
             Divider()
-
-            // Activity section
-            if !appState.logins.isEmpty {
-                Divider()
-                ActivityView(appState: appState)
-            }
-
             HStack {
                 Button("Add Login...") {
                     appState.showingAddAccount = true
@@ -89,10 +93,8 @@ struct SettingsView: View {
                     .foregroundColor(.red)
                 }
             }
+            .padding()
         }
-        .padding()
-        .frame(maxWidth: .infinity, alignment: .leading)
-        } // ScrollView
         .frame(minWidth: 500, minHeight: 450)
         .task {
             await refreshOrphanedDomains()
