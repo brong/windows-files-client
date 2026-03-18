@@ -366,19 +366,19 @@ class AppState: ObservableObject {
         let login = logins[loginIdx]
         let acct = logins[loginIdx].accounts[acctIdx]
 
-        // 1. Remove the FileProvider domain (this clears the system's local state)
-        await removeDomain(accountId: accountId)
-
-        // 2. Wipe the extension's shared container data for this account
-        if let containerURL = FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier: Self.appGroupId) {
-            // Node database
-            let nodeCache = containerURL.appendingPathComponent("nodes-\(accountId).json")
-            try? FileManager.default.removeItem(at: nodeCache)
-            // Blob cache directory
-            let blobDir = containerURL.appendingPathComponent("blobs-\(accountId)")
-            try? FileManager.default.removeItem(at: blobDir)
+        // 1. Evict all downloaded content before removing the domain
+        let domain = NSFileProviderDomain(
+            identifier: NSFileProviderDomainIdentifier(rawValue: accountId),
+            displayName: "")
+        if let manager = NSFileProviderManager(for: domain) {
+            // Evict all items to remove downloaded files
+            manager.evictItem(identifier: .rootContainer) { _ in }
+            // Brief pause to let eviction process
+            try? await Task.sleep(nanoseconds: 500_000_000)
         }
+
+        // 2. Remove the FileProvider domain (also cleans node cache + blob cache)
+        await removeDomain(accountId: accountId)
 
         // 3. Re-register the domain so it starts fresh
         do {
@@ -390,7 +390,9 @@ class AppState: ObservableObject {
                     accountId: acct.accountId, displayName: acct.displayName,
                     loginId: loginId, token: token, sessionURL: login.sessionURL)
             }
-            logins[loginIdx].accounts[acctIdx].status = .idle
+            logins[loginIdx].accounts[acctIdx].status = .syncing
+            // Signal the new domain to start enumerating
+            syncNow(acct.accountId)
         } catch {
             logins[loginIdx].accounts[acctIdx].isSynced = false
             logins[loginIdx].accounts[acctIdx].status = .error
