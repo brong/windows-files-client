@@ -890,7 +890,10 @@ struct ActivityView: View {
     private func loadActivities() {
         guard let containerURL = FileManager.default.containerURL(
             forSecurityApplicationGroupIdentifier: AppState.appGroupId)
-        else { return }
+        else {
+            print("[Activity] No container URL for app group")
+            return
+        }
 
         guard let snapshot = ActivityTracker.loadShared(containerURL: containerURL) else { return }
 
