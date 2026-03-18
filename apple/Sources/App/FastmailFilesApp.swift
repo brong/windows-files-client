@@ -452,7 +452,7 @@ class AppState: ObservableObject {
 
     private func registerDomain(accountId: String, displayName: String,
                                 loginId: String, credential: OAuthCredential,
-                                sessionURL: String) async {
+                                sessionURL: String) async throws {
         // Store per-account credential for the extension to read
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
