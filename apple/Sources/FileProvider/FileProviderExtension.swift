@@ -279,16 +279,28 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
 
                 if itemTemplate.contentType == .folder {
                     // Create folder
+                    let folderName = desanitizeFilename(itemTemplate.filename)
                     let node = try await client.createNode(
                         accountId: accountId,
                         parentId: parentId,
-                        name: desanitizeFilename(itemTemplate.filename)
+                        name: folderName
                     )
-                    await database.upsertFromServer(node)
+                    let entry = NodeCacheEntry(
+                        parentId: node.parentId ?? parentId,
+                        name: node.name ?? folderName,
+                        blobId: nil,
+                        size: 0,
+                        modified: node.modified,
+                        isFolder: true,
+                        type: nil,
+                        myRights: node.myRights
+                    )
+                    await database.upsert(nodeId: node.id, entry: entry)
                     try await database.save()
 
                     let item = FileProviderItem(
-                        node: node, homeNodeId: homeNodeId, trashNodeId: trashNodeId)
+                        nodeId: node.id, entry: entry,
+                        homeNodeId: homeNodeId, trashNodeId: trashNodeId)
                     completionHandler(item, [], false, nil)
                 } else {
                     // Create file — upload blob then create node
@@ -305,10 +317,11 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
 
                     progress.completedUnitCount = 80
 
+                    let fileName = desanitizeFilename(itemTemplate.filename)
                     let node = try await client.createNode(
                         accountId: accountId,
                         parentId: parentId,
-                        name: desanitizeFilename(itemTemplate.filename),
+                        name: fileName,
                         blobId: blob.blobId,
                         type: contentType,
                         created: itemTemplate.creationDate ?? nil,
@@ -318,11 +331,25 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
 
                     progress.completedUnitCount = 100
 
-                    await database.upsertFromServer(node)
+                    // Build item from our known values + server's new ID
+                    // (server response is partial — missing name, parentId, blobId)
+                    let entry = NodeCacheEntry(
+                        parentId: node.parentId ?? parentId,
+                        name: node.name ?? fileName,
+                        blobId: node.blobId ?? blob.blobId,
+                        size: node.size ?? ((try? FileManager.default.attributesOfItem(
+                            atPath: contentURL.path)[.size] as? Int) ?? 0),
+                        modified: node.modified ?? (itemTemplate.contentModificationDate ?? nil),
+                        isFolder: false,
+                        type: node.type ?? contentType,
+                        myRights: node.myRights
+                    )
+                    await database.upsert(nodeId: node.id, entry: entry)
                     try await database.save()
 
                     let item = FileProviderItem(
-                        node: node, homeNodeId: homeNodeId, trashNodeId: trashNodeId)
+                        nodeId: node.id, entry: entry,
+                        homeNodeId: homeNodeId, trashNodeId: trashNodeId)
                     completionHandler(item, [], false, nil)
                 }
             } catch {
