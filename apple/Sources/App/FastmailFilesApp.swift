@@ -45,6 +45,24 @@ struct LoginInfo: Codable, Identifiable {
         }
         return loginId
     }
+
+    init(loginId: String, sessionURL: String, authType: AuthType,
+         accounts: [AccountInfo], connectionStatus: ConnectionStatus = .unknown) {
+        self.loginId = loginId
+        self.sessionURL = sessionURL
+        self.authType = authType
+        self.accounts = accounts
+        self.connectionStatus = connectionStatus
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        loginId = try container.decode(String.self, forKey: .loginId)
+        sessionURL = try container.decode(String.self, forKey: .sessionURL)
+        authType = try container.decode(AuthType.self, forKey: .authType)
+        accounts = try container.decode([AccountInfo].self, forKey: .accounts)
+        connectionStatus = (try? container.decode(ConnectionStatus.self, forKey: .connectionStatus)) ?? .unknown
+    }
 }
 
 enum ConnectionStatus: String, Codable {
@@ -127,21 +145,22 @@ class AppState: ObservableObject {
             }
 
             let tokenProvider: TokenProvider
+            let appGroup = Self.appGroupId
+            let loginAccounts = login.accounts
             if login.authType == .oauth, let credential = loadLoginCredential(loginId: login.loginId) {
+                let lid = login.loginId
                 tokenProvider = OAuthTokenProvider(credential: credential,
-                    onTokenRefreshed: { [weak self] updated in
-                        guard let self = self else { return }
+                    onTokenRefreshed: { updated in
                         let encoder = JSONEncoder()
                         encoder.dateEncodingStrategy = .iso8601
                         if let data = try? encoder.encode(updated),
                            let str = String(data: data, encoding: .utf8) {
                             try? KeychainTokenProvider.storeToken(
                                 str, service: "com.fastmail.files.login",
-                                account: login.loginId, accessGroup: Self.appGroupId)
-                            // Also update per-account credentials
-                            for acct in login.accounts where acct.isSynced {
+                                account: lid, accessGroup: appGroup)
+                            for acct in loginAccounts where acct.isSynced {
                                 try? KeychainTokenProvider.storeToken(
-                                    str, account: acct.accountId, accessGroup: Self.appGroupId)
+                                    str, account: acct.accountId, accessGroup: appGroup)
                             }
                         }
                     })
@@ -557,6 +576,14 @@ class AppState: ObservableObject {
     }
 
     private func saveState() {
+        // Safety: never overwrite with empty if we previously had logins
+        // (protects against decode failures wiping saved state)
+        if logins.isEmpty, let existing = defaults?.data(forKey: "logins"), !existing.isEmpty {
+            // Only allow empty save if explicitly removing all
+            if (try? JSONDecoder().decode([LoginInfo].self, from: existing))?.isEmpty == false {
+                return
+            }
+        }
         guard let data = try? JSONEncoder().encode(logins) else { return }
         defaults?.set(data, forKey: "logins")
     }

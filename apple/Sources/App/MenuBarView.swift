@@ -11,6 +11,10 @@ struct MenuBarView: View {
                 .foregroundColor(.secondary)
             Divider()
             Button("Add Login...") {
+                appState.showingAddAccount = true
+                openSettings()
+            }
+            Button("Settings...") {
                 openSettings()
             }
         } else {
