@@ -210,7 +210,9 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
             observer.finishEnumeratingChanges(upTo: newAnchor, moreComing: changes.hasMoreChanges ?? false)
 
         } catch JmapError.cannotCalculateChanges {
-            // State token too old — tell system to restart with full enumeration
+            // State token too old — clear it immediately so a crash won't loop
+            await database.setStateToken(nil)
+            try? await database.save()
             #if canImport(os)
             logger.info("State token expired, requesting full re-enumeration")
             #endif

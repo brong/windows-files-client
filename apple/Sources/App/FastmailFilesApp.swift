@@ -220,9 +220,14 @@ class AppState: ObservableObject {
         }
 
         // Register FileProvider domains for selected accounts
-        for acct in accounts where acct.isSynced {
-            await registerDomain(accountId: acct.accountId, displayName: acct.displayName,
-                                 loginId: loginId, credential: credential, sessionURL: sessionURL)
+        for i in accounts.indices where accounts[i].isSynced {
+            do {
+                try await registerDomain(accountId: accounts[i].accountId, displayName: accounts[i].displayName,
+                                         loginId: loginId, credential: credential, sessionURL: sessionURL)
+            } catch {
+                accounts[i].isSynced = false
+                accounts[i].status = .error
+            }
         }
 
         logins.append(LoginInfo(
@@ -252,10 +257,15 @@ class AppState: ObservableObject {
                 isSynced: synced, status: synced ? .idle : .notSynced))
         }
 
-        for acct in accounts where acct.isSynced {
-            await registerDomainWithToken(
-                accountId: acct.accountId, displayName: acct.displayName,
-                loginId: loginId, token: token, sessionURL: sessionURL)
+        for i in accounts.indices where accounts[i].isSynced {
+            do {
+                try await registerDomainWithToken(
+                    accountId: accounts[i].accountId, displayName: accounts[i].displayName,
+                    loginId: loginId, token: token, sessionURL: sessionURL)
+            } catch {
+                accounts[i].isSynced = false
+                accounts[i].status = .error
+            }
         }
 
         logins.append(LoginInfo(
@@ -312,13 +322,19 @@ class AppState: ObservableObject {
         let login = logins[loginIdx]
         let acct = login.accounts[acctIdx]
 
-        if login.authType == .oauth, let credential = loadLoginCredential(loginId: loginId) {
-            await registerDomain(accountId: acct.accountId, displayName: acct.displayName,
-                                 loginId: loginId, credential: credential, sessionURL: login.sessionURL)
-        } else if let token = loadLoginToken(loginId: loginId) {
-            await registerDomainWithToken(
-                accountId: acct.accountId, displayName: acct.displayName,
-                loginId: loginId, token: token, sessionURL: login.sessionURL)
+        do {
+            if login.authType == .oauth, let credential = loadLoginCredential(loginId: loginId) {
+                try await registerDomain(accountId: acct.accountId, displayName: acct.displayName,
+                                         loginId: loginId, credential: credential, sessionURL: login.sessionURL)
+            } else if let token = loadLoginToken(loginId: loginId) {
+                try await registerDomainWithToken(
+                    accountId: acct.accountId, displayName: acct.displayName,
+                    loginId: loginId, token: token, sessionURL: login.sessionURL)
+            }
+        } catch {
+            logins[loginIdx].accounts[acctIdx].status = .error
+            saveState()
+            return
         }
 
         logins[loginIdx].accounts[acctIdx].isSynced = true
@@ -365,16 +381,20 @@ class AppState: ObservableObject {
         }
 
         // 3. Re-register the domain so it starts fresh
-        if login.authType == .oauth, let credential = loadLoginCredential(loginId: loginId) {
-            await registerDomain(accountId: acct.accountId, displayName: acct.displayName,
-                                 loginId: loginId, credential: credential, sessionURL: login.sessionURL)
-        } else if let token = loadLoginToken(loginId: loginId) {
-            await registerDomainWithToken(
-                accountId: acct.accountId, displayName: acct.displayName,
-                loginId: loginId, token: token, sessionURL: login.sessionURL)
+        do {
+            if login.authType == .oauth, let credential = loadLoginCredential(loginId: loginId) {
+                try await registerDomain(accountId: acct.accountId, displayName: acct.displayName,
+                                         loginId: loginId, credential: credential, sessionURL: login.sessionURL)
+            } else if let token = loadLoginToken(loginId: loginId) {
+                try await registerDomainWithToken(
+                    accountId: acct.accountId, displayName: acct.displayName,
+                    loginId: loginId, token: token, sessionURL: login.sessionURL)
+            }
+            logins[loginIdx].accounts[acctIdx].status = .idle
+        } catch {
+            logins[loginIdx].accounts[acctIdx].isSynced = false
+            logins[loginIdx].accounts[acctIdx].status = .error
         }
-
-        logins[loginIdx].accounts[acctIdx].status = .idle
         saveState()
     }
 
@@ -452,13 +472,24 @@ class AppState: ObservableObject {
             )
             try await NSFileProviderManager.add(domain)
         } catch {
-            print("FileProvider domain registration skipped: \(error.localizedDescription)")
+            print("FileProvider domain registration failed: \(error.localizedDescription)")
+            // Clean up the credentials we just stored since domain failed
+            let deleteQuery: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: "com.fastmail.files",
+                kSecAttrAccount as String: accountId,
+                kSecUseDataProtectionKeychain as String: true,
+            ]
+            SecItemDelete(deleteQuery as CFDictionary)
+            defaults?.removeObject(forKey: "sessionURL-\(accountId)")
+            defaults?.removeObject(forKey: "authType-\(accountId)")
+            throw error
         }
     }
 
     private func registerDomainWithToken(accountId: String, displayName: String,
                                          loginId: String, token: String,
-                                         sessionURL: String) async {
+                                         sessionURL: String) async throws {
         try? KeychainTokenProvider.storeToken(
             token, account: accountId, accessGroup: Self.appGroupId)
         defaults?.set(sessionURL, forKey: "sessionURL-\(accountId)")
@@ -471,7 +502,16 @@ class AppState: ObservableObject {
             )
             try await NSFileProviderManager.add(domain)
         } catch {
-            print("FileProvider domain registration skipped: \(error.localizedDescription)")
+            print("FileProvider domain registration failed: \(error.localizedDescription)")
+            let deleteQuery: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: "com.fastmail.files",
+                kSecAttrAccount as String: accountId,
+                kSecUseDataProtectionKeychain as String: true,
+            ]
+            SecItemDelete(deleteQuery as CFDictionary)
+            defaults?.removeObject(forKey: "sessionURL-\(accountId)")
+            throw error
         }
     }
 
@@ -484,6 +524,15 @@ class AppState: ObservableObject {
             try await NSFileProviderManager.remove(domain)
         } catch {
             print("FileProvider domain removal failed: \(error.localizedDescription)")
+        }
+
+        // Clean node cache and blob cache from shared container
+        if let containerURL = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: Self.appGroupId) {
+            let nodeCache = containerURL.appendingPathComponent("nodes-\(accountId).json")
+            try? FileManager.default.removeItem(at: nodeCache)
+            let blobDir = containerURL.appendingPathComponent("blobs-\(accountId)")
+            try? FileManager.default.removeItem(at: blobDir)
         }
 
         // Clean per-account keychain entry
