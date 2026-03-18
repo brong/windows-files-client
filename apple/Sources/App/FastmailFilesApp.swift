@@ -557,11 +557,6 @@ class AppState: ObservableObject {
     }
 
     private func saveState() {
-        if logins.isEmpty, let existing = defaults?.data(forKey: "logins"), !existing.isEmpty {
-            if (try? JSONDecoder().decode([LoginInfo].self, from: existing))?.isEmpty == false {
-                return
-            }
-        }
         guard let data = try? JSONEncoder().encode(logins) else { return }
         defaults?.set(data, forKey: "logins")
     }
