@@ -723,15 +723,9 @@ private func startOAuthCallbackServer(
 
 struct ActivityView: View {
     @ObservedObject var appState: AppState
-    @State private var activities: [ActivityTracker.Activity] = []
+    @State private var activeItems: [ActivityTracker.Activity] = []
+    @State private var recentItems: [ActivityTracker.Activity] = []
     @State private var observer: ActivityObserver?
-
-    private var activeItems: [ActivityTracker.Activity] {
-        activities.filter { $0.status == .active }
-    }
-    private var recentItems: [ActivityTracker.Activity] {
-        activities.filter { $0.status != .active }
-    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -739,39 +733,43 @@ struct ActivityView: View {
                 Text("Activity")
                     .font(.headline)
                 Spacer()
-                let count = activeItems.count
-                if count > 0 {
-                    Text("\(count) in flight")
+                if !activeItems.isEmpty {
+                    Text("\(activeItems.count) in flight")
                         .font(.caption)
                         .foregroundColor(.blue)
                 }
             }
 
-            if activities.isEmpty {
+            if activeItems.isEmpty && recentItems.isEmpty {
                 Text("No recent activity")
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.vertical, 4)
             } else {
-                List {
+                VStack(alignment: .leading, spacing: 4) {
                     if !activeItems.isEmpty {
-                        Section("In Flight") {
-                            ForEach(activeItems.prefix(10)) { activity in
-                                activityRow(activity)
-                            }
-                            if activeItems.count > 10 {
-                                Text("+ \(activeItems.count - 10) more...")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
+                        Text("In Flight")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .textCase(.uppercase)
+                        ForEach(activeItems.prefix(10)) { activity in
+                            activityRow(activity)
+                        }
+                        if activeItems.count > 10 {
+                            Text("+ \(activeItems.count - 10) more...")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
                         }
                     }
                     if !recentItems.isEmpty {
-                        Section("Recent") {
-                            ForEach(recentItems.prefix(5)) { activity in
-                                activityRow(activity)
-                            }
+                        Text("Recent")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .textCase(.uppercase)
+                            .padding(.top, activeItems.isEmpty ? 0 : 4)
+                        ForEach(recentItems.prefix(5)) { activity in
+                            activityRow(activity)
                         }
                     }
                 }
@@ -789,13 +787,29 @@ struct ActivityView: View {
                 .frame(width: 16)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(activity.fileName)
-                    .font(.caption)
-                    .lineLimit(1)
+                HStack {
+                    Text(activity.fileName)
+                        .font(.caption)
+                        .lineLimit(1)
+                    Spacer()
+                    if let size = activity.fileSize, size > 0 {
+                        Text(formatSize(size))
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                    Text(activity.action.rawValue)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .frame(width: 60, alignment: .trailing)
+                }
 
                 if let progress = activity.progress, activity.status == .active {
                     ProgressView(value: progress)
                         .progressViewStyle(.linear)
+                } else if activity.status == .completed {
+                    Text("Done")
+                        .font(.caption2)
+                        .foregroundColor(.green)
                 } else if let error = activity.error {
                     Text(error)
                         .font(.caption2)
@@ -803,19 +817,8 @@ struct ActivityView: View {
                         .lineLimit(1)
                 }
             }
-
-            Spacer()
-
-            if let size = activity.fileSize, size > 0 {
-                Text(formatSize(size))
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-            }
-
-            Text(activity.action.rawValue)
-                .font(.caption2)
-                .foregroundColor(.secondary)
         }
+        .id(activity.id) // Stable identity prevents jumping
     }
 
     private func actionIcon(_ action: ActivityTracker.Activity.Action) -> String {
@@ -857,7 +860,7 @@ struct ActivityView: View {
 
     /// Update login/account sync status based on activity
     private func updateSyncStatus() {
-        let activeAccountIds = Set(activities.filter { $0.status == .active }.map { $0.accountId })
+        let activeAccountIds = Set(activeItems.map { $0.accountId })
         for i in appState.logins.indices {
             for j in appState.logins[i].accounts.indices {
                 let acct = appState.logins[i].accounts[j]
@@ -885,8 +888,30 @@ struct ActivityView: View {
             forSecurityApplicationGroupIdentifier: AppState.appGroupId)
         else { return }
 
-        if let snapshot = ActivityTracker.loadShared(containerURL: containerURL) {
-            activities = snapshot.activities
+        guard let snapshot = ActivityTracker.loadShared(containerURL: containerURL) else { return }
+
+        // Split into active and recent, maintaining stable order
+        let newActive = snapshot.activities.filter { $0.status == .active }
+        let newRecent = snapshot.activities.filter { $0.status != .active }
+
+        // Only update if actually changed (prevents unnecessary SwiftUI diffs)
+        let activeIds = newActive.map { $0.id }
+        let currentActiveIds = activeItems.map { $0.id }
+        if activeIds != currentActiveIds || newActive.count != activeItems.count {
+            activeItems = newActive
+        } else {
+            // Update progress on existing items in-place
+            for i in activeItems.indices {
+                if i < newActive.count {
+                    activeItems[i] = newActive[i]
+                }
+            }
+        }
+
+        let recentIds = newRecent.map { $0.id }
+        let currentRecentIds = recentItems.map { $0.id }
+        if recentIds != currentRecentIds {
+            recentItems = newRecent
         }
     }
 }
