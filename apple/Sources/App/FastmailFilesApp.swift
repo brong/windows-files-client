@@ -21,6 +21,9 @@ struct FastmailFilesApp: App {
 
         Window("Fastmail Files Settings", id: "settings") {
             SettingsView(appState: appState)
+                .onReceive(NotificationCenter.default.publisher(for: .openSettings)) { _ in
+                    openWindow(id: "settings")
+                }
         }
         #else
         WindowGroup {
@@ -34,21 +37,31 @@ struct FastmailFilesApp: App {
 class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         sender.activate(ignoringOtherApps: true)
-        if let window = sender.windows.first(where: { !$0.title.isEmpty }) {
-            window.makeKeyAndOrderFront(nil)
+        // Find and show the settings window (not the menu bar status window)
+        for window in sender.windows {
+            if window.canBecomeKey {
+                window.makeKeyAndOrderFront(nil)
+                return false
+            }
         }
+        // No key-capable window exists — need to create it.
+        // Post a notification that the SwiftUI app picks up to open the window.
+        NotificationCenter.default.post(name: .openSettings, object: nil)
         return true
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Close any auto-opened windows on launch — menu bar icon is primary
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            for window in NSApplication.shared.windows {
-                if !window.title.isEmpty {
-                    window.close()
-                }
+            for window in NSApplication.shared.windows where window.canBecomeKey {
+                window.close()
             }
         }
     }
+}
+
+extension Notification.Name {
+    static let openSettings = Notification.Name("openSettings")
 }
 #endif
 
