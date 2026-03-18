@@ -5,6 +5,10 @@ import JmapClient
 @main
 struct FastmailFilesApp: App {
     @StateObject private var appState = AppState()
+    #if os(macOS)
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+    @Environment(\.openWindow) private var openWindow
+    #endif
 
     var body: some Scene {
         #if os(macOS)
@@ -25,6 +29,38 @@ struct FastmailFilesApp: App {
         #endif
     }
 }
+
+#if os(macOS)
+/// App delegate to handle dock icon click → open settings window.
+class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag {
+            // No visible windows — open the settings window
+            // Find and make key the settings window, or create it
+            for window in sender.windows {
+                if window.title.contains("Settings") || window.title.contains("Fastmail") {
+                    window.makeKeyAndOrderFront(nil)
+                    return false
+                }
+            }
+            // If no settings window exists, activate the app — SwiftUI will show the window
+            sender.activate(ignoringOtherApps: true)
+        }
+        return true
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Don't show any window on launch — just the menu bar icon
+        DispatchQueue.main.async {
+            for window in NSApplication.shared.windows {
+                if window.title.contains("Settings") || window.title.contains("Fastmail") {
+                    window.close()
+                }
+            }
+        }
+    }
+}
+#endif
 
 // MARK: - Data Model
 
@@ -425,6 +461,10 @@ class AppState: ObservableObject {
             defaults?.set(credential.sessionUrl, forKey: "sessionURL-\(acct.accountId)")
             defaults?.set("oauth", forKey: "authType-\(acct.accountId)")
         }
+
+        // Update connection status — reauthenticate means we're connected now
+        logins[loginIdx].connectionStatus = .connected
+        saveState()
 
         // Signal each account's FileProvider domain to restart
         for acct in logins[loginIdx].accounts where acct.isSynced {
