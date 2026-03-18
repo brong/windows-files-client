@@ -289,7 +289,9 @@ struct SettingsView: View {
             manager.getUserVisibleURL(for: .rootContainer) { url, error in
                 if let url = url {
                     DispatchQueue.main.async {
-                        NSWorkspace.shared.open(url)
+                        // Use selectFile to open Finder at this location
+                        // (NSWorkspace.open would try to open it in our sandboxed app)
+                        NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: url.path)
                     }
                 }
             }
