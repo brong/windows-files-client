@@ -157,7 +157,10 @@ public actor PushWatcher {
               httpResponse.statusCode == 200
         else {
             if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 401 {
-                // Invalidate session so next retry re-authenticates
+                // Invalidate token and session so next retry refreshes OAuth
+                if let oauthProvider = tokenProvider as? OAuthTokenProvider {
+                    await oauthProvider.invalidateAccessToken()
+                }
                 await sessionManager.invalidate()
                 throw JmapError.unauthorized
             }

@@ -316,6 +316,14 @@ public func oauthRefreshToken(
 // MARK: - Refreshing Token Provider
 
 /// A TokenProvider that automatically refreshes OAuth tokens.
+///
+/// CRITICAL invariant: when refreshing, the new refresh token MUST be persisted
+/// to durable storage BEFORE the new access token is used. OAuth refresh tokens
+/// are single-use (rotating) — once used, the server invalidates the old one.
+/// If we use the new access token but crash before persisting the new refresh
+/// token, we're locked out on restart because the old refresh token is gone.
+///
+/// The flow is: call token endpoint → persist new credential → update in-memory state.
 public actor OAuthTokenProvider: TokenProvider {
     private var accessToken: String
     private var refreshToken: String
@@ -324,6 +332,7 @@ public actor OAuthTokenProvider: TokenProvider {
     private let clientId: String
     private var expiresAt: Date
     private let refreshMargin: TimeInterval = 60 // refresh 60s before expiry
+    private var isRefreshing = false
     private var onTokenRefreshed: (@Sendable (OAuthCredential) -> Void)?
 
     public init(credential: OAuthCredential,
@@ -345,30 +354,48 @@ public actor OAuthTokenProvider: TokenProvider {
         return accessToken
     }
 
+    /// Invalidate the current access token (e.g. after a 401).
+    /// Next call to currentToken() will force a refresh.
+    public func invalidateAccessToken() {
+        expiresAt = .distantPast
+    }
+
     /// Force a refresh (e.g., after 401).
+    /// Safe to call concurrently — only one refresh runs at a time.
     public func refresh() async throws {
+        // Prevent concurrent refresh (second caller would use stale refresh token)
+        guard !isRefreshing else { return }
+        isRefreshing = true
+        defer { isRefreshing = false }
+
         let response = try await oauthRefreshToken(
             tokenEndpoint: tokenEndpoint,
             clientId: clientId,
             refreshToken: refreshToken
         )
 
-        accessToken = response.accessToken
-        if let newRefresh = response.refreshToken {
-            refreshToken = newRefresh
-        }
-        expiresAt = Date().addingTimeInterval(TimeInterval(response.expiresIn))
-
-        // Notify caller so they can persist the new tokens
+        // Build new credential with updated tokens
+        let newRefreshToken = response.refreshToken ?? refreshToken
+        let newExpiresAt = Date().addingTimeInterval(TimeInterval(response.expiresIn))
         let credential = OAuthCredential(
             sessionUrl: sessionUrl,
-            accessToken: accessToken,
-            refreshToken: refreshToken,
+            accessToken: response.accessToken,
+            refreshToken: newRefreshToken,
             tokenEndpoint: tokenEndpoint,
             clientId: clientId,
-            expiresAt: expiresAt
+            expiresAt: newExpiresAt
         )
+
+        // PERSIST FIRST — before updating in-memory state.
+        // The callback must write to durable storage (keychain/file).
+        // If this crashes after persist but before in-memory update,
+        // on restart we'll load the persisted credential and be fine.
         onTokenRefreshed?(credential)
+
+        // NOW update in-memory state
+        accessToken = response.accessToken
+        refreshToken = newRefreshToken
+        expiresAt = newExpiresAt
     }
 }
 

@@ -22,8 +22,9 @@ public actor JmapClient {
     private let interactiveSession: URLSession
     private let backgroundSession: URLSession
 
-    // Store a reference to the token provider's getter
+    // Store a reference to the token provider's getter and invalidator
     nonisolated private let tokenGetter: @Sendable () async throws -> String
+    nonisolated private let tokenInvalidator: (@Sendable () async -> Void)?
 
     /// Optional hook called with (URL, bodyData) before each JMAP API request.
     /// Used by debug logging to capture body before URLSession converts it to a stream.
@@ -582,7 +583,8 @@ public actor JmapClient {
         }
 
         if httpResponse.statusCode == 401 {
-            // Try refreshing session and retrying once
+            // Invalidate token (forces OAuth refresh on next getToken call)
+            await tokenInvalidator?()
             await sessionManager.invalidate()
             let newToken = try await getToken()
             request.setValue("Bearer \(newToken)", forHTTPHeaderField: "Authorization")
@@ -641,6 +643,11 @@ public actor JmapClient {
                 responseDidReceive: (@Sendable (URL, Int, Data) -> Void)? = nil) {
         self.sessionManager = sessionManager
         self.tokenGetter = { try await tokenProvider.currentToken() }
+        if let oauthProvider = tokenProvider as? OAuthTokenProvider {
+            self.tokenInvalidator = { await oauthProvider.invalidateAccessToken() }
+        } else {
+            self.tokenInvalidator = nil
+        }
         self.requestWillSend = requestWillSend
         self.responseDidReceive = responseDidReceive
 

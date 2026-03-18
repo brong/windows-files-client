@@ -67,16 +67,16 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
 
         // The domain identifier is the JMAP accountId
         self.accountId = domain.identifier.rawValue
+        logger.info("Extension init for account: \(domain.identifier.rawValue, privacy: .public)")
 
         // Initialize from shared container
         guard let containerURL = FileManager.default.containerURL(
             forSecurityApplicationGroupIdentifier: Self.appGroupId)
         else {
-            #if canImport(os)
             logger.error("Failed to access App Group container")
-            #endif
             return
         }
+        logger.info("Container URL: \(containerURL.path, privacy: .public)")
 
         // Load config from shared UserDefaults
         let defaults = UserDefaults(suiteName: Self.appGroupId)
@@ -86,10 +86,14 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
 
         // Set up auth — check if OAuth credential or static token
         let authType = defaults?.string(forKey: "authType-\(accountId!)")
+        logger.info("Auth type for \(self.accountId!, privacy: .public): \(authType ?? "nil", privacy: .public)")
+        logger.info("Session URL: \(sessionURLString, privacy: .public)")
         let tokenProvider: TokenProvider
 
-        if authType == "oauth",
-           let credData = Self.readKeychainData(account: accountId, accessGroup: Self.appGroupId) {
+        let credData = Self.readKeychainData(account: accountId, accessGroup: Self.appGroupId)
+        logger.info("Keychain data for \(self.accountId!, privacy: .public): \(credData != nil ? "\(credData!.count) bytes" : "nil", privacy: .public)")
+
+        if authType == "oauth", let credData = credData {
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
             if let credential = try? decoder.decode(OAuthCredential.self, from: credData) {
@@ -220,7 +224,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                     homeNodeId: homeNodeId, trashNodeId: trashNodeId)
                 completionHandler(tempURL, item, nil)
             } catch {
-                let activityId = "dl:\(accountId!):\(nodeId)"
+                let activityId = "dl:\(accountId!):\(itemIdentifier.rawValue)"
                 await activityTracker.fail(id: activityId, error: error.localizedDescription)
                 completionHandler(nil, nil, mapError(error))
             }
@@ -618,43 +622,15 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
 
 /// Simple file-based traffic logger for the FileProvider extension.
 /// Writes to the shared App Group container so the app or `tail -f` can read it.
-final class TrafficLog: @unchecked Sendable {
+final class TrafficLog: Sendable {
     static let shared = TrafficLog()
-    private var fileHandle: FileHandle?
-    private let lock = NSLock()
 
-    private init() {
-        #if os(macOS)
-        let appGroupId = "BJL34Q426G.com.fastmail.files"
-        #else
-        let appGroupId = "group.com.fastmail.files"
-        #endif
+    private let logger = Logger(subsystem: "com.fastmail.files", category: "JMAP")
 
-        if let containerURL = FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier: appGroupId) {
-            let logURL = containerURL.appendingPathComponent("jmap-traffic.log")
-            // Truncate on start so the log doesn't grow forever
-            FileManager.default.createFile(atPath: logURL.path, contents: nil)
-            fileHandle = try? FileHandle(forWritingTo: logURL)
-            fileHandle?.seekToEndOfFile()
-        }
-    }
+    private init() {}
 
     func log(_ message: String) {
-        lock.lock()
-        defer { lock.unlock() }
-        let timestamp = ISO8601DateFormatter().string(from: Date())
-        let line = "[\(timestamp)] \(message)\n"
-        fileHandle?.write(Data(line.utf8))
-    }
-
-    /// Log a JMAP response (call from completion handlers).
-    func logResponse(url: String, statusCode: Int, body: Data?) {
-        var msg = "← \(statusCode) \(url)"
-        if let body = body, let str = Self.formatBody(body) as String? {
-            msg += "\n\(str)"
-        }
-        log(msg)
+        logger.info("\(message, privacy: .public)")
     }
 
     /// Format a JMAP body for logging, extracting method calls/responses.
