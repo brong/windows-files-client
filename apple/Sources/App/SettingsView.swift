@@ -726,37 +726,56 @@ struct ActivityView: View {
     @State private var activities: [ActivityTracker.Activity] = []
     @State private var refreshTimer: Timer?
 
+    private var activeItems: [ActivityTracker.Activity] {
+        activities.filter { $0.status == .active }
+    }
+    private var recentItems: [ActivityTracker.Activity] {
+        activities.filter { $0.status != .active }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("Activity")
                     .font(.headline)
                 Spacer()
-                if !activities.isEmpty {
-                    Text("\(activities.filter { $0.status == .active }.count) active")
+                let count = activeItems.count
+                if count > 0 {
+                    Text("\(count) in flight")
                         .font(.caption)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(.blue)
                 }
             }
 
             if activities.isEmpty {
-                Text("No active operations")
+                Text("No recent activity")
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.vertical, 4)
             } else {
                 List {
-                    ForEach(activities.prefix(10)) { activity in
-                        activityRow(activity)
+                    if !activeItems.isEmpty {
+                        Section("In Flight") {
+                            ForEach(activeItems.prefix(10)) { activity in
+                                activityRow(activity)
+                            }
+                            if activeItems.count > 10 {
+                                Text("+ \(activeItems.count - 10) more...")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
                     }
-                    if activities.count > 10 {
-                        Text("+ \(activities.count - 10) more...")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
+                    if !recentItems.isEmpty {
+                        Section("Recent") {
+                            ForEach(recentItems.prefix(5)) { activity in
+                                activityRow(activity)
+                            }
+                        }
                     }
                 }
-                .frame(maxHeight: 150)
+                .frame(maxHeight: 200)
             }
         }
         .onAppear { startPolling() }
@@ -825,7 +844,7 @@ struct ActivityView: View {
 
     private func startPolling() {
         loadActivities()
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
             loadActivities()
         }
     }

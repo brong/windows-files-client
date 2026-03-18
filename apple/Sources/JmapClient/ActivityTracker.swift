@@ -11,6 +11,7 @@ public actor ActivityTracker {
         public let action: Action
         public let fileSize: Int?
         public var startedAt: Date
+        public var completedAt: Date?      // when it finished
         public var progress: Double?       // 0.0-1.0, nil = indeterminate
         public var status: Status
         public var error: String?
@@ -38,6 +39,9 @@ public actor ActivityTracker {
 
     private var activities: [String: Activity] = [:]
     private let sharedFileURL: URL?
+    private var lastPersistTime: Date = .distantPast
+    private static let persistThrottle: TimeInterval = 0.25 // max 4 writes/sec
+    private static let completedRetention: TimeInterval = 30 // keep completed items 30s
 
     public init(containerURL: URL? = nil) {
         if let url = containerURL {
@@ -53,27 +57,22 @@ public actor ActivityTracker {
         activities[id] = Activity(
             id: id, accountId: accountId, fileName: fileName,
             action: action, fileSize: fileSize, startedAt: Date(),
-            progress: nil, status: .active, error: nil)
+            completedAt: nil, progress: nil, status: .active, error: nil)
         persist()
     }
 
     /// Update progress for an operation (0.0-1.0).
     public func updateProgress(id: String, progress: Double) {
         activities[id]?.progress = progress
-        persist()
+        persistThrottled()
     }
 
-    /// Mark an operation as completed (removes it after a short delay).
+    /// Mark an operation as completed. Stays visible for 30 seconds.
     public func complete(id: String) {
         activities[id]?.status = .completed
         activities[id]?.progress = 1.0
+        activities[id]?.completedAt = Date()
         persist()
-        // Remove after 2 seconds so it briefly shows as completed
-        Task {
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
-            activities.removeValue(forKey: id)
-            persist()
-        }
     }
 
     /// Mark an operation as failed.
@@ -89,11 +88,25 @@ public actor ActivityTracker {
         persist()
     }
 
-    /// Get current snapshot of all activities.
+    /// Get current snapshot, pruning old completed items.
     public func snapshot() -> Snapshot {
-        Snapshot(activities: Array(activities.values)
-            .sorted { $0.startedAt > $1.startedAt },
-                 updatedAt: Date())
+        // Prune completed items older than retention period
+        let cutoff = Date().addingTimeInterval(-Self.completedRetention)
+        for (id, activity) in activities {
+            if activity.status == .completed,
+               let completedAt = activity.completedAt,
+               completedAt < cutoff {
+                activities.removeValue(forKey: id)
+            }
+        }
+
+        let sorted = Array(activities.values).sorted { a, b in
+            // Active first, then completed, then errors
+            if a.status == .active && b.status != .active { return true }
+            if a.status != .active && b.status == .active { return false }
+            return a.startedAt > b.startedAt
+        }
+        return Snapshot(activities: sorted, updatedAt: Date())
     }
 
     /// Get count of active operations.
@@ -113,11 +126,19 @@ public actor ActivityTracker {
     // MARK: - Persistence
 
     private func persist() {
+        lastPersistTime = Date()
         guard let fileURL = sharedFileURL else { return }
-        let snapshot = snapshot()
+        let snap = snapshot()
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
-        guard let data = try? encoder.encode(snapshot) else { return }
+        guard let data = try? encoder.encode(snap) else { return }
         try? data.write(to: fileURL, options: .atomic)
+    }
+
+    /// Persist at most every 250ms — avoids hammering disk during rapid small-file downloads.
+    private func persistThrottled() {
+        let now = Date()
+        guard now.timeIntervalSince(lastPersistTime) >= Self.persistThrottle else { return }
+        persist()
     }
 }
