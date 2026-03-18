@@ -312,16 +312,28 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                         throw JmapError.uploadFailed("No content URL provided")
                     }
 
+                    let fileName = desanitizeFilename(itemTemplate.filename)
+                    let fileSize = (try? FileManager.default.attributesOfItem(
+                        atPath: contentURL.path)[.size] as? Int) ?? 0
+                    let activityId = "ul:\(accountId!):\(fileName)"
+                    await activityTracker.start(
+                        id: activityId, accountId: accountId, fileName: fileName,
+                        action: .upload, fileSize: fileSize)
+
                     let contentType = itemTemplate.contentType?.preferredMIMEType ?? "application/octet-stream"
                     let blob = try await client.uploadBlobChunked(
                         accountId: accountId,
                         fileURL: contentURL,
                         contentType: contentType
-                    )
+                    ) { uploaded, total in
+                        if total > 0 {
+                            let pct = Double(uploaded) / Double(total)
+                            progress.completedUnitCount = Int64(pct * 80)
+                            Task { await self.activityTracker.updateProgress(id: activityId, progress: pct * 0.8) }
+                        }
+                    }
 
-                    progress.completedUnitCount = 80
-
-                    let fileName = desanitizeFilename(itemTemplate.filename)
+                    await activityTracker.updateProgress(id: activityId, progress: 0.9)
                     let node = try await client.createNode(
                         accountId: accountId,
                         parentId: parentId,
@@ -351,12 +363,17 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                     await database.upsert(nodeId: node.id, entry: entry)
                     try await database.save()
 
+                    await activityTracker.complete(id: activityId)
+
                     let item = FileProviderItem(
                         nodeId: node.id, entry: entry,
                         homeNodeId: homeNodeId, trashNodeId: trashNodeId)
                     completionHandler(item, [], false, nil)
                 }
             } catch {
+                // Mark any in-flight upload as failed
+                let failId = "ul:\(accountId!):\(desanitizeFilename(itemTemplate.filename))"
+                await activityTracker.fail(id: failId, error: error.localizedDescription)
                 completionHandler(nil, [], false, mapError(error))
             }
         }
@@ -386,12 +403,24 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                 if changedFields.contains(.contents), let contentURL = newContents {
                     let contentType = item.contentType?.preferredMIMEType ?? "application/octet-stream"
                     let parentId = resolveNodeId(item.parentItemIdentifier)
+                    let fileName = desanitizeFilename(item.filename)
+                    let fileSize = (try? FileManager.default.attributesOfItem(
+                        atPath: contentURL.path)[.size] as? Int) ?? 0
+                    let activityId = "ul:\(accountId!):\(fileName)"
+                    await activityTracker.start(
+                        id: activityId, accountId: accountId, fileName: fileName,
+                        action: .upload, fileSize: fileSize)
 
                     let blob = try await client.uploadBlobChunked(
                         accountId: accountId,
                         fileURL: contentURL,
                         contentType: contentType
-                    )
+                    ) { uploaded, total in
+                        if total > 0 {
+                            let pct = Double(uploaded) / Double(total)
+                            Task { await self.activityTracker.updateProgress(id: activityId, progress: pct * 0.8) }
+                        }
+                    }
                     progress.completedUnitCount = 60
 
                     // Create with onExists:"replace" — destroys old node, creates new one
@@ -411,6 +440,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                     await database.remove(nodeId: nodeId)
                     await database.upsertFromServer(newNode)
                     currentNodeId = newNode.id
+                    await activityTracker.complete(id: activityId)
                 }
 
                 // Handle rename
