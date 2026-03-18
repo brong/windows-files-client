@@ -167,8 +167,8 @@ class AppState: ObservableObject {
             switch login.connectionStatus {
             case .authFailed: return .error
             case .networkError: return .offline
-            case .connecting: return .syncing
-            case .connected, .unknown: return .idle
+            case .connecting, .unknown: return .syncing  // no status = still starting
+            case .connected: return .syncing  // connected but no extension report = waiting
             }
         }
         return .notSynced
