@@ -747,33 +747,36 @@ struct ActivityView: View {
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.vertical, 4)
             } else {
-                VStack(alignment: .leading, spacing: 4) {
-                    if !activeItems.isEmpty {
-                        Text("In Flight")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                            .textCase(.uppercase)
-                        ForEach(activeItems.prefix(10)) { activity in
-                            activityRow(activity)
-                        }
-                        if activeItems.count > 10 {
-                            Text("+ \(activeItems.count - 10) more...")
-                                .font(.caption)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 4) {
+                        if !activeItems.isEmpty {
+                            Text("In Flight")
+                                .font(.caption2)
                                 .foregroundColor(.secondary)
+                                .textCase(.uppercase)
+                            ForEach(activeItems.prefix(10)) { activity in
+                                activityRow(activity)
+                            }
+                            if activeItems.count > 10 {
+                                Text("+ \(activeItems.count - 10) more...")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                        if !recentItems.isEmpty {
+                            Text("Recent")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                                .textCase(.uppercase)
+                                .padding(.top, activeItems.isEmpty ? 0 : 4)
+                            ForEach(recentItems.prefix(5)) { activity in
+                                activityRow(activity)
+                            }
                         }
                     }
-                    if !recentItems.isEmpty {
-                        Text("Recent")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                            .textCase(.uppercase)
-                            .padding(.top, activeItems.isEmpty ? 0 : 4)
-                        ForEach(recentItems.prefix(5)) { activity in
-                            activityRow(activity)
-                        }
-                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .frame(maxHeight: 200)
+                .frame(height: 150)
             }
         }
         .onAppear { startObserving() }
@@ -791,6 +794,7 @@ struct ActivityView: View {
                     Text(activity.fileName)
                         .font(.caption)
                         .lineLimit(1)
+                        .truncationMode(.middle)
                     Spacer()
                     if let size = activity.fileSize, size > 0 {
                         Text(formatSize(size))
