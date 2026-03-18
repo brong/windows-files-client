@@ -112,7 +112,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                     },
                     reloadCredential: {
                         // Reload from keychain — the app may have reauthenticated
-                        guard let data = readKeychainData(account: acctId, accessGroup: appGroup) else {
+                        guard let data = FileProviderExtension.readKeychainData(account: acctId, accessGroup: appGroup) else {
                             return nil
                         }
                         let decoder = JSONDecoder()

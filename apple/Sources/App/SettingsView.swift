@@ -100,9 +100,25 @@ struct SettingsView: View {
 
     private func loginHeader(login: LoginInfo) -> some View {
         HStack {
-            Image(systemName: "person.circle")
-            Text(login.displayLabel)
-                .font(.headline)
+            Image(systemName: connectionIcon(login.connectionStatus))
+                .foregroundColor(connectionColor(login.connectionStatus))
+            VStack(alignment: .leading) {
+                Text(login.displayLabel)
+                    .font(.headline)
+                if login.connectionStatus == .authFailed {
+                    Text("Authentication failed — click Reauthenticate")
+                        .font(.caption)
+                        .foregroundColor(.red)
+                } else if login.connectionStatus == .networkError {
+                    Text("Cannot reach server")
+                        .font(.caption)
+                        .foregroundColor(.orange)
+                } else if login.connectionStatus == .connecting {
+                    Text("Connecting...")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
             Spacer()
             Button("Reauthenticate") {
                 Task { await reauthenticate(login: login) }
@@ -113,6 +129,26 @@ struct SettingsView: View {
             }
             .font(.caption)
             .foregroundColor(.red)
+        }
+    }
+
+    private func connectionIcon(_ status: ConnectionStatus) -> String {
+        switch status {
+        case .connected: return "person.circle.fill"
+        case .connecting: return "person.circle"
+        case .authFailed: return "exclamationmark.triangle.fill"
+        case .networkError: return "wifi.slash"
+        case .unknown: return "person.circle"
+        }
+    }
+
+    private func connectionColor(_ status: ConnectionStatus) -> Color {
+        switch status {
+        case .connected: return .green
+        case .connecting: return .gray
+        case .authFailed: return .red
+        case .networkError: return .orange
+        case .unknown: return .gray
         }
     }
 

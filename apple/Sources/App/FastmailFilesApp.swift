@@ -34,6 +34,7 @@ struct LoginInfo: Codable, Identifiable {
     let sessionURL: String
     let authType: AuthType       // oauth or token
     var accounts: [AccountInfo]  // all discovered accounts for this login
+    var connectionStatus: ConnectionStatus
 
     var id: String { loginId }
 
@@ -44,6 +45,14 @@ struct LoginInfo: Codable, Identifiable {
         }
         return loginId
     }
+}
+
+enum ConnectionStatus: String, Codable {
+    case connected
+    case connecting
+    case authFailed      // token expired, refresh failed
+    case networkError    // can't reach server
+    case unknown
 }
 
 enum AuthType: String, Codable {
@@ -102,6 +111,63 @@ class AppState: ObservableObject {
     init() {
         self.defaults = UserDefaults(suiteName: Self.appGroupId)
         loadState()
+        // Check connection status for all logins on startup
+        Task { await checkAllConnections() }
+    }
+
+    /// Check connection status for all logins by trying to fetch the JMAP session.
+    func checkAllConnections() async {
+        for i in logins.indices {
+            let login = logins[i]
+            logins[i].connectionStatus = .connecting
+
+            guard let url = URL(string: login.sessionURL) else {
+                logins[i].connectionStatus = .networkError
+                continue
+            }
+
+            let tokenProvider: TokenProvider
+            if login.authType == .oauth, let credential = loadLoginCredential(loginId: login.loginId) {
+                tokenProvider = OAuthTokenProvider(credential: credential,
+                    onTokenRefreshed: { [weak self] updated in
+                        guard let self = self else { return }
+                        let encoder = JSONEncoder()
+                        encoder.dateEncodingStrategy = .iso8601
+                        if let data = try? encoder.encode(updated),
+                           let str = String(data: data, encoding: .utf8) {
+                            try? KeychainTokenProvider.storeToken(
+                                str, service: "com.fastmail.files.login",
+                                account: login.loginId, accessGroup: Self.appGroupId)
+                            // Also update per-account credentials
+                            for acct in login.accounts where acct.isSynced {
+                                try? KeychainTokenProvider.storeToken(
+                                    str, account: acct.accountId, accessGroup: Self.appGroupId)
+                            }
+                        }
+                    })
+            } else if let token = loadLoginToken(loginId: login.loginId) {
+                tokenProvider = StaticTokenProvider(token: token)
+            } else {
+                logins[i].connectionStatus = .authFailed
+                continue
+            }
+
+            let sessionManager = SessionManager(sessionURL: url, tokenProvider: tokenProvider)
+            do {
+                _ = try await sessionManager.session()
+                logins[i].connectionStatus = .connected
+            } catch let error as JmapError {
+                switch error {
+                case .unauthorized, .forbidden:
+                    logins[i].connectionStatus = .authFailed
+                default:
+                    logins[i].connectionStatus = .networkError
+                }
+            } catch {
+                logins[i].connectionStatus = .networkError
+            }
+        }
+        saveState()
     }
 
     // MARK: - Add Login
@@ -142,7 +208,7 @@ class AppState: ObservableObject {
 
         logins.append(LoginInfo(
             loginId: loginId, sessionURL: sessionURL,
-            authType: .oauth, accounts: accounts))
+            authType: .oauth, accounts: accounts, connectionStatus: .connected))
         saveState()
     }
 
@@ -175,7 +241,7 @@ class AppState: ObservableObject {
 
         logins.append(LoginInfo(
             loginId: loginId, sessionURL: sessionURL,
-            authType: .token, accounts: accounts))
+            authType: .token, accounts: accounts, connectionStatus: .connected))
         saveState()
     }
 
@@ -518,7 +584,7 @@ class AppState: ObservableObject {
                 ? .oauth : .token
             logins.append(LoginInfo(
                 loginId: loginId, sessionURL: sessionURL,
-                authType: authType, accounts: accountInfos))
+                authType: authType, accounts: accountInfos, connectionStatus: .unknown))
         }
 
         if !logins.isEmpty {
