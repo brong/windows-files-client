@@ -455,6 +455,9 @@ public actor JmapClient {
             let chunkSha1 = sha1Digest(chunkData)
             overallHashContext.update(chunkData)
 
+            // Report progress at chunk start (smooths out the jumps)
+            progress?(totalUploaded, fileSize)
+
             // Upload chunk
             let tempChunkFile = FileManager.default.temporaryDirectory
                 .appendingPathComponent(UUID().uuidString)
@@ -525,7 +528,7 @@ public actor JmapClient {
               let argsDict = response[1].dictValue,
               let created = argsDict["created"]?.dictValue,
               let combined = created["combined"]?.dictValue,
-              let blobId = combined["blobId"]?.stringValue
+              let blobId = combined["id"]?.stringValue ?? combined["blobId"]?.stringValue
         else {
             throw JmapError.serverError("blobUpload", "Failed to combine chunks")
         }
