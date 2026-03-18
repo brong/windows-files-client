@@ -328,15 +328,18 @@ public actor OAuthTokenProvider: TokenProvider {
     private var accessToken: String
     private var refreshToken: String
     private let sessionUrl: String
-    private let tokenEndpoint: String
-    private let clientId: String
+    private var tokenEndpoint: String
+    private var clientId: String
     private var expiresAt: Date
     private let refreshMargin: TimeInterval = 60 // refresh 60s before expiry
     private var isRefreshing = false
     private var onTokenRefreshed: (@Sendable (OAuthCredential) -> Void)?
+    /// Optional callback to reload credential from keychain (e.g. after app reauthenticates).
+    private var reloadCredential: (@Sendable () -> OAuthCredential?)?
 
     public init(credential: OAuthCredential,
-                onTokenRefreshed: (@Sendable (OAuthCredential) -> Void)? = nil) {
+                onTokenRefreshed: (@Sendable (OAuthCredential) -> Void)? = nil,
+                reloadCredential: (@Sendable () -> OAuthCredential?)? = nil) {
         self.accessToken = credential.accessToken
         self.refreshToken = credential.refreshToken
         self.sessionUrl = credential.sessionUrl
@@ -344,6 +347,7 @@ public actor OAuthTokenProvider: TokenProvider {
         self.clientId = credential.clientId
         self.expiresAt = credential.expiresAt
         self.onTokenRefreshed = onTokenRefreshed
+        self.reloadCredential = reloadCredential
     }
 
     public func currentToken() async throws -> String {
@@ -360,42 +364,76 @@ public actor OAuthTokenProvider: TokenProvider {
         expiresAt = .distantPast
     }
 
+    /// Apply a new credential (e.g. loaded from keychain after reauthentication).
+    public func applyCredential(_ credential: OAuthCredential) {
+        accessToken = credential.accessToken
+        refreshToken = credential.refreshToken
+        tokenEndpoint = credential.tokenEndpoint
+        clientId = credential.clientId
+        expiresAt = credential.expiresAt
+    }
+
     /// Force a refresh (e.g., after 401).
     /// Safe to call concurrently — only one refresh runs at a time.
+    ///
+    /// Refresh strategy (handles multiple accounts sharing the same login):
+    /// 1. Try to reload from keychain first — another process may have already refreshed.
+    /// 2. If keychain has a newer token (different from ours), use it without hitting the server.
+    /// 3. Otherwise, call the token endpoint to refresh.
+    /// 4. Persist new tokens, then update in-memory state.
+    /// 5. If refresh fails, try reloading from keychain one more time.
     public func refresh() async throws {
-        // Prevent concurrent refresh (second caller would use stale refresh token)
+        // Prevent concurrent refresh within this process
         guard !isRefreshing else { return }
         isRefreshing = true
         defer { isRefreshing = false }
 
-        let response = try await oauthRefreshToken(
-            tokenEndpoint: tokenEndpoint,
-            clientId: clientId,
-            refreshToken: refreshToken
-        )
+        // Step 1: Check if another process already refreshed (e.g. another account
+        // in the same login, or the app's Reauthenticate flow).
+        if let reload = reloadCredential, let fresh = reload() {
+            if fresh.accessToken != accessToken || fresh.refreshToken != refreshToken {
+                applyCredential(fresh)
+                return
+            }
+        }
 
-        // Build new credential with updated tokens
-        let newRefreshToken = response.refreshToken ?? refreshToken
-        let newExpiresAt = Date().addingTimeInterval(TimeInterval(response.expiresIn))
-        let credential = OAuthCredential(
-            sessionUrl: sessionUrl,
-            accessToken: response.accessToken,
-            refreshToken: newRefreshToken,
-            tokenEndpoint: tokenEndpoint,
-            clientId: clientId,
-            expiresAt: newExpiresAt
-        )
+        // Step 2: We have the latest — refresh from the server.
+        do {
+            let response = try await oauthRefreshToken(
+                tokenEndpoint: tokenEndpoint,
+                clientId: clientId,
+                refreshToken: refreshToken
+            )
 
-        // PERSIST FIRST — before updating in-memory state.
-        // The callback must write to durable storage (keychain/file).
-        // If this crashes after persist but before in-memory update,
-        // on restart we'll load the persisted credential and be fine.
-        onTokenRefreshed?(credential)
+            let newRefreshToken = response.refreshToken ?? refreshToken
+            let newExpiresAt = Date().addingTimeInterval(TimeInterval(response.expiresIn))
+            let credential = OAuthCredential(
+                sessionUrl: sessionUrl,
+                accessToken: response.accessToken,
+                refreshToken: newRefreshToken,
+                tokenEndpoint: tokenEndpoint,
+                clientId: clientId,
+                expiresAt: newExpiresAt
+            )
 
-        // NOW update in-memory state
-        accessToken = response.accessToken
-        refreshToken = newRefreshToken
-        expiresAt = newExpiresAt
+            // PERSIST FIRST — before updating in-memory state.
+            onTokenRefreshed?(credential)
+
+            // NOW update in-memory state
+            accessToken = response.accessToken
+            refreshToken = newRefreshToken
+            expiresAt = newExpiresAt
+        } catch {
+            // Step 3: Refresh failed — one more keychain check in case another
+            // process refreshed while we were waiting for the server response.
+            if let reload = reloadCredential, let fresh = reload() {
+                if fresh.accessToken != accessToken || fresh.refreshToken != refreshToken {
+                    applyCredential(fresh)
+                    return
+                }
+            }
+            throw error
+        }
     }
 }
 

@@ -97,18 +97,29 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
             if let credential = try? decoder.decode(OAuthCredential.self, from: credData) {
-                tokenProvider = OAuthTokenProvider(credential: credential) { [weak self] updated in
-                    // Persist refreshed tokens back to keychain
-                    guard let self = self else { return }
-                    let encoder = JSONEncoder()
-                    encoder.dateEncodingStrategy = .iso8601
-                    if let data = try? encoder.encode(updated),
-                       let str = String(data: data, encoding: .utf8) {
-                        try? KeychainTokenProvider.storeToken(
-                            str, account: self.accountId,
-                            accessGroup: Self.appGroupId)
+                let acctId = accountId!
+                let appGroup = Self.appGroupId
+                tokenProvider = OAuthTokenProvider(credential: credential,
+                    onTokenRefreshed: { updated in
+                        // Persist refreshed tokens back to keychain
+                        let encoder = JSONEncoder()
+                        encoder.dateEncodingStrategy = .iso8601
+                        if let data = try? encoder.encode(updated),
+                           let str = String(data: data, encoding: .utf8) {
+                            try? KeychainTokenProvider.storeToken(
+                                str, account: acctId, accessGroup: appGroup)
+                        }
+                    },
+                    reloadCredential: {
+                        // Reload from keychain — the app may have reauthenticated
+                        guard let data = readKeychainData(account: acctId, accessGroup: appGroup) else {
+                            return nil
+                        }
+                        let decoder = JSONDecoder()
+                        decoder.dateDecodingStrategy = .iso8601
+                        return try? decoder.decode(OAuthCredential.self, from: data)
                     }
-                }
+                )
             } else {
                 // Credential JSON decode failed — fall back to raw token
                 tokenProvider = KeychainTokenProvider(account: accountId, accessGroup: Self.appGroupId)
