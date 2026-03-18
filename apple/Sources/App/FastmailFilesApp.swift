@@ -34,26 +34,20 @@ struct FastmailFilesApp: App {
 /// App delegate to handle dock icon click → open settings window.
 class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if !flag {
-            // No visible windows — open the settings window
-            // Find and make key the settings window, or create it
-            for window in sender.windows {
-                if window.title.contains("Settings") || window.title.contains("Fastmail") {
-                    window.makeKeyAndOrderFront(nil)
-                    return false
-                }
-            }
-            // If no settings window exists, activate the app — SwiftUI will show the window
-            sender.activate(ignoringOtherApps: true)
+        // Always bring up the settings window on dock click
+        sender.activate(ignoringOtherApps: true)
+        // Show any existing window, or SwiftUI will create one
+        if let window = sender.windows.first(where: { !$0.title.isEmpty }) {
+            window.makeKeyAndOrderFront(nil)
         }
         return true
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Don't show any window on launch — just the menu bar icon
-        DispatchQueue.main.async {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
             for window in NSApplication.shared.windows {
-                if window.title.contains("Settings") || window.title.contains("Fastmail") {
+                if !window.title.isEmpty {
                     window.close()
                 }
             }
@@ -119,7 +113,7 @@ struct AccountInfo: Codable, Identifiable {
     let accountId: String
     let displayName: String
     var isSynced: Bool           // whether FileProvider domain is registered
-    var status: SyncStatus
+    var status: SyncStatus       // hint only — UI derives live status from activity tracker
 
     var id: String { accountId }
 }
@@ -140,6 +134,8 @@ class AppState: ObservableObject {
     @Published var logins: [LoginInfo] = []
     @Published var isOnline = true
     @Published var showingAddAccount = false
+    /// Set of account IDs currently active (from activity tracker). Updated by ActivityView.
+    @Published var activeAccountIds: Set<String> = []
 
     private let defaults: UserDefaults?
 
@@ -154,11 +150,26 @@ class AppState: ObservableObject {
         logins.flatMap { $0.accounts.filter { $0.isSynced } }
     }
 
+    /// Get the live status for an account, derived from activity tracker.
+    func liveStatus(for accountId: String) -> SyncStatus {
+        // Find the account
+        for login in logins {
+            if let acct = login.accounts.first(where: { $0.accountId == accountId }) {
+                if !acct.isSynced { return .notSynced }
+                if login.connectionStatus == .authFailed { return .error }
+                if login.connectionStatus == .networkError { return .offline }
+                if activeAccountIds.contains(accountId) { return .syncing }
+                return .idle
+            }
+        }
+        return .notSynced
+    }
+
     var statusIcon: String {
         let synced = syncedAccounts
         if !isOnline { return "icloud.slash" }
-        if synced.contains(where: { $0.status == .error }) { return "exclamationmark.icloud" }
-        if synced.contains(where: { $0.status == .syncing }) { return "arrow.clockwise.icloud" }
+        if synced.contains(where: { liveStatus(for: $0.accountId) == .error }) { return "exclamationmark.icloud" }
+        if synced.contains(where: { liveStatus(for: $0.accountId) == .syncing }) { return "arrow.clockwise.icloud" }
         return "icloud"
     }
 

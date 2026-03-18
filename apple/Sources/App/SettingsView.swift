@@ -10,7 +10,8 @@ struct SettingsView: View {
     @State private var orphanedDomains: [NSFileProviderDomain] = []
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        ScrollView {
+        VStack(alignment: .leading, spacing: 12) {
             Text("Fastmail Files")
                 .font(.title2)
                 .bold()
@@ -21,41 +22,41 @@ struct SettingsView: View {
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding()
             } else {
-                List {
-                    // Login → Account tree
-                    ForEach(appState.logins) { login in
-                        Section {
-                            ForEach(login.accounts) { acct in
-                                accountRow(login: login, account: acct)
-                            }
-                        } header: {
-                            loginHeader(login: login)
-                        }
+                // Flat layout — no nested scroll views
+                ForEach(appState.logins) { login in
+                    loginHeader(login: login)
+                    ForEach(login.accounts) { acct in
+                        accountRow(login: login, account: acct)
+                            .padding(.leading, 24)
                     }
+                    Divider()
+                }
 
-                    // Orphaned domains
-                    if !orphanedDomains.isEmpty {
-                        Section("Orphaned (no longer in config)") {
-                            ForEach(orphanedDomains, id: \.identifier.rawValue) { domain in
-                                HStack {
-                                    VStack(alignment: .leading) {
-                                        Text(domain.displayName)
-                                            .foregroundColor(.orange)
-                                        Text(domain.identifier.rawValue)
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
-                                    }
-                                    Spacer()
-                                    Button("Remove") {
-                                        Task {
-                                            try? await NSFileProviderManager.remove(domain)
-                                            await refreshOrphanedDomains()
-                                        }
-                                    }
-                                    .foregroundColor(.red)
+                // Orphaned domains
+                if !orphanedDomains.isEmpty {
+                    Text("Orphaned (no longer in config)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .textCase(.uppercase)
+                    ForEach(orphanedDomains, id: \.identifier.rawValue) { domain in
+                        HStack {
+                            VStack(alignment: .leading) {
+                                Text(domain.displayName)
+                                    .foregroundColor(.orange)
+                                Text(domain.identifier.rawValue)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            Spacer()
+                            Button("Remove") {
+                                Task {
+                                    try? await NSFileProviderManager.remove(domain)
+                                    await refreshOrphanedDomains()
                                 }
                             }
+                            .foregroundColor(.red)
                         }
+                        .padding(.leading, 24)
                     }
                 }
             }
@@ -90,6 +91,8 @@ struct SettingsView: View {
             }
         }
         .padding()
+        .frame(maxWidth: .infinity, alignment: .leading)
+        } // ScrollView
         .frame(minWidth: 500, minHeight: 450)
         .task {
             await refreshOrphanedDomains()
@@ -218,13 +221,14 @@ struct SettingsView: View {
     // MARK: - Account Row
 
     private func accountRow(login: LoginInfo, account: AccountInfo) -> some View {
-        HStack {
+        let status = appState.liveStatus(for: account.accountId)
+        return HStack {
             Image(systemName: account.isSynced ? "checkmark.circle.fill" : "circle")
-                .foregroundColor(account.isSynced ? statusColor(account.status) : .gray)
+                .foregroundColor(account.isSynced ? statusColor(status) : .gray)
 
             VStack(alignment: .leading) {
                 Text(account.displayName.isEmpty ? account.accountId : account.displayName)
-                Text(account.isSynced ? statusText(account.status) : "Not synced")
+                Text(account.isSynced ? statusText(status) : "Not synced")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -862,24 +866,9 @@ struct ActivityView: View {
         observer = obs
     }
 
-    /// Update login/account sync status based on activity
+    /// Update the set of active account IDs — AppState derives status from this.
     private func updateSyncStatus() {
-        let activeAccountIds = Set(activeItems.map { $0.accountId })
-        for i in appState.logins.indices {
-            for j in appState.logins[i].accounts.indices {
-                let acct = appState.logins[i].accounts[j]
-                guard acct.isSynced else { continue }
-                if activeAccountIds.contains(acct.accountId) {
-                    if acct.status != .syncing {
-                        appState.logins[i].accounts[j].status = .syncing
-                    }
-                } else {
-                    if acct.status == .syncing {
-                        appState.logins[i].accounts[j].status = .idle
-                    }
-                }
-            }
-        }
+        appState.activeAccountIds = Set(activeItems.map { $0.accountId })
     }
 
     private func stopObserving() {
