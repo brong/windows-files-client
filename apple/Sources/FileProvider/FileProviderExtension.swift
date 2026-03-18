@@ -300,7 +300,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                         type: contentType,
                         created: itemTemplate.creationDate ?? nil,
                         modified: itemTemplate.contentModificationDate ?? nil,
-                        onExists: options.contains(.mayAlreadyExist) ? "replace" : nil
+                        onExists: "replace"
                     )
 
                     progress.completedUnitCount = 100
