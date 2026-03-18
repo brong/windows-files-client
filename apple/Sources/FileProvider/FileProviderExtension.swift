@@ -43,10 +43,11 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
     // MARK: - Keychain Helper
 
     /// Read raw data from keychain synchronously (for use in init).
-    private static func readKeychainData(account: String, accessGroup: String) -> Data? {
+    private static func readKeychainData(service: String = "com.fastmail.files",
+                                          account: String, accessGroup: String) -> Data? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "com.fastmail.files",
+            kSecAttrService as String: service,
             kSecAttrAccount as String: account,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
@@ -84,48 +85,60 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
             ?? "https://api.fastmail.com/jmap/session"
         guard let sessionURL = URL(string: sessionURLString) else { return }
 
-        // Set up auth — check if OAuth credential or static token
+        // Look up which login owns this account
+        let loginId = defaults?.string(forKey: "loginForAccount-\(accountId!)")
         let authType = defaults?.string(forKey: "authType-\(accountId!)")
-        logger.info("Auth type for \(self.accountId!, privacy: .public): \(authType ?? "nil", privacy: .public)")
-        logger.info("Session URL: \(sessionURLString, privacy: .public)")
-        let tokenProvider: TokenProvider
+        let loginKeychainService = "com.fastmail.files.login"
+        let keychainAccount = loginId ?? accountId!  // fall back to accountId for legacy
 
-        let credData = Self.readKeychainData(account: accountId, accessGroup: Self.appGroupId)
-        logger.info("Keychain data for \(self.accountId!, privacy: .public): \(credData != nil ? "\(credData!.count) bytes" : "nil", privacy: .public)")
+        logger.info("Auth type for \(self.accountId!, privacy: .public): \(authType ?? "nil", privacy: .public)")
+        logger.info("Login ID: \(loginId ?? "nil", privacy: .public)")
+        logger.info("Session URL: \(sessionURLString, privacy: .public)")
+
+        let tokenProvider: TokenProvider
+        let appGroup = Self.appGroupId
+
+        // Read login-level credential from keychain
+        let credData = Self.readKeychainData(
+            service: loginKeychainService, account: keychainAccount, accessGroup: appGroup)
+        logger.info("Keychain data for login \(keychainAccount, privacy: .public): \(credData != nil ? "\(credData!.count) bytes" : "nil", privacy: .public)")
 
         if authType == "oauth", let credData = credData {
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
             if let credential = try? decoder.decode(OAuthCredential.self, from: credData) {
-                let acctId = accountId!
-                let appGroup = Self.appGroupId
+                let kcService = loginKeychainService
+                let kcAccount = keychainAccount
                 tokenProvider = OAuthTokenProvider(credential: credential,
                     onTokenRefreshed: { updated in
-                        // Persist refreshed tokens back to keychain
+                        // Persist refreshed tokens back to login-level keychain
                         let encoder = JSONEncoder()
                         encoder.dateEncodingStrategy = .iso8601
                         if let data = try? encoder.encode(updated),
                            let str = String(data: data, encoding: .utf8) {
                             try? KeychainTokenProvider.storeToken(
-                                str, account: acctId, accessGroup: appGroup)
+                                str, service: kcService,
+                                account: kcAccount, accessGroup: appGroup)
                         }
                     },
                     reloadCredential: {
-                        // Reload from keychain — the app may have reauthenticated
-                        guard let data = FileProviderExtension.readKeychainData(account: acctId, accessGroup: appGroup) else {
-                            return nil
-                        }
+                        // Reload from keychain — another process or app may have refreshed
+                        guard let data = FileProviderExtension.readKeychainData(
+                            service: kcService, account: kcAccount, accessGroup: appGroup)
+                        else { return nil }
                         let decoder = JSONDecoder()
                         decoder.dateDecodingStrategy = .iso8601
                         return try? decoder.decode(OAuthCredential.self, from: data)
                     }
                 )
             } else {
-                // Credential JSON decode failed — fall back to raw token
-                tokenProvider = KeychainTokenProvider(account: accountId, accessGroup: Self.appGroupId)
+                logger.error("Failed to decode OAuth credential for \(keychainAccount, privacy: .public)")
+                tokenProvider = KeychainTokenProvider(
+                    service: loginKeychainService, account: keychainAccount, accessGroup: appGroup)
             }
         } else {
-            tokenProvider = KeychainTokenProvider(account: accountId, accessGroup: Self.appGroupId)
+            tokenProvider = KeychainTokenProvider(
+                service: loginKeychainService, account: keychainAccount, accessGroup: appGroup)
         }
 
         // Initialize components — with traffic logging to shared container

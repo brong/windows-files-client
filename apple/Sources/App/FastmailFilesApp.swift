@@ -31,12 +31,9 @@ struct FastmailFilesApp: App {
 }
 
 #if os(macOS)
-/// App delegate to handle dock icon click → open settings window.
 class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        // Always bring up the settings window on dock click
         sender.activate(ignoringOtherApps: true)
-        // Show any existing window, or SwiftUI will create one
         if let window = sender.windows.first(where: { !$0.title.isEmpty }) {
             window.makeKeyAndOrderFront(nil)
         }
@@ -44,7 +41,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Don't show any window on launch — just the menu bar icon
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
             for window in NSApplication.shared.windows {
                 if !window.title.isEmpty {
@@ -58,17 +54,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
 // MARK: - Data Model
 
-/// A login session — one OAuth or token auth, can have multiple accounts.
 struct LoginInfo: Codable, Identifiable {
-    let loginId: String          // unique ID (e.g. "user@host")
+    let loginId: String
     let sessionURL: String
-    let authType: AuthType       // oauth or token
-    var accounts: [AccountInfo]  // all discovered accounts for this login
+    let authType: AuthType
+    var accounts: [AccountInfo]
     var connectionStatus: ConnectionStatus
 
     var id: String { loginId }
 
-    /// Display label for the login (e.g. "brong@brong.net (api.fastmail.com)")
     var displayLabel: String {
         if let url = URL(string: sessionURL), let host = url.host {
             return "\(loginId) (\(host))"
@@ -96,35 +90,24 @@ struct LoginInfo: Codable, Identifiable {
 }
 
 enum ConnectionStatus: String, Codable {
-    case connected
-    case connecting
-    case authFailed      // token expired, refresh failed
-    case networkError    // can't reach server
-    case unknown
+    case connected, connecting, authFailed, networkError, unknown
 }
 
 enum AuthType: String, Codable {
-    case oauth
-    case token
+    case oauth, token
 }
 
-/// An individual account within a login.
 struct AccountInfo: Codable, Identifiable {
     let accountId: String
     let displayName: String
-    var isSynced: Bool           // whether FileProvider domain is registered
-    var status: SyncStatus       // hint only — UI derives live status from activity tracker
+    var isSynced: Bool
+    var status: SyncStatus  // hint only — UI derives live status from activity tracker
 
     var id: String { accountId }
 }
 
 enum SyncStatus: String, Codable {
-    case idle
-    case syncing
-    case error
-    case offline
-    case paused
-    case notSynced               // discovered but not enabled
+    case idle, syncing, error, offline, paused, notSynced
 }
 
 // MARK: - App State
@@ -134,7 +117,6 @@ class AppState: ObservableObject {
     @Published var logins: [LoginInfo] = []
     @Published var isOnline = true
     @Published var showingAddAccount = false
-    /// Set of account IDs currently active (from activity tracker). Updated by ActivityView.
     @Published var activeAccountIds: Set<String> = []
 
     private let defaults: UserDefaults?
@@ -145,14 +127,13 @@ class AppState: ObservableObject {
     static let appGroupId = "group.com.fastmail.files"
     #endif
 
-    /// All synced accounts across all logins.
+    static let loginKeychainService = "com.fastmail.files.login"
+
     var syncedAccounts: [AccountInfo] {
         logins.flatMap { $0.accounts.filter { $0.isSynced } }
     }
 
-    /// Get the live status for an account, derived from activity tracker.
     func liveStatus(for accountId: String) -> SyncStatus {
-        // Find the account
         for login in logins {
             if let acct = login.accounts.first(where: { $0.accountId == accountId }) {
                 if !acct.isSynced { return .notSynced }
@@ -176,11 +157,11 @@ class AppState: ObservableObject {
     init() {
         self.defaults = UserDefaults(suiteName: Self.appGroupId)
         loadState()
-        // Check connection status for all logins on startup
         Task { await checkAllConnections() }
     }
 
-    /// Check connection status for all logins by trying to fetch the JMAP session.
+    // MARK: - Connection Check
+
     func checkAllConnections() async {
         for i in logins.indices {
             let login = logins[i]
@@ -193,9 +174,10 @@ class AppState: ObservableObject {
 
             let tokenProvider: TokenProvider
             let appGroup = Self.appGroupId
-            let loginAccounts = login.accounts
-            if login.authType == .oauth, let credential = loadLoginCredential(loginId: login.loginId) {
-                let lid = login.loginId
+            let lid = login.loginId
+
+            let kcService = Self.loginKeychainService
+            if login.authType == .oauth, let credential = loadLoginCredential(loginId: lid) {
                 tokenProvider = OAuthTokenProvider(credential: credential,
                     onTokenRefreshed: { updated in
                         let encoder = JSONEncoder()
@@ -203,15 +185,11 @@ class AppState: ObservableObject {
                         if let data = try? encoder.encode(updated),
                            let str = String(data: data, encoding: .utf8) {
                             try? KeychainTokenProvider.storeToken(
-                                str, service: "com.fastmail.files.login",
+                                str, service: kcService,
                                 account: lid, accessGroup: appGroup)
-                            for acct in loginAccounts where acct.isSynced {
-                                try? KeychainTokenProvider.storeToken(
-                                    str, account: acct.accountId, accessGroup: appGroup)
-                            }
                         }
                     })
-            } else if let token = loadLoginToken(loginId: login.loginId) {
+            } else if let token = loadLoginToken(loginId: lid) {
                 tokenProvider = StaticTokenProvider(token: token)
             } else {
                 logins[i].connectionStatus = .authFailed
@@ -238,26 +216,22 @@ class AppState: ObservableObject {
 
     // MARK: - Add Login
 
-    /// Add a new login with OAuth credentials and selected accounts.
     func addLogin(loginId: String, sessionURL: String, credential: OAuthCredential,
                   discoveredAccounts: [(accountId: String, name: String, isPrimary: Bool)],
                   selectedAccountIds: Set<String>) async throws {
-        // Don't add duplicate logins
         guard !logins.contains(where: { $0.loginId == loginId }) else { return }
 
-        // Store credential in keychain keyed by loginId
+        // Store credential once at login level
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         let credData = try encoder.encode(credential)
         let credString = String(data: credData, encoding: .utf8)!
         try KeychainTokenProvider.storeToken(
-            credString, service: "com.fastmail.files.login",
+            credString, service: Self.loginKeychainService,
             account: loginId, accessGroup: Self.appGroupId)
 
-        // Store session URL
         defaults?.set(sessionURL, forKey: "sessionURL-\(loginId)")
 
-        // Build account list
         var accounts: [AccountInfo] = []
         for acct in discoveredAccounts {
             let synced = selectedAccountIds.contains(acct.accountId)
@@ -266,11 +240,11 @@ class AppState: ObservableObject {
                 isSynced: synced, status: synced ? .idle : .notSynced))
         }
 
-        // Register FileProvider domains for selected accounts
         for i in accounts.indices where accounts[i].isSynced {
             do {
-                try await registerDomain(accountId: accounts[i].accountId, displayName: accounts[i].displayName,
-                                         loginId: loginId, credential: credential, sessionURL: sessionURL)
+                try await registerDomain(
+                    accountId: accounts[i].accountId, displayName: accounts[i].displayName,
+                    loginId: loginId, sessionURL: sessionURL, authType: .oauth)
             } catch {
                 accounts[i].isSynced = false
                 accounts[i].status = .error
@@ -283,15 +257,13 @@ class AppState: ObservableObject {
         saveState()
     }
 
-    /// Add a new login with a static token.
     func addLoginWithToken(loginId: String, sessionURL: String, token: String,
                            discoveredAccounts: [(accountId: String, name: String, isPrimary: Bool)],
                            selectedAccountIds: Set<String>) async throws {
         guard !logins.contains(where: { $0.loginId == loginId }) else { return }
 
-        // Store token keyed by loginId
         try KeychainTokenProvider.storeToken(
-            token, service: "com.fastmail.files.login",
+            token, service: Self.loginKeychainService,
             account: loginId, accessGroup: Self.appGroupId)
 
         defaults?.set(sessionURL, forKey: "sessionURL-\(loginId)")
@@ -306,9 +278,9 @@ class AppState: ObservableObject {
 
         for i in accounts.indices where accounts[i].isSynced {
             do {
-                try await registerDomainWithToken(
+                try await registerDomain(
                     accountId: accounts[i].accountId, displayName: accounts[i].displayName,
-                    loginId: loginId, token: token, sessionURL: sessionURL)
+                    loginId: loginId, sessionURL: sessionURL, authType: .token)
             } catch {
                 accounts[i].isSynced = false
                 accounts[i].status = .error
@@ -323,34 +295,21 @@ class AppState: ObservableObject {
 
     // MARK: - Remove Login
 
-    /// Remove a login and all its synced accounts.
     func removeLogin(_ loginId: String) async {
         guard let login = logins.first(where: { $0.loginId == loginId }) else { return }
 
-        // Remove all synced account domains
         for acct in login.accounts where acct.isSynced {
             await removeDomain(accountId: acct.accountId)
         }
 
-        // Remove credential from keychain
+        // Remove login credential
         let deleteQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "com.fastmail.files.login",
+            kSecAttrService as String: Self.loginKeychainService,
             kSecAttrAccount as String: loginId,
             kSecUseDataProtectionKeychain as String: true,
         ]
         SecItemDelete(deleteQuery as CFDictionary)
-
-        // Also remove per-account credentials (legacy)
-        for acct in login.accounts {
-            let acctQuery: [String: Any] = [
-                kSecClass as String: kSecClassGenericPassword,
-                kSecAttrService as String: "com.fastmail.files",
-                kSecAttrAccount as String: acct.accountId,
-                kSecUseDataProtectionKeychain as String: true,
-            ]
-            SecItemDelete(acctQuery as CFDictionary)
-        }
 
         defaults?.removeObject(forKey: "sessionURL-\(loginId)")
 
@@ -360,24 +319,16 @@ class AppState: ObservableObject {
 
     // MARK: - Per-Account Actions
 
-    /// Enable syncing for an account (register FileProvider domain).
     func enableAccount(loginId: String, accountId: String) async {
         guard let loginIdx = logins.firstIndex(where: { $0.loginId == loginId }),
               let acctIdx = logins[loginIdx].accounts.firstIndex(where: { $0.accountId == accountId })
         else { return }
 
         let login = logins[loginIdx]
-        let acct = login.accounts[acctIdx]
-
         do {
-            if login.authType == .oauth, let credential = loadLoginCredential(loginId: loginId) {
-                try await registerDomain(accountId: acct.accountId, displayName: acct.displayName,
-                                         loginId: loginId, credential: credential, sessionURL: login.sessionURL)
-            } else if let token = loadLoginToken(loginId: loginId) {
-                try await registerDomainWithToken(
-                    accountId: acct.accountId, displayName: acct.displayName,
-                    loginId: loginId, token: token, sessionURL: login.sessionURL)
-            }
+            try await registerDomain(
+                accountId: accountId, displayName: logins[loginIdx].accounts[acctIdx].displayName,
+                loginId: loginId, sessionURL: login.sessionURL, authType: login.authType)
         } catch {
             logins[loginIdx].accounts[acctIdx].status = .error
             saveState()
@@ -389,7 +340,6 @@ class AppState: ObservableObject {
         saveState()
     }
 
-    /// Disable syncing for an account (remove FileProvider domain).
     func disableAccount(loginId: String, accountId: String) async {
         guard let loginIdx = logins.firstIndex(where: { $0.loginId == loginId }),
               let acctIdx = logins[loginIdx].accounts.firstIndex(where: { $0.accountId == accountId })
@@ -402,8 +352,6 @@ class AppState: ObservableObject {
         saveState()
     }
 
-    /// Clean an account: remove domain, wipe local caches, re-register.
-    /// This forces a full re-fetch from the server.
     func cleanAccount(loginId: String, accountId: String) async {
         guard let loginIdx = logins.firstIndex(where: { $0.loginId == loginId }),
               let acctIdx = logins[loginIdx].accounts.firstIndex(where: { $0.accountId == accountId }),
@@ -411,35 +359,25 @@ class AppState: ObservableObject {
         else { return }
 
         let login = logins[loginIdx]
-        let acct = logins[loginIdx].accounts[acctIdx]
 
-        // 1. Evict all downloaded content before removing the domain
+        // Evict downloaded content
         let domain = NSFileProviderDomain(
-            identifier: NSFileProviderDomainIdentifier(rawValue: accountId),
-            displayName: "")
+            identifier: NSFileProviderDomainIdentifier(rawValue: accountId), displayName: "")
         if let manager = NSFileProviderManager(for: domain) {
-            // Evict all items to remove downloaded files
             manager.evictItem(identifier: .rootContainer) { _ in }
-            // Brief pause to let eviction process
             try? await Task.sleep(nanoseconds: 500_000_000)
         }
 
-        // 2. Remove the FileProvider domain (also cleans node cache + blob cache)
         await removeDomain(accountId: accountId)
 
-        // 3. Re-register the domain so it starts fresh
+        // Re-register
         do {
-            if login.authType == .oauth, let credential = loadLoginCredential(loginId: loginId) {
-                try await registerDomain(accountId: acct.accountId, displayName: acct.displayName,
-                                         loginId: loginId, credential: credential, sessionURL: login.sessionURL)
-            } else if let token = loadLoginToken(loginId: loginId) {
-                try await registerDomainWithToken(
-                    accountId: acct.accountId, displayName: acct.displayName,
-                    loginId: loginId, token: token, sessionURL: login.sessionURL)
-            }
+            try await registerDomain(
+                accountId: accountId,
+                displayName: logins[loginIdx].accounts[acctIdx].displayName,
+                loginId: loginId, sessionURL: login.sessionURL, authType: login.authType)
             logins[loginIdx].accounts[acctIdx].status = .syncing
-            // Signal the new domain to start enumerating
-            syncNow(acct.accountId)
+            syncNow(accountId)
         } catch {
             logins[loginIdx].accounts[acctIdx].isSynced = false
             logins[loginIdx].accounts[acctIdx].status = .error
@@ -447,55 +385,35 @@ class AppState: ObservableObject {
         saveState()
     }
 
-    /// Update the OAuth credential for all accounts in a login.
-    /// Used by Reauthenticate to replace an expired/broken token.
     func updateLoginCredential(loginId: String, credential: OAuthCredential) async {
         guard let loginIdx = logins.firstIndex(where: { $0.loginId == loginId }) else { return }
 
-        // Update login-level credential in keychain
+        // Update login-level credential only
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         if let credData = try? encoder.encode(credential),
            let credString = String(data: credData, encoding: .utf8) {
             try? KeychainTokenProvider.storeToken(
-                credString, service: "com.fastmail.files.login",
+                credString, service: Self.loginKeychainService,
                 account: loginId, accessGroup: Self.appGroupId)
         }
 
-        // Update per-account credentials for all synced accounts
-        for acct in logins[loginIdx].accounts where acct.isSynced {
-            if let credData = try? encoder.encode(credential),
-               let credString = String(data: credData, encoding: .utf8) {
-                try? KeychainTokenProvider.storeToken(
-                    credString, account: acct.accountId, accessGroup: Self.appGroupId)
-            }
-            defaults?.set(credential.sessionUrl, forKey: "sessionURL-\(acct.accountId)")
-            defaults?.set("oauth", forKey: "authType-\(acct.accountId)")
-        }
-
-        // Update connection status — reauthenticate means we're connected now
         logins[loginIdx].connectionStatus = .connected
         saveState()
 
-        // Signal each account's FileProvider domain to restart
         for acct in logins[loginIdx].accounts where acct.isSynced {
             syncNow(acct.accountId)
         }
     }
 
-    /// Sync now for a specific account.
     func syncNow(_ accountId: String) {
         let domain = NSFileProviderDomain(
-            identifier: NSFileProviderDomainIdentifier(rawValue: accountId),
-            displayName: ""
-        )
+            identifier: NSFileProviderDomainIdentifier(rawValue: accountId), displayName: "")
         NSFileProviderManager(for: domain)?.signalEnumerator(for: .workingSet) { _ in }
     }
 
-    /// Remove all logins and clean up everything.
     func removeAll() async {
-        let allLogins = logins
-        for login in allLogins {
+        for login in logins {
             await removeLogin(login.loginId)
         }
         await cleanupOrphanedDomains()
@@ -503,19 +421,15 @@ class AppState: ObservableObject {
 
     // MARK: - Domain Management
 
+    /// Register a FileProvider domain. Stores the account→login mapping in UserDefaults
+    /// so the extension can find the login credential.
     private func registerDomain(accountId: String, displayName: String,
-                                loginId: String, credential: OAuthCredential,
-                                sessionURL: String) async throws {
-        // Store per-account credential for the extension to read
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        if let credData = try? encoder.encode(credential),
-           let credString = String(data: credData, encoding: .utf8) {
-            try? KeychainTokenProvider.storeToken(
-                credString, account: accountId, accessGroup: Self.appGroupId)
-        }
+                                loginId: String, sessionURL: String,
+                                authType: AuthType) async throws {
+        // Store mapping so extension can find the login credential
+        defaults?.set(loginId, forKey: "loginForAccount-\(accountId)")
         defaults?.set(sessionURL, forKey: "sessionURL-\(accountId)")
-        defaults?.set("oauth", forKey: "authType-\(accountId)")
+        defaults?.set(authType.rawValue, forKey: "authType-\(accountId)")
 
         let domainName = displayName.isEmpty ? accountId : "\(displayName) Files"
         do {
@@ -525,45 +439,10 @@ class AppState: ObservableObject {
             )
             try await NSFileProviderManager.add(domain)
         } catch {
-            print("FileProvider domain registration failed: \(error.localizedDescription)")
-            // Clean up the credentials we just stored since domain failed
-            let deleteQuery: [String: Any] = [
-                kSecClass as String: kSecClassGenericPassword,
-                kSecAttrService as String: "com.fastmail.files",
-                kSecAttrAccount as String: accountId,
-                kSecUseDataProtectionKeychain as String: true,
-            ]
-            SecItemDelete(deleteQuery as CFDictionary)
+            // Clean up mapping on failure
+            defaults?.removeObject(forKey: "loginForAccount-\(accountId)")
             defaults?.removeObject(forKey: "sessionURL-\(accountId)")
             defaults?.removeObject(forKey: "authType-\(accountId)")
-            throw error
-        }
-    }
-
-    private func registerDomainWithToken(accountId: String, displayName: String,
-                                         loginId: String, token: String,
-                                         sessionURL: String) async throws {
-        try? KeychainTokenProvider.storeToken(
-            token, account: accountId, accessGroup: Self.appGroupId)
-        defaults?.set(sessionURL, forKey: "sessionURL-\(accountId)")
-
-        let domainName = displayName.isEmpty ? accountId : "\(displayName) Files"
-        do {
-            let domain = NSFileProviderDomain(
-                identifier: NSFileProviderDomainIdentifier(rawValue: accountId),
-                displayName: domainName
-            )
-            try await NSFileProviderManager.add(domain)
-        } catch {
-            print("FileProvider domain registration failed: \(error.localizedDescription)")
-            let deleteQuery: [String: Any] = [
-                kSecClass as String: kSecClassGenericPassword,
-                kSecAttrService as String: "com.fastmail.files",
-                kSecAttrAccount as String: accountId,
-                kSecUseDataProtectionKeychain as String: true,
-            ]
-            SecItemDelete(deleteQuery as CFDictionary)
-            defaults?.removeObject(forKey: "sessionURL-\(accountId)")
             throw error
         }
     }
@@ -571,15 +450,13 @@ class AppState: ObservableObject {
     private func removeDomain(accountId: String) async {
         do {
             let domain = NSFileProviderDomain(
-                identifier: NSFileProviderDomainIdentifier(rawValue: accountId),
-                displayName: ""
-            )
+                identifier: NSFileProviderDomainIdentifier(rawValue: accountId), displayName: "")
             try await NSFileProviderManager.remove(domain)
         } catch {
             print("FileProvider domain removal failed: \(error.localizedDescription)")
         }
 
-        // Clean node cache and blob cache from shared container
+        // Clean node cache and blob cache
         if let containerURL = FileManager.default.containerURL(
             forSecurityApplicationGroupIdentifier: Self.appGroupId) {
             let nodeCache = containerURL.appendingPathComponent("nodes-\(accountId).json")
@@ -588,32 +465,22 @@ class AppState: ObservableObject {
             try? FileManager.default.removeItem(at: blobDir)
         }
 
-        // Clean per-account keychain entry
-        let deleteQuery: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "com.fastmail.files",
-            kSecAttrAccount as String: accountId,
-            kSecUseDataProtectionKeychain as String: true,
-        ]
-        SecItemDelete(deleteQuery as CFDictionary)
-
+        // Clean mapping
+        defaults?.removeObject(forKey: "loginForAccount-\(accountId)")
         defaults?.removeObject(forKey: "sessionURL-\(accountId)")
         defaults?.removeObject(forKey: "authType-\(accountId)")
     }
 
-    /// Find and remove FileProvider domains that aren't in our account list.
     func cleanupOrphanedDomains() async {
         let domains = await listDomains()
         let knownIds = Set(logins.flatMap { $0.accounts.map { $0.accountId } })
         for domain in domains {
             if !knownIds.contains(domain.identifier.rawValue) {
-                print("Removing orphaned domain: \(domain.displayName) (\(domain.identifier.rawValue))")
                 try? await NSFileProviderManager.remove(domain)
             }
         }
     }
 
-    /// List all registered FileProvider domains.
     func listDomains() async -> [NSFileProviderDomain] {
         await withUnsafeContinuation { continuation in
             NSFileProviderManager.getDomainsWithCompletionHandler { domains, _ in
@@ -628,15 +495,13 @@ class AppState: ObservableObject {
     func loadLoginCredential(loginId: String) -> OAuthCredential? {
         var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "com.fastmail.files.login",
+            kSecAttrService as String: Self.loginKeychainService,
             kSecAttrAccount as String: loginId,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
             kSecUseDataProtectionKeychain as String: true,
+            kSecAttrAccessGroup as String: Self.appGroupId,
         ]
-        if !Self.appGroupId.isEmpty {
-            query[kSecAttrAccessGroup as String] = Self.appGroupId
-        }
         var result: AnyObject?
         guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
               let data = result as? Data else { return nil }
@@ -648,15 +513,13 @@ class AppState: ObservableObject {
     func loadLoginToken(loginId: String) -> String? {
         var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "com.fastmail.files.login",
+            kSecAttrService as String: Self.loginKeychainService,
             kSecAttrAccount as String: loginId,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
             kSecUseDataProtectionKeychain as String: true,
+            kSecAttrAccessGroup as String: Self.appGroupId,
         ]
-        if !Self.appGroupId.isEmpty {
-            query[kSecAttrAccessGroup as String] = Self.appGroupId
-        }
         var result: AnyObject?
         guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
               let data = result as? Data,
@@ -670,7 +533,6 @@ class AppState: ObservableObject {
         guard let data = defaults?.data(forKey: "logins"),
               let decoded = try? JSONDecoder().decode([LoginInfo].self, from: data)
         else {
-            // Try loading legacy flat account list
             migrateFromLegacy()
             return
         }
@@ -678,10 +540,7 @@ class AppState: ObservableObject {
     }
 
     private func saveState() {
-        // Safety: never overwrite with empty if we previously had logins
-        // (protects against decode failures wiping saved state)
         if logins.isEmpty, let existing = defaults?.data(forKey: "logins"), !existing.isEmpty {
-            // Only allow empty save if explicitly removing all
             if (try? JSONDecoder().decode([LoginInfo].self, from: existing))?.isEmpty == false {
                 return
             }
@@ -690,13 +549,11 @@ class AppState: ObservableObject {
         defaults?.set(data, forKey: "logins")
     }
 
-    /// Migrate from old flat [AccountInfo] to new login-grouped model.
     private func migrateFromLegacy() {
         guard let data = defaults?.data(forKey: "accounts"),
               let oldAccounts = try? JSONDecoder().decode([LegacyAccountInfo].self, from: data)
         else { return }
 
-        // Group by session URL
         var bySession: [String: [LegacyAccountInfo]] = [:]
         for acct in oldAccounts {
             let url = defaults?.string(forKey: "sessionURL-\(acct.accountId)") ?? "unknown"
@@ -718,12 +575,11 @@ class AppState: ObservableObject {
 
         if !logins.isEmpty {
             saveState()
-            defaults?.removeObject(forKey: "accounts") // clean up legacy key
+            defaults?.removeObject(forKey: "accounts")
         }
     }
 }
 
-/// Legacy model for migration.
 private struct LegacyAccountInfo: Codable {
     let accountId: String
     let displayName: String
