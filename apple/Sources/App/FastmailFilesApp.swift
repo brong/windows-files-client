@@ -293,6 +293,38 @@ class AppState: ObservableObject {
         saveState()
     }
 
+    /// Update the OAuth credential for all accounts in a login.
+    /// Used by Reauthenticate to replace an expired/broken token.
+    func updateLoginCredential(loginId: String, credential: OAuthCredential) async {
+        guard let loginIdx = logins.firstIndex(where: { $0.loginId == loginId }) else { return }
+
+        // Update login-level credential in keychain
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        if let credData = try? encoder.encode(credential),
+           let credString = String(data: credData, encoding: .utf8) {
+            try? KeychainTokenProvider.storeToken(
+                credString, service: "com.fastmail.files.login",
+                account: loginId, accessGroup: Self.appGroupId)
+        }
+
+        // Update per-account credentials for all synced accounts
+        for acct in logins[loginIdx].accounts where acct.isSynced {
+            if let credData = try? encoder.encode(credential),
+               let credString = String(data: credData, encoding: .utf8) {
+                try? KeychainTokenProvider.storeToken(
+                    credString, account: acct.accountId, accessGroup: Self.appGroupId)
+            }
+            defaults?.set(credential.sessionUrl, forKey: "sessionURL-\(acct.accountId)")
+            defaults?.set("oauth", forKey: "authType-\(acct.accountId)")
+        }
+
+        // Signal each account's FileProvider domain to restart
+        for acct in logins[loginIdx].accounts where acct.isSynced {
+            syncNow(acct.accountId)
+        }
+    }
+
     /// Sync now for a specific account.
     func syncNow(_ accountId: String) {
         let domain = NSFileProviderDomain(

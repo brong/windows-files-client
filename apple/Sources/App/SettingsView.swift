@@ -104,11 +104,78 @@ struct SettingsView: View {
             Text(login.displayLabel)
                 .font(.headline)
             Spacer()
+            Button("Reauthenticate") {
+                Task { await reauthenticate(login: login) }
+            }
+            .font(.caption)
             Button("Remove Login") {
                 Task { await appState.removeLogin(login.loginId) }
             }
             .font(.caption)
             .foregroundColor(.red)
+        }
+    }
+
+    @State private var isReauthenticating = false
+
+    private func reauthenticate(login: LoginInfo) async {
+        guard login.authType == .oauth, !isReauthenticating else { return }
+        isReauthenticating = true
+        defer { isReauthenticating = false }
+
+        do {
+            let (sessionUrl, metadata) = try await oauthDiscover()
+
+            let port = UInt16.random(in: 49152...65000)
+            let redirectURI = "http://127.0.0.1:\(port)/callback"
+
+            guard let regEndpoint = metadata.registrationEndpoint else { return }
+            let registration = try await oauthRegisterClient(
+                registrationEndpoint: regEndpoint, redirectURI: redirectURI)
+
+            let pkce = PKCEChallenge()
+            let state = UUID().uuidString
+
+            guard let authURL = oauthAuthorizationURL(
+                authorizationEndpoint: metadata.authorizationEndpoint,
+                clientId: registration.clientId,
+                redirectURI: redirectURI,
+                codeChallenge: pkce.codeChallenge,
+                state: state
+            ) else { return }
+
+            let code = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
+                startOAuthCallbackServer(port: port, expectedState: state, continuation: continuation)
+                #if canImport(AppKit)
+                NSWorkspace.shared.open(authURL)
+                #endif
+            }
+
+            #if canImport(AppKit)
+            NSApp.activate(ignoringOtherApps: true)
+            #endif
+
+            let tokenResponse = try await oauthExchangeCode(
+                tokenEndpoint: metadata.tokenEndpoint,
+                clientId: registration.clientId,
+                code: code,
+                redirectURI: redirectURI,
+                codeVerifier: pkce.codeVerifier
+            )
+
+            let credential = OAuthCredential(
+                sessionUrl: sessionUrl,
+                accessToken: tokenResponse.accessToken,
+                refreshToken: tokenResponse.refreshToken ?? "",
+                tokenEndpoint: metadata.tokenEndpoint,
+                clientId: registration.clientId,
+                expiresAt: Date().addingTimeInterval(TimeInterval(tokenResponse.expiresIn))
+            )
+
+            // Update credential for all accounts in this login
+            await appState.updateLoginCredential(loginId: login.loginId, credential: credential)
+        } catch {
+            // Could show error in UI
         }
     }
 
