@@ -489,7 +489,8 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
             client: client,
             accountId: accountId,
             homeNodeId: homeNodeId ?? "",
-            trashNodeId: trashNodeId
+            trashNodeId: trashNodeId,
+            activityTracker: activityTracker
         )
     }
 
@@ -540,6 +541,10 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
 
         // If no cached home node, we need a full fetch on first enumeration
         if homeNodeId == nil {
+            let sessionActivityId = "init:\(accountId!):session"
+            await activityTracker.start(
+                id: sessionActivityId, accountId: accountId,
+                fileName: "Reading session data", action: .sync)
             do {
                 let home = try await client.findHomeNode(accountId: accountId)
                 homeNodeId = home.id
@@ -550,7 +555,9 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                 await database.setTrashNodeId(trash?.id)
 
                 try await database.save()
+                await activityTracker.complete(id: sessionActivityId)
             } catch {
+                await activityTracker.fail(id: sessionActivityId, error: error.localizedDescription)
                 #if canImport(os)
                 logger.error("Failed to discover home/trash nodes: \(error.localizedDescription)")
                 #endif

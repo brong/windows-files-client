@@ -845,13 +845,34 @@ struct ActivityView: View {
     private func startObserving() {
         loadActivities()
         // Listen for Darwin notifications from the extension — instant push updates
-        let obs = ActivityObserver(onChange: { [self] in
-            DispatchQueue.main.async {
+        let obs = ActivityObserver(onChange: {
+            DispatchQueue.main.async { [self] in
                 loadActivities()
+                updateSyncStatus()
             }
         })
         obs.start()
         observer = obs
+    }
+
+    /// Update login/account sync status based on activity
+    private func updateSyncStatus() {
+        let activeAccountIds = Set(activities.filter { $0.status == .active }.map { $0.accountId })
+        for i in appState.logins.indices {
+            for j in appState.logins[i].accounts.indices {
+                let acct = appState.logins[i].accounts[j]
+                guard acct.isSynced else { continue }
+                if activeAccountIds.contains(acct.accountId) {
+                    if acct.status != .syncing {
+                        appState.logins[i].accounts[j].status = .syncing
+                    }
+                } else {
+                    if acct.status == .syncing {
+                        appState.logins[i].accounts[j].status = .idle
+                    }
+                }
+            }
+        }
     }
 
     private func stopObserving() {

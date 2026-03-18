@@ -16,6 +16,7 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
     private let accountId: String
     private let homeNodeId: String
     private let trashNodeId: String?
+    private let activityTracker: ActivityTracker?
 
     #if canImport(os)
     private let logger = Logger(subsystem: "com.fastmail.files", category: "Enumerator")
@@ -27,7 +28,8 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
         client: JmapClient,
         accountId: String,
         homeNodeId: String,
-        trashNodeId: String?
+        trashNodeId: String?,
+        activityTracker: ActivityTracker? = nil
     ) {
         self.containerIdentifier = container
         self.database = database
@@ -35,6 +37,7 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
         self.accountId = accountId
         self.homeNodeId = homeNodeId
         self.trashNodeId = trashNodeId
+        self.activityTracker = activityTracker
     }
 
     // MARK: - NSFileProviderEnumerator
@@ -104,9 +107,16 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
         for observer: NSFileProviderEnumerationObserver,
         startingAt page: NSFileProviderPage
     ) async throws {
+        let activityId = "enum:\(accountId):working-set"
+        await activityTracker?.start(
+            id: activityId, accountId: accountId,
+            fileName: "Downloading node list", action: .sync)
+
         // Fetch all nodes from the server
         let allIds = try await client.queryAllNodeIds(accountId: accountId)
+        await activityTracker?.updateProgress(id: activityId, progress: 0.3)
         let allNodes = try await client.getNodes(accountId: accountId, ids: allIds)
+        await activityTracker?.updateProgress(id: activityId, progress: 0.8)
 
         // Update database
         for node in allNodes {
@@ -134,6 +144,7 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
             observer.didEnumerate(batch)
         }
 
+        await activityTracker?.complete(id: activityId)
         observer.finishEnumerating(upTo: nil)
     }
 
@@ -164,6 +175,11 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
         guard let stateToken = String(data: syncAnchor.rawValue, encoding: .utf8) else {
             throw NSFileProviderError(.syncAnchorExpired)
         }
+
+        let activityId = "sync:\(accountId):changes"
+        await activityTracker?.start(
+            id: activityId, accountId: accountId,
+            fileName: "Checking for changes", action: .sync)
 
         do {
             let (changes, createdNodes, updatedNodes) = try await client.getChanges(
@@ -207,9 +223,17 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
 
             // Finish with new anchor
             let newAnchor = NSFileProviderSyncAnchor(changes.newState.data(using: .utf8)!)
+            let totalChanges = createdNodes.count + updatedNodes.count + changes.destroyed.count
+            if totalChanges > 0 {
+                await activityTracker?.complete(id: activityId)
+            } else {
+                // No changes — just remove the activity silently
+                await activityTracker?.remove(id: activityId)
+            }
             observer.finishEnumeratingChanges(upTo: newAnchor, moreComing: changes.hasMoreChanges ?? false)
 
         } catch JmapError.cannotCalculateChanges {
+            await activityTracker?.remove(id: activityId)
             // State token too old — clear it immediately so a crash won't loop
             await database.setStateToken("")
             try? await database.save()
