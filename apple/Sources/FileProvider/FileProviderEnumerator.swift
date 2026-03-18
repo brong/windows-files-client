@@ -17,6 +17,7 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
     private let homeNodeId: String
     private let trashNodeId: String?
     private let activityTracker: ActivityTracker?
+    private let statusWriter: ExtensionStatusWriter?
 
     #if canImport(os)
     private let logger = Logger(subsystem: "com.fastmail.files", category: "Enumerator")
@@ -29,7 +30,8 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
         accountId: String,
         homeNodeId: String,
         trashNodeId: String?,
-        activityTracker: ActivityTracker? = nil
+        activityTracker: ActivityTracker? = nil,
+        statusWriter: ExtensionStatusWriter? = nil
     ) {
         self.containerIdentifier = container
         self.database = database
@@ -38,6 +40,7 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
         self.homeNodeId = homeNodeId
         self.trashNodeId = trashNodeId
         self.activityTracker = activityTracker
+        self.statusWriter = statusWriter
     }
 
     // MARK: - NSFileProviderEnumerator
@@ -108,6 +111,7 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
         startingAt page: NSFileProviderPage
     ) async throws {
         let activityId = "enum:\(accountId):working-set"
+        statusWriter?.setSyncing()
         await activityTracker?.start(
             id: activityId, accountId: accountId,
             fileName: "Downloading node list", action: .sync)
@@ -145,6 +149,7 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
         }
 
         await activityTracker?.complete(id: activityId)
+        statusWriter?.setIdle(nodeCount: allNodes.count)
         observer.finishEnumerating(upTo: nil)
     }
 
@@ -177,6 +182,7 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
         }
 
         let activityId = "sync:\(accountId):changes"
+        statusWriter?.setSyncing()
         await activityTracker?.start(
             id: activityId, accountId: accountId,
             fileName: "Checking for changes", action: .sync)
@@ -227,9 +233,9 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
             if totalChanges > 0 {
                 await activityTracker?.complete(id: activityId)
             } else {
-                // No changes — just remove the activity silently
                 await activityTracker?.remove(id: activityId)
             }
+            statusWriter?.setIdle()
             observer.finishEnumeratingChanges(upTo: newAnchor, moreComing: changes.hasMoreChanges ?? false)
 
         } catch JmapError.cannotCalculateChanges {

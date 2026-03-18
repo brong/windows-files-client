@@ -130,7 +130,8 @@ class AppState: ObservableObject {
     @Published var logins: [LoginInfo] = []
     @Published var isOnline = true
     @Published var showingAddAccount = false
-    @Published var activeAccountIds: Set<String> = []
+    /// Extension-reported statuses, keyed by accountId. Single source of truth.
+    @Published var extensionStatuses: [String: ExtensionStatus] = [:]
 
     private let defaults: UserDefaults?
 
@@ -146,18 +147,43 @@ class AppState: ObservableObject {
         logins.flatMap { $0.accounts.filter { $0.isSynced } }
     }
 
+    /// Get the live status for an account from the extension's reported state.
     func liveStatus(for accountId: String) -> SyncStatus {
         for login in logins {
-            if let acct = login.accounts.first(where: { $0.accountId == accountId }) {
-                if !acct.isSynced { return .notSynced }
-                if login.connectionStatus == .authFailed { return .error }
-                if login.connectionStatus == .networkError { return .offline }
-                if login.connectionStatus == .connecting { return .syncing }
-                if activeAccountIds.contains(accountId) { return .syncing }
-                return .idle
+            guard let acct = login.accounts.first(where: { $0.accountId == accountId }) else { continue }
+            if !acct.isSynced { return .notSynced }
+
+            // Use extension-reported status as source of truth
+            if let extStatus = extensionStatuses[accountId] {
+                switch extStatus.state {
+                case .initializing, .syncing: return .syncing
+                case .idle: return .idle
+                case .error: return .error
+                case .offline: return .offline
+                }
+            }
+
+            // No extension status yet — use connection check result as fallback
+            switch login.connectionStatus {
+            case .authFailed: return .error
+            case .networkError: return .offline
+            case .connecting: return .syncing
+            case .connected, .unknown: return .idle
             }
         }
         return .notSynced
+    }
+
+    /// Reload extension statuses from shared container.
+    func reloadExtensionStatuses() {
+        guard let containerURL = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: Self.appGroupId) else { return }
+        let reader = ExtensionStatusReader(containerURL: containerURL)
+        var newStatuses: [String: ExtensionStatus] = [:]
+        for status in reader.allStatuses() {
+            newStatuses[status.accountId] = status
+        }
+        extensionStatuses = newStatuses
     }
 
     var statusIcon: String {

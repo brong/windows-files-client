@@ -24,6 +24,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
     private var homeNodeId: String!
     private var trashNodeId: String?
     private var activityTracker: ActivityTracker!
+    private var statusWriter: ExtensionStatusWriter!
     /// Set to true when the domain is being removed — prevents server-side deletes.
     private var isDomainBeingRemoved = false
 
@@ -152,12 +153,15 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
         })
         self.database = NodeDatabase(containerURL: containerURL, accountId: accountId)
         self.activityTracker = ActivityTracker(containerURL: containerURL)
+        self.statusWriter = ExtensionStatusWriter(containerURL: containerURL, accountId: accountId)
 
         // Set up push watcher
         self.pushWatcher = PushWatcher(sessionManager: sessionManager, tokenProvider: tokenProvider, accountId: accountId)
 
+        statusWriter.setState(.initializing)
         Task {
             await initializeFromDatabase()
+            statusWriter.setIdle()
             await startPushWatcher()
         }
     }
@@ -530,7 +534,8 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
             accountId: accountId,
             homeNodeId: homeNodeId ?? "",
             trashNodeId: trashNodeId,
-            activityTracker: activityTracker
+            activityTracker: activityTracker,
+            statusWriter: statusWriter
         )
     }
 
@@ -581,6 +586,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
 
         // If no cached home node, we need a full fetch on first enumeration
         if homeNodeId == nil {
+            statusWriter.setSyncing()
             let sessionActivityId = "init:\(accountId!):session"
             await activityTracker.start(
                 id: sessionActivityId, accountId: accountId,
@@ -596,8 +602,20 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
 
                 try await database.save()
                 await activityTracker.complete(id: sessionActivityId)
+            } catch let error as JmapError {
+                await activityTracker.fail(id: sessionActivityId, error: error.localizedDescription)
+                switch error {
+                case .unauthorized, .forbidden:
+                    statusWriter.setError("Authentication failed")
+                default:
+                    statusWriter.setError(error.localizedDescription ?? "Unknown error")
+                }
+                #if canImport(os)
+                logger.error("Failed to discover home/trash nodes: \(error.localizedDescription)")
+                #endif
             } catch {
                 await activityTracker.fail(id: sessionActivityId, error: error.localizedDescription)
+                statusWriter.setState(.offline)
                 #if canImport(os)
                 logger.error("Failed to discover home/trash nodes: \(error.localizedDescription)")
                 #endif

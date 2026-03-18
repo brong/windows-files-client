@@ -98,6 +98,15 @@ struct SettingsView: View {
         .frame(minWidth: 500, minHeight: 450)
         .task {
             await refreshOrphanedDomains()
+            appState.reloadExtensionStatuses()
+            // Observe extension status changes
+            let center = CFNotificationCenterGetDarwinNotifyCenter()
+            let observer = Unmanaged.passUnretained(appState).toOpaque()
+            CFNotificationCenterAddObserver(center, observer, { _, observer, _, _, _ in
+                guard let observer = observer else { return }
+                let state = Unmanaged<AppState>.fromOpaque(observer).takeUnretainedValue()
+                DispatchQueue.main.async { state.reloadExtensionStatuses() }
+            }, ExtensionStatusReader.notificationName, nil, .deliverImmediately)
         }
     }
 
@@ -868,9 +877,9 @@ struct ActivityView: View {
         observer = obs
     }
 
-    /// Update the set of active account IDs — AppState derives status from this.
     private func updateSyncStatus() {
-        appState.activeAccountIds = Set(activeItems.map { $0.accountId })
+        // Status is now derived from ExtensionStatus — nothing to do here.
+        // The SettingsView observes the status Darwin notification directly.
     }
 
     private func stopObserving() {
