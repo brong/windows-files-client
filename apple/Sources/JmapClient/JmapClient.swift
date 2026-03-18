@@ -29,6 +29,9 @@ public actor JmapClient {
     /// Used by debug logging to capture body before URLSession converts it to a stream.
     nonisolated public let requestWillSend: (@Sendable (URL, Data) -> Void)?
 
+    /// Optional hook called with (URL, statusCode, responseData) after each JMAP API response.
+    nonisolated public let responseDidReceive: (@Sendable (URL, Int, Data) -> Void)?
+
     // MARK: - JMAP Method Calls
 
     /// Execute a batch of JMAP method calls.
@@ -55,6 +58,7 @@ public actor JmapClient {
         if let url = request.url { requestWillSend?(url, bodyData) }
 
         let (data, httpResponse) = try await authorizedRequest(request, session: interactiveSession)
+        if let url = request.url { responseDidReceive?(url, httpResponse.statusCode, data) }
         try checkHTTPStatus(httpResponse, data: data)
 
         let response = try decoder.decode(JmapResponse.self, from: data)
@@ -630,12 +634,15 @@ public actor JmapClient {
 
     /// - Parameter protocolClasses: Custom URL protocol classes for testing (injected into URLSessionConfiguration).
     /// - Parameter requestWillSend: Optional hook called before each request for debug logging.
+    /// - Parameter responseDidReceive: Optional hook called after each JMAP API response.
     public init(sessionManager: SessionManager, tokenProvider: TokenProvider,
                 protocolClasses: [AnyClass]? = nil,
-                requestWillSend: (@Sendable (URL, Data) -> Void)? = nil) {
+                requestWillSend: (@Sendable (URL, Data) -> Void)? = nil,
+                responseDidReceive: (@Sendable (URL, Int, Data) -> Void)? = nil) {
         self.sessionManager = sessionManager
         self.tokenGetter = { try await tokenProvider.currentToken() }
         self.requestWillSend = requestWillSend
+        self.responseDidReceive = responseDidReceive
 
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .custom { decoder in

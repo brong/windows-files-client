@@ -113,9 +113,15 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
             tokenProvider = KeychainTokenProvider(account: accountId, accessGroup: Self.appGroupId)
         }
 
-        // Initialize components
+        // Initialize components — with traffic logging to shared container
+        let logFile = containerURL.appendingPathComponent("jmap-traffic.log")
         self.sessionManager = SessionManager(sessionURL: sessionURL, tokenProvider: tokenProvider)
-        self.client = JmapClient(sessionManager: sessionManager, tokenProvider: tokenProvider)
+        self.client = JmapClient(sessionManager: sessionManager, tokenProvider: tokenProvider,
+                                  requestWillSend: { url, body in
+            TrafficLog.shared.log("→ POST \(url.absoluteString)\n\(TrafficLog.formatBody(body))")
+        }, responseDidReceive: { url, status, body in
+            TrafficLog.shared.log("← \(status) \(url.absoluteString)\n\(TrafficLog.formatBody(body))")
+        })
         self.database = NodeDatabase(containerURL: containerURL, accountId: accountId)
         self.activityTracker = ActivityTracker(containerURL: containerURL)
 
@@ -214,7 +220,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                     homeNodeId: homeNodeId, trashNodeId: trashNodeId)
                 completionHandler(tempURL, item, nil)
             } catch {
-                let activityId = "dl:\(accountId!):\(identifier.rawValue)"
+                let activityId = "dl:\(accountId!):\(nodeId)"
                 await activityTracker.fail(id: activityId, error: error.localizedDescription)
                 completionHandler(nil, nil, mapError(error))
             }
@@ -605,5 +611,89 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
             return NSFileProviderError(.serverUnreachable)
         }
         return error
+    }
+}
+
+// MARK: - Traffic Log
+
+/// Simple file-based traffic logger for the FileProvider extension.
+/// Writes to the shared App Group container so the app or `tail -f` can read it.
+final class TrafficLog: @unchecked Sendable {
+    static let shared = TrafficLog()
+    private var fileHandle: FileHandle?
+    private let lock = NSLock()
+
+    private init() {
+        #if os(macOS)
+        let appGroupId = "BJL34Q426G.com.fastmail.files"
+        #else
+        let appGroupId = "group.com.fastmail.files"
+        #endif
+
+        if let containerURL = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: appGroupId) {
+            let logURL = containerURL.appendingPathComponent("jmap-traffic.log")
+            // Truncate on start so the log doesn't grow forever
+            FileManager.default.createFile(atPath: logURL.path, contents: nil)
+            fileHandle = try? FileHandle(forWritingTo: logURL)
+            fileHandle?.seekToEndOfFile()
+        }
+    }
+
+    func log(_ message: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        let line = "[\(timestamp)] \(message)\n"
+        fileHandle?.write(Data(line.utf8))
+    }
+
+    /// Log a JMAP response (call from completion handlers).
+    func logResponse(url: String, statusCode: Int, body: Data?) {
+        var msg = "← \(statusCode) \(url)"
+        if let body = body, let str = Self.formatBody(body) as String? {
+            msg += "\n\(str)"
+        }
+        log(msg)
+    }
+
+    /// Format a JMAP body for logging, extracting method calls/responses.
+    static func formatBody(_ data: Data) -> String {
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return String(data: data, encoding: .utf8) ?? "(\(data.count) bytes)"
+        }
+
+        var opts: JSONSerialization.WritingOptions = [.prettyPrinted, .sortedKeys]
+        if #available(macOS 13, *) {
+            opts.insert(.withoutEscapingSlashes)
+        }
+
+        // Extract method calls or responses
+        let key = obj["methodCalls"] != nil ? "methodCalls" : (obj["methodResponses"] != nil ? "methodResponses" : nil)
+        if let key = key, let methods = obj[key] as? [[Any]] {
+            var lines: [String] = []
+            for method in methods {
+                guard method.count >= 3,
+                      let name = method[0] as? String,
+                      let callId = method[2] as? String else { continue }
+                if let argsData = try? JSONSerialization.data(withJSONObject: method[1], options: opts),
+                   var argsStr = String(data: argsData, encoding: .utf8) {
+                    argsStr = argsStr.replacingOccurrences(of: "\\[\\s*\\]", with: "[]", options: .regularExpression)
+                    argsStr = argsStr.replacingOccurrences(of: "\\{\\s*\\}", with: "{}", options: .regularExpression)
+                    lines.append("  \(name) #\(callId)\n    \(argsStr.replacingOccurrences(of: "\n", with: "\n    "))")
+                } else {
+                    lines.append("  \(name) #\(callId)")
+                }
+            }
+            return lines.joined(separator: "\n")
+        }
+
+        // Non-JMAP — compact
+        if let data = try? JSONSerialization.data(withJSONObject: obj, options: opts),
+           let str = String(data: data, encoding: .utf8) {
+            let maxLen = 1000
+            return str.count > maxLen ? String(str.prefix(maxLen)) + "..." : str
+        }
+        return "(\(data.count) bytes)"
     }
 }
