@@ -381,10 +381,9 @@ public actor JmapClient {
 
         // Use background session for uploads to avoid starving downloads
         let (data, httpResponse) = try await authorizedUpload(
-            request, fromFile: fileURL, session: backgroundSession)
+            request, fromFile: fileURL, session: backgroundSession,
+            onBytesSent: progress.map { cb in { @Sendable sent, total in cb(sent, total) } })
         try checkHTTPStatus(httpResponse, data: data)
-
-        progress?(fileSize, fileSize)
 
         return try decoder.decode(BlobUploadResponse.self, from: data)
     }
@@ -468,15 +467,24 @@ public actor JmapClient {
             request.httpMethod = "POST"
             request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
 
+            let chunkNum = chunkBlobIds.count + 1
+            let chunkBaseOffset = totalUploaded
+            requestWillSend?(uploadURL, "chunk \(chunkNum)/\(Int(fileSize) / chunkSize + 1): \(thisChunkSize) bytes".data(using: .utf8)!)
+
             let (data, httpResponse) = try await authorizedUpload(
-                request, fromFile: tempChunkFile, session: backgroundSession)
+                request, fromFile: tempChunkFile, session: backgroundSession,
+                onBytesSent: { bytesSent, totalExpected in
+                    // Report overall progress: bytes sent so far across all chunks
+                    let overallSent = chunkBaseOffset + bytesSent
+                    progress?(overallSent, fileSize)
+                })
+            responseDidReceive?(uploadURL, httpResponse.statusCode, data)
             try checkHTTPStatus(httpResponse, data: data)
 
             let uploadResponse = try decoder.decode(BlobUploadResponse.self, from: data)
             chunkBlobIds.append((uploadResponse.blobId, chunkSha1))
 
             totalUploaded += Int64(thisChunkSize)
-            progress?(totalUploaded, fileSize)
         }
 
         // If only one chunk, no need to combine
@@ -604,11 +612,18 @@ public actor JmapClient {
     private func authorizedUpload(
         _ request: URLRequest,
         fromFile fileURL: URL,
-        session urlSession: URLSession
+        session urlSession: URLSession,
+        onBytesSent: (@Sendable (Int64, Int64) -> Void)? = nil
     ) async throws -> (Data, HTTPURLResponse) {
         var request = request
         let token = try await getToken()
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+
+        if let onBytesSent = onBytesSent {
+            // Delegate-based upload for progress reporting
+            return try await ProgressUploader.upload(request: request, fromFile: fileURL,
+                                                     session: urlSession, onBytesSent: onBytesSent)
+        }
 
         let (data, response) = try await urlSession.upload(for: request, fromFile: fileURL)
         guard let httpResponse = response as? HTTPURLResponse else {
