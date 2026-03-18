@@ -871,9 +871,6 @@ struct ActivityView: View {
     /// Update the set of active account IDs — AppState derives status from this.
     private func updateSyncStatus() {
         appState.activeAccountIds = Set(activeItems.map { $0.accountId })
-        // Mark accounts as "seen" once they appear in any activity (active or completed)
-        let allAccountIds = Set(activeItems.map { $0.accountId } + recentItems.map { $0.accountId })
-        appState.seenAccountIds.formUnion(allAccountIds)
     }
 
     private func stopObserving() {

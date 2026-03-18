@@ -131,8 +131,6 @@ class AppState: ObservableObject {
     @Published var isOnline = true
     @Published var showingAddAccount = false
     @Published var activeAccountIds: Set<String> = []
-    /// Accounts that have completed at least one sync since app launch.
-    @Published var seenAccountIds: Set<String> = []
 
     private let defaults: UserDefaults?
 
@@ -154,9 +152,8 @@ class AppState: ObservableObject {
                 if !acct.isSynced { return .notSynced }
                 if login.connectionStatus == .authFailed { return .error }
                 if login.connectionStatus == .networkError { return .offline }
+                if login.connectionStatus == .connecting { return .syncing }
                 if activeAccountIds.contains(accountId) { return .syncing }
-                // If we haven't seen any activity for this account yet, it's waiting
-                if !seenAccountIds.contains(accountId) { return .syncing }
                 return .idle
             }
         }
