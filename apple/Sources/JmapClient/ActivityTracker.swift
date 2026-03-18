@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 /// Tracks active file operations across accounts.
 /// Shared between the FileProvider extension and the app via the App Group container.
@@ -123,7 +124,10 @@ public actor ActivityTracker {
         return try? decoder.decode(Snapshot.self, from: data)
     }
 
-    // MARK: - Persistence
+    // MARK: - Persistence & Notification
+
+    /// Darwin notification name for cross-process activity updates.
+    nonisolated(unsafe) public static let darwinNotificationName = "com.fastmail.files.activityChanged" as CFString
 
     private func persist() {
         lastPersistTime = Date()
@@ -133,6 +137,7 @@ public actor ActivityTracker {
         encoder.dateEncodingStrategy = .iso8601
         guard let data = try? encoder.encode(snap) else { return }
         try? data.write(to: fileURL, options: .atomic)
+        postDarwinNotification()
     }
 
     /// Persist at most every 250ms — avoids hammering disk during rapid small-file downloads.
@@ -140,5 +145,57 @@ public actor ActivityTracker {
         let now = Date()
         guard now.timeIntervalSince(lastPersistTime) >= Self.persistThrottle else { return }
         persist()
+    }
+
+    private func postDarwinNotification() {
+        let center = CFNotificationCenterGetDarwinNotifyCenter()
+        CFNotificationCenterPostNotification(center, CFNotificationName(Self.darwinNotificationName), nil, nil, true)
+    }
+}
+
+// MARK: - Activity Observer (for app UI)
+
+/// Observes Darwin notifications from the extension's ActivityTracker.
+/// Call `start()` to begin listening; the `onChange` callback fires on each update.
+public final class ActivityObserver: @unchecked Sendable {
+    private let onChange: @Sendable () -> Void
+    private var isObserving = false
+
+    public init(onChange: @escaping @Sendable () -> Void) {
+        self.onChange = onChange
+    }
+
+    deinit {
+        stop()
+    }
+
+    public func start() {
+        guard !isObserving else { return }
+        isObserving = true
+
+        let center = CFNotificationCenterGetDarwinNotifyCenter()
+        let observer = Unmanaged.passUnretained(self).toOpaque()
+
+        CFNotificationCenterAddObserver(
+            center,
+            observer,
+            { _, observer, _, _, _ in
+                guard let observer = observer else { return }
+                let myself = Unmanaged<ActivityObserver>.fromOpaque(observer).takeUnretainedValue()
+                myself.onChange()
+            },
+            ActivityTracker.darwinNotificationName,
+            nil,
+            .deliverImmediately
+        )
+    }
+
+    public func stop() {
+        guard isObserving else { return }
+        isObserving = false
+
+        let center = CFNotificationCenterGetDarwinNotifyCenter()
+        let observer = Unmanaged.passUnretained(self).toOpaque()
+        CFNotificationCenterRemoveObserver(center, observer, CFNotificationName(ActivityTracker.darwinNotificationName), nil)
     }
 }

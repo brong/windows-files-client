@@ -724,7 +724,7 @@ private func startOAuthCallbackServer(
 struct ActivityView: View {
     @ObservedObject var appState: AppState
     @State private var activities: [ActivityTracker.Activity] = []
-    @State private var refreshTimer: Timer?
+    @State private var observer: ActivityObserver?
 
     private var activeItems: [ActivityTracker.Activity] {
         activities.filter { $0.status == .active }
@@ -778,8 +778,8 @@ struct ActivityView: View {
                 .frame(maxHeight: 200)
             }
         }
-        .onAppear { startPolling() }
-        .onDisappear { stopPolling() }
+        .onAppear { startObserving() }
+        .onDisappear { stopObserving() }
     }
 
     private func activityRow(_ activity: ActivityTracker.Activity) -> some View {
@@ -842,16 +842,21 @@ struct ActivityView: View {
         return String(format: "%.1f MB", Double(bytes) / (1024 * 1024))
     }
 
-    private func startPolling() {
+    private func startObserving() {
         loadActivities()
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
-            loadActivities()
-        }
+        // Listen for Darwin notifications from the extension — instant push updates
+        let obs = ActivityObserver(onChange: { [self] in
+            DispatchQueue.main.async {
+                loadActivities()
+            }
+        })
+        obs.start()
+        observer = obs
     }
 
-    private func stopPolling() {
-        refreshTimer?.invalidate()
-        refreshTimer = nil
+    private func stopObserving() {
+        observer?.stop()
+        observer = nil
     }
 
     private func loadActivities() {
@@ -860,9 +865,7 @@ struct ActivityView: View {
         else { return }
 
         if let snapshot = ActivityTracker.loadShared(containerURL: containerURL) {
-            DispatchQueue.main.async {
-                activities = snapshot.activities
-            }
+            activities = snapshot.activities
         }
     }
 }
