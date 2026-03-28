@@ -410,14 +410,19 @@ class FileNodeFS(pyfuse3.Operations):
                 if new_node.blob_id:
                     self._cache_write(new_node.blob_id, data)
             else:
-                # Existing file — replace on server
-                log.info("Replacing file: %s (%d bytes)", name, len(data))
+                # Existing file — update content on server (v10: blobId is mutable)
+                log.info("Updating file content: %s (%d bytes)", name, len(data))
                 new_node = await self._jmap.replace_file(
                     existing_node_id, parent_id, name, data)
-                self._remove_node(existing_node_id)
+                if new_node.id != existing_node_id:
+                    # Different ID (shouldn't happen with v10 but handle gracefully)
+                    self._remove_node(existing_node_id)
+                    self._inode_to_node_id[fh] = new_node.id
+                    self._node_id_to_inode[new_node.id] = fh
+                else:
+                    # Same ID — just invalidate blob cache
+                    self._blob_cache.pop(existing_node_id, None)
                 self._add_node(new_node)
-                self._inode_to_node_id[fh] = new_node.id
-                self._node_id_to_inode[new_node.id] = fh
                 self._blob_cache[new_node.id] = data
                 if new_node.blob_id:
                     self._cache_write(new_node.blob_id, data)

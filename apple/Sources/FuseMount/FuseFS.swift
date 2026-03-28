@@ -496,15 +496,24 @@ public final class FileNodeFuseFS: @unchecked Sendable {
                 let blob = try await client.uploadBlobChunked(
                     accountId: acctId, fileURL: tempFile, contentType: contentType)
 
-                let node = try await client.createNode(
-                    accountId: acctId, parentId: parentId, name: name,
-                    blobId: blob.blobId, onExists: "replace")
-
-                if let oldId = existingNodeId, oldId != node.id {
-                    try? await client.destroyNode(accountId: acctId, nodeId: oldId)
+                if let nodeId = existingNodeId {
+                    // v10: blobId is mutable — update directly, node ID stays the same
+                    try await client.updateNodeContent(
+                        accountId: acctId, nodeId: nodeId,
+                        blobId: blob.blobId, type: contentType)
+                    // Return a FileNode with known values (update response is partial)
+                    return FileNode(id: nodeId, parentId: parentId, blobId: blob.blobId,
+                                    name: name, type: contentType, size: data.count,
+                                    created: nil, modified: Date(), accessed: nil,
+                                    role: nil, executable: nil, isSubscribed: nil,
+                                    myRights: nil, shareWith: nil)
+                } else {
+                    // New file — create with onExists: "replace"
+                    let node = try await client.createNode(
+                        accountId: acctId, parentId: parentId, name: name,
+                        blobId: blob.blobId, onExists: "replace")
+                    return node
                 }
-
-                return node
             } catch {
                 return nil
             }

@@ -43,6 +43,10 @@ public interface IJmapClient : IDisposable
     /// URL template for viewing a file online, with {nodeId} placeholder.
     /// </summary>
     string? WebUrlTemplate { get; }
+    /// <summary>
+    /// URL template for direct HTTP writes, with {id} placeholder. Null if not supported.
+    /// </summary>
+    string? WebWriteUrlTemplate { get; }
     Task<string> FindHomeNodeIdAsync(CancellationToken ct = default);
     Task<string?> FindTrashNodeIdAsync(CancellationToken ct = default);
     Task<FileNode[]> GetFileNodesAsync(string[] ids, CancellationToken ct = default);
@@ -82,4 +86,10 @@ public interface IJmapClient : IDisposable
     Task<Dictionary<string, string>> ConvertImagesAsync(
         IReadOnlyList<(string BlobId, uint Width, uint Height)> items,
         string mimeType = "image/png", CancellationToken ct = default);
+    /// <summary>
+    /// Direct HTTP Write: PUT to webWriteUrlTemplate/{id} to replace file content.
+    /// Only suitable for files under ~16 MB. Returns the new blobId, size, and type.
+    /// </summary>
+    Task<(string BlobId, long Size, string Type)> DirectWriteAsync(
+        string nodeId, Stream data, string contentType, CancellationToken ct = default);
 }

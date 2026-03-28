@@ -399,7 +399,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                 let nodeId = item.itemIdentifier.rawValue
                 var currentNodeId = nodeId
 
-                // Handle content change first (creates new node due to immutable blobId)
+                // Handle content change — v10: update blobId directly (node ID stays the same)
                 if changedFields.contains(.contents), let contentURL = newContents {
                     let contentType = item.contentType?.preferredMIMEType ?? "application/octet-stream"
                     let parentId = resolveNodeId(item.parentItemIdentifier)
@@ -423,23 +423,31 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                     }
                     progress.completedUnitCount = 60
 
-                    // Create with onExists:"replace" — destroys old node, creates new one
-                    let newNode = try await client.createNode(
+                    // v10: blobId is mutable — update directly, node ID stays the same
+                    try await client.updateNodeContent(
                         accountId: accountId,
-                        parentId: parentId,
-                        name: desanitizeFilename(item.filename),
+                        nodeId: nodeId,
                         blobId: blob.blobId,
                         type: contentType,
-                        created: item.creationDate ?? nil,
-                        modified: item.contentModificationDate ?? nil,
-                        onExists: "replace"
+                        modified: item.contentModificationDate ?? nil
                     )
                     progress.completedUnitCount = 80
 
-                    // Update database: remove old, add new
-                    await database.remove(nodeId: nodeId)
-                    await database.upsertFromServer(newNode)
-                    currentNodeId = newNode.id
+                    // Update database with new blob info (node ID unchanged)
+                    if var entry = await database.entry(for: nodeId) {
+                        let updatedEntry = NodeCacheEntry(
+                            parentId: entry.parentId,
+                            name: entry.name,
+                            blobId: blob.blobId,
+                            size: blob.size,
+                            modified: item.contentModificationDate ?? nil,
+                            isFolder: false,
+                            type: contentType,
+                            myRights: entry.myRights
+                        )
+                        await database.upsert(nodeId: nodeId, entry: updatedEntry)
+                    }
+                    // currentNodeId stays as nodeId — no ID change
                     await activityTracker.complete(id: activityId)
                 }
 
@@ -583,7 +591,9 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
             for identifier in itemIdentifiers {
                 let nodeId = identifier.rawValue
                 guard let entry = await database.entry(for: nodeId),
-                      let blobId = entry.blobId
+                      let blobId = entry.blobId,
+                      let type = entry.type,
+                      type.hasPrefix("image/")
                 else {
                     perThumbnailCompletionHandler(identifier, nil, nil)
                     continue
@@ -598,9 +608,39 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                     continue
                 }
 
-                // TODO: Implement Blob/convert call for server-side thumbnail generation
-                // For now, return nil (system shows generic icon)
-                perThumbnailCompletionHandler(identifier, nil, nil)
+                do {
+                    let thumbnailBlobId = try await client.convertImage(
+                        accountId: accountId,
+                        blobId: blobId,
+                        width: Int(requestedSize.width),
+                        height: Int(requestedSize.height),
+                        mimeType: "image/jpeg"
+                    )
+
+                    // Download the thumbnail blob
+                    guard let containerURL = FileManager.default.containerURL(
+                        forSecurityApplicationGroupIdentifier: Self.appGroupId)
+                    else {
+                        perThumbnailCompletionHandler(identifier, nil, nil)
+                        continue
+                    }
+                    let tempDir = containerURL.appendingPathComponent("tmp", isDirectory: true)
+                    try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+
+                    let tempURL = try await client.downloadBlob(
+                        accountId: accountId,
+                        blobId: thumbnailBlobId,
+                        name: "thumbnail.jpg",
+                        type: "image/jpeg",
+                        destinationDir: tempDir
+                    )
+                    let thumbnailData = try Data(contentsOf: tempURL)
+                    try? FileManager.default.removeItem(at: tempURL)
+
+                    perThumbnailCompletionHandler(identifier, thumbnailData, nil)
+                } catch {
+                    perThumbnailCompletionHandler(identifier, nil, nil)
+                }
             }
             completionHandler(nil)
         }

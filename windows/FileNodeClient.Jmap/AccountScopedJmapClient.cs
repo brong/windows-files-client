@@ -25,6 +25,8 @@ public class AccountScopedJmapClient : IJmapClient
     private string? _trashUrl;
     private bool _webUrlTemplateResolved;
     private string? _webUrlTemplate;
+    private bool _webWriteUrlTemplateResolved;
+    private string? _webWriteUrlTemplate;
     private static readonly HashSet<string> SupportedDigests = ["sha", "sha-256"];
 
     public AccountScopedJmapClient(JmapClient parent, string accountId)
@@ -120,6 +122,19 @@ public class AccountScopedJmapClient : IJmapClient
                 _webUrlTemplateResolved = true;
             }
             return _webUrlTemplate;
+        }
+    }
+
+    public string? WebWriteUrlTemplate
+    {
+        get
+        {
+            if (!_webWriteUrlTemplateResolved)
+            {
+                _webWriteUrlTemplate = _parent.Session.GetWebWriteUrlTemplate(_accountId);
+                _webWriteUrlTemplateResolved = true;
+            }
+            return _webWriteUrlTemplate;
         }
     }
 
@@ -545,32 +560,38 @@ public class AccountScopedJmapClient : IJmapClient
 
     public async Task<FileNode> ReplaceFileNodeBlobAsync(string nodeId, string parentId, string name, string blobId, string? type = null, DateTime? createdAt = null, DateTime? modifiedAt = null, CancellationToken ct = default)
     {
-        // Content (blobId) is immutable — create a replacement with onExists:"replace"
-        // so the server atomically replaces the existing node.
-        var createObj = new Dictionary<string, object?>
+        // v10: blobId is now mutable — update directly via FileNode/set update.
+        // Node ID stays the same (no destroy+create needed).
+        var updateFields = new Dictionary<string, object?>
         {
-            ["parentId"] = parentId, ["blobId"] = blobId, ["name"] = name, ["type"] = type,
+            ["blobId"] = blobId,
         };
-        if (createdAt.HasValue)
-            createObj["created"] = createdAt.Value.ToUniversalTime();
+        if (type != null)
+            updateFields["type"] = type;
         if (modifiedAt.HasValue)
-            createObj["modified"] = modifiedAt.Value.ToUniversalTime();
+            updateFields["modified"] = modifiedAt.Value.ToUniversalTime();
 
         var setResponse = await CallAsync<SetResponse>(
             FileNodeUsing, "FileNode/set", new
             {
                 accountId = _accountId,
-                onExists = "replace",
-                create = new Dictionary<string, object?> { ["c0"] = createObj },
+                update = new Dictionary<string, object?> { [nodeId] = updateFields },
             }, ct);
 
-        if (setResponse.NotCreated != null && setResponse.NotCreated.TryGetValue("c0", out var createError))
-            throw new InvalidOperationException($"FileNode/set create failed: {createError.Type} — {createError.Description}");
+        if (setResponse.NotUpdated != null && setResponse.NotUpdated.TryGetValue(nodeId, out var updateError))
+            throw new InvalidOperationException($"FileNode/set update failed: {updateError.Type} — {updateError.Description}");
 
-        if (setResponse.Created == null || !setResponse.Created.TryGetValue("c0", out var created))
-            throw new InvalidOperationException("FileNode/set create returned no result");
-
-        return created;
+        // Return a FileNode with the known values since update response only has changed fields
+        return new FileNode
+        {
+            Id = nodeId,
+            ParentId = parentId,
+            BlobId = blobId,
+            Name = name,
+            Type = type,
+            Modified = modifiedAt?.ToUniversalTime(),
+            Created = createdAt?.ToUniversalTime(),
+        };
     }
 
     public async Task MoveFileNodeAsync(string nodeId, string parentId, string newName, string? onExists = null, CancellationToken ct = default)
@@ -727,6 +748,27 @@ public class AccountScopedJmapClient : IJmapClient
             }
         }
         return allConverted;
+    }
+
+    /// <summary>
+    /// Direct HTTP Write: PUT to webWriteUrlTemplate/{id} to replace file content.
+    /// Only suitable for files under ~16 MB. Returns the new blobId, size, and type.
+    /// </summary>
+    public async Task<(string BlobId, long Size, string Type)> DirectWriteAsync(
+        string nodeId, Stream data, string contentType, CancellationToken ct = default)
+    {
+        var template = WebWriteUrlTemplate
+            ?? throw new InvalidOperationException("Server does not support direct HTTP write");
+        var url = template.Replace("{id}", Uri.EscapeDataString(nodeId));
+        var content = new StreamContent(data);
+        content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(contentType);
+        using var request = new HttpRequestMessage(HttpMethod.Put, url) { Content = content };
+        var response = await Http.SendAsync(request, ct);
+        response.EnsureSuccessStatusCode();
+        var json = await response.Content.ReadAsStringAsync(ct);
+        var result = JsonSerializer.Deserialize<DirectWriteResponse>(json, JmapSerializerOptions.Default)
+            ?? throw new InvalidOperationException("Failed to parse direct write response");
+        return (result.BlobId, result.Size, result.Type);
     }
 
     /// <summary>

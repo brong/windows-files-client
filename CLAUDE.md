@@ -33,8 +33,9 @@ Read `DESIGN.md` before working on any platform. It contains:
 ### Shared Protocol Concepts
 
 All platforms implement the same JMAP protocol. Key invariants:
-- **blobId is immutable**: Update file content via destroy+create with `onExists: "replace"`
-- **Preserve timestamps**: Always pass local `created` and `modified` to the server on upload
+- **blobId is mutable (v10)**: Update file content via `FileNode/set update { blobId }` — node ID stays the same. Use `onExists: "replace"` only for new file creation with possible name collisions
+- **Timestamps are client-managed**: Server does NOT auto-update `modified`/`accessed`. Always set `modified` on content and metadata changes. Set to `null` for server to use current time
+- **Direct HTTP Write**: If `webWriteUrlTemplate` available, PUT to replace content directly (< 16 MB)
 - **Echo suppression**: Compare mtime, never suppress on key presence alone
 - **State tokens**: Use `FileNode/changes` for incremental sync, handle `cannotCalculateChanges`
 - **Capability checks**: Verify server capabilities before using optional features (Blob, BlobExt, Quota)

@@ -107,6 +107,24 @@ public struct JmapSession: Codable, Sendable {
         }
         return result
     }
+
+    /// Get the webWriteUrlTemplate for direct HTTP writes, if available.
+    public func webWriteUrlTemplate(accountId: String) -> String? {
+        guard let account = accounts[accountId] else { return nil }
+        for uri in JmapCapability.allFileNodeURIs {
+            if let cap = account.accountCapabilities[uri],
+               let dict = cap.dictValue,
+               let template = dict["webWriteUrlTemplate"]?.stringValue {
+                return template
+            }
+        }
+        return nil
+    }
+
+    /// Check if server supports direct HTTP write for an account.
+    public func hasDirectWrite(accountId: String) -> Bool {
+        webWriteUrlTemplate(accountId: accountId) != nil
+    }
 }
 
 public struct JmapAccount: Codable, Sendable {
@@ -127,8 +145,33 @@ public struct FileNode: Codable, Sendable {
     public let size: Int?
     public let created: Date?
     public let modified: Date?
+    public let accessed: Date?
     public let role: String?
+    public let executable: Bool?
+    public let isSubscribed: Bool?
     public let myRights: FileNodeRights?
+    public let shareWith: [String: FileNodeRights]?
+
+    public init(id: String, parentId: String?, blobId: String?,
+                name: String?, type: String?, size: Int?,
+                created: Date?, modified: Date?, accessed: Date?,
+                role: String?, executable: Bool?, isSubscribed: Bool?,
+                myRights: FileNodeRights?, shareWith: [String: FileNodeRights]?) {
+        self.id = id
+        self.parentId = parentId
+        self.blobId = blobId
+        self.name = name
+        self.type = type
+        self.size = size
+        self.created = created
+        self.modified = modified
+        self.accessed = accessed
+        self.role = role
+        self.executable = executable
+        self.isSubscribed = isSubscribed
+        self.myRights = myRights
+        self.shareWith = shareWith
+    }
 
     public var isFolder: Bool { blobId == nil }
 

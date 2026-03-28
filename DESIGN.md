@@ -86,9 +86,9 @@ The **Jmap** and **Logging** layers are cross-platform (no OS dependencies). The
 | Capability | URI | What It Provides |
 |-----------|-----|-----------------|
 | JMAP Core | `urn:ietf:params:jmap:core` | Method call limits, upload limits |
-| FileNode | `urn:ietf:params:jmap:filenode` (or dev URI) | File sync API |
-| Blob | `urn:ietf:params:jmap:blob` | `Blob/upload` (chunked combine), `Blob/get` (inline fetch + digest verification), `maxDataSources`, `maxSizeBlobSet` (RFC 9404) |
-| BlobExt | `urn:ietf:params:jmap:blobext` | `Blob/convert` for thumbnails, `chunkSize` hint, `digest:sha` verification on chunks |
+| FileNode | `urn:ietf:params:jmap:filenode` (or dev URI) | File sync API. Account capability includes: `webTrashUrl`, `webUrlTemplate`, `webWriteUrlTemplate`, `mayCreateTopLevelFileNode` |
+| Blob | `urn:ietf:params:jmap:blob` | `Blob/upload` (chunked combine, update/destroy), `Blob/get` (inline fetch + digest verification + chunks), `maxDataSources`, `maxSizeBlobSet` (RFC 9404) |
+| BlobExt | `urn:ietf:params:jmap:blobext` | `Blob/convert` (ImageConvert, Archive, Compress, Delta/Patch), `chunkSize` hint, `digest:sha` verification, `supportedImageTypes`, `supportedArchiveTypes`, `supportedCompressionTypes`, `supportedPatchTypes`, `maxConvertSize`, `resumableUploadUrl` |
 | Quota | `urn:ietf:params:jmap:quota` | Storage quota reporting (RFC 9425) |
 
 Always check for capability presence before using its methods. The server may not support all capabilities, and the client must degrade gracefully. For example, if `Blob` capability is absent, fall back to simple uploads (no chunked combine). If `BlobExt` is absent, skip thumbnail fetching via `Blob/convert` and omit `digest:sha` fields from chunked upload combine requests.
@@ -99,31 +99,40 @@ Always check for capability presence before using its methods. The server may no
 FileNode {
     id: String              — server-assigned unique ID
     parentId: String?       — parent folder ID (null only for the invisible root)
-    blobId: String?         — content identifier (null for folders, IMMUTABLE for files)
+    blobId: String?         — content identifier (null for folders, MUTABLE since v10)
     name: String            — display name within parent
-    type: String?           — MIME type (null for folders, IMMUTABLE)
-    size: Int?              — file size in bytes (IMMUTABLE)
-    created: UTCDate?       — creation timestamp
-    modified: UTCDate?      — last-modified timestamp
-    role: String?           — special roles: "home", "trash", "temp", "root"
+    type: String?           — MIME type (null for folders)
+    size: Int?              — file size in bytes (server auto-updates when blobId changes)
+    created: UTCDate?       — creation timestamp (client-managed)
+    modified: UTCDate?      — last-modified timestamp (client-managed, server does NOT auto-update)
+    accessed: UTCDate?      — last-accessed timestamp (client-managed)
+    role: String?           — special roles: "home", "trash", "temp", "root", "documents", "downloads", "music", "pictures", "videos"
+    executable: Bool        — whether the file is executable (default false)
+    isSubscribed: Bool      — whether the user is subscribed to changes (default true)
     myRights: {             — permissions for the authenticated user
         mayRead: Bool
         mayWrite: Bool
         mayShare: Bool
     }
-    shareWith: Map?         — sharing ACLs
+    shareWith: Map?         — sharing ACLs (Id[FilesRights])
 }
 ```
 
 Key design points:
 
-- **`blobId` is immutable.** You cannot update file content by changing blobId on an existing node. To update content: upload a new blob, then `FileNode/set create` with the same `parentId` + `name` and `onExists: "replace"`. The server atomically destroys the old node and creates a new one (with a new `id`).
+- **`blobId` is now mutable (v10).** You can update file content by setting a new blobId via `FileNode/set update`. The node ID stays the same. The server automatically updates the `size` field. You cannot change a file into a folder or vice versa. This is a significant improvement over the old destroy+create pattern — the node ID is now stable across content updates, which simplifies local state tracking.
+
+- **`onExists: "replace"`** is still available for creating files that may already exist (e.g., new file creation where a name collision is possible). But for updating existing files where you already know the node ID, use `FileNode/set update { blobId: newBlobId }` instead.
+
+- **Timestamps are client-managed.** The server does NOT auto-update `modified` or `accessed`. Clients SHOULD explicitly set `modified` on content changes and metadata changes (rename, move). Setting a timestamp to `null` tells the server to use the current time.
 
 - **`role: "home"`** is the sync root. Find it with `FileNode/query { filter: { hasRole: "home" } }`. Do not hardcode an ID.
 
 - **`role: "trash"`** is the server-side recycle bin. Moving nodes here (via `FileNode/set update { parentId: trashNodeId }`) instead of destroying them enables restore.
 
 - **Folders have `blobId: null`.** This is how you distinguish files from folders.
+
+- **Direct HTTP Write.** If the server provides `webWriteUrlTemplate` in the FileNode capability, clients can PUT to `{webWriteUrlTemplate}/{id}` to replace file content directly. Returns `{blobId, size, type}`. Suitable for small files (< 16 MB). PATCH applies deltas.
 
 ### JMAP Method Patterns
 
@@ -143,6 +152,13 @@ Key design points:
 ### Blob Operations
 
 **Upload:** Raw HTTP POST to `{uploadUrl}/{accountId}/` with file bytes in the body. Set `Content-Type` header. Returns `{ blobId, size, type }`.
+
+**Direct HTTP Write (v10):** If `webWriteUrlTemplate` is available in the FileNode capability, PUT to `{webWriteUrlTemplate}/{id}` to replace file content directly without a separate blob upload + FileNode/set update. Returns `{blobId, size, type}`. Best for small files (< 16 MB) as it is non-resumable. PATCH applies binary deltas.
+
+**Smart upload strategy:** Three tiers based on file size:
+1. **Direct HTTP PUT** (< 16 MB, when `webWriteUrlTemplate` available): Single non-resumable PUT. Simplest and fastest.
+2. **Chunked upload with delta** (≥ 16 MB, existing file): Upload only changed chunks by comparing local chunk hashes against server's `Blob/get chunks`. Combine old + new chunks via `Blob/upload`. Then `FileNode/set update { blobId }`.
+3. **Full chunked upload** (new files or no prior version): Upload all chunks, combine via `Blob/upload`, then `FileNode/set update { blobId }`.
 
 **Download:** HTTP GET from `{downloadUrl}/{accountId}/{blobId}/{type}/{name}`. Supports `Range` header (server may return 206 or 200).
 
@@ -784,8 +800,8 @@ These are problems we actually hit during development. Each one cost hours to de
 
 ### Protocol Pitfalls
 
-**1. blobId is immutable — updating content requires destroy+create.**
-We initially tried to update blobId on an existing node. The server rejects this. The correct pattern is `FileNode/set create` with `onExists: "replace"`, which atomically replaces the old node. This means the nodeId changes on every content update — all local mappings and placeholder identities must be updated. Always pass the local file's `modified` timestamp in the create call so the server preserves it — otherwise the server assigns its own timestamp and the mtime diverges between client and server.
+**1. blobId is now mutable (v10) — use FileNode/set update for content changes.**
+Before v10, blobId was immutable and content updates required destroy+create with `onExists: "replace"`. Since v10, you can update blobId directly via `FileNode/set update { blobId: newBlobId }`. The node ID stays the same, which is a major simplification — no need to update local mappings or placeholder identities. The server automatically updates the `size` field. Always explicitly set the `modified` timestamp in the update call — timestamps are now client-managed and the server does NOT auto-update them. Keep `onExists: "replace"` for new file creation where a name collision is possible.
 
 **2. State tokens expire — handle `cannotCalculateChanges`.**
 If the client is offline too long, the server can't compute incremental changes. You must detect this error and fall back to a full reconciliation (fetch all nodes, diff against cache).

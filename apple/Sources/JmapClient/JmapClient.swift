@@ -327,6 +327,50 @@ public actor JmapClient {
         }
     }
 
+    /// Update a file's content by setting a new blobId (v10: blobId is now mutable).
+    /// The node ID stays the same — no destroy+create needed.
+    public func updateNodeContent(
+        accountId: String,
+        nodeId: String,
+        blobId: String,
+        type: String? = nil,
+        modified: Date? = nil
+    ) async throws {
+        var updateFields: [String: AnyCodable] = [
+            "blobId": AnyCodable(blobId),
+        ]
+        if let type = type { updateFields["type"] = AnyCodable(type) }
+        if let modified = modified {
+            updateFields["modified"] = AnyCodable(ISO8601DateFormatter().string(from: modified))
+        } else {
+            // Client-managed timestamps: set to null so server uses current time
+            updateFields["modified"] = AnyCodable(NSNull())
+        }
+
+        let responses = try await call([
+            JmapMethodCall(
+                name: "FileNode/set",
+                args: [
+                    "accountId": AnyCodable(accountId),
+                    "update": [nodeId: AnyCodable(updateFields)],
+                ],
+                callId: "s0"
+            ),
+        ])
+
+        let setResponse = try extractResponse(FileNodeSetResponse.self, from: responses, callId: "s0")
+
+        if let error = setResponse.notUpdated?[nodeId] {
+            if error.type == "notFound" {
+                throw JmapError.notFound(nodeId)
+            }
+            if error.type == "forbidden" {
+                throw JmapError.forbidden(error.description)
+            }
+            throw JmapError.serverError(error.type, error.description)
+        }
+    }
+
     /// Destroy a FileNode.
     public func destroyNode(
         accountId: String,
@@ -578,6 +622,88 @@ public actor JmapClient {
         return destURL
     }
 
+    /// Direct HTTP Write: PUT to webWriteUrlTemplate/{id} to replace file content.
+    /// Returns the new (blobId, size, type). Only for small files (< 16 MB).
+    public func directWrite(
+        accountId: String,
+        nodeId: String,
+        fileURL: URL,
+        contentType: String
+    ) async throws -> BlobUploadResponse {
+        let session = try await sessionManager.session()
+        guard let template = session.webWriteUrlTemplate(accountId: accountId) else {
+            throw JmapError.serverError("notSupported", "Server does not support direct HTTP write")
+        }
+
+        let urlString = template.replacingOccurrences(of: "{id}", with: nodeId)
+        guard let url = URL(string: urlString) else {
+            throw JmapError.invalidResponse
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "PUT"
+        request.setValue(contentType, forHTTPHeaderField: "Content-Type")
+
+        let (data, httpResponse) = try await authorizedUpload(
+            request, fromFile: fileURL, session: backgroundSession)
+        try checkHTTPStatus(httpResponse, data: data)
+
+        return try decoder.decode(BlobUploadResponse.self, from: data)
+    }
+
+    /// Convert a blob using Blob/convert with ImageConvertRecipe.
+    /// Returns the converted blob ID.
+    public func convertImage(
+        accountId: String,
+        blobId: String,
+        width: Int,
+        height: Int,
+        mimeType: String = "image/jpeg"
+    ) async throws -> String {
+        let capabilities = [JmapCapability.core, JmapCapability.blob, JmapCapability.blobExt]
+        let responses = try await call([
+            JmapMethodCall(
+                name: "Blob/convert",
+                args: [
+                    "accountId": AnyCodable(accountId),
+                    "create": [
+                        "t0": [
+                            "imageConvert": [
+                                "blobId": AnyCodable(blobId),
+                                "width": AnyCodable(width),
+                                "height": AnyCodable(height),
+                                "type": AnyCodable(mimeType),
+                                "autoOrient": AnyCodable(true),
+                            ],
+                        ],
+                    ],
+                ],
+                callId: "b0"
+            ),
+        ], using: capabilities)
+
+        guard let response = responses.first,
+              response.count >= 3,
+              let argsDict = response[1].dictValue,
+              let created = argsDict["created"]?.dictValue,
+              let item = created["t0"]?.dictValue,
+              let convertedBlobId = item["id"]?.stringValue ?? item["blobId"]?.stringValue
+        else {
+            // Check for error
+            if let response = responses.first,
+               response.count >= 3,
+               let argsDict = response[1].dictValue,
+               let notCreated = argsDict["notCreated"]?.dictValue,
+               let error = notCreated["t0"]?.dictValue {
+                let errorType = error["type"]?.stringValue ?? "unknown"
+                throw JmapError.serverError(errorType, error["description"]?.stringValue)
+            }
+            throw JmapError.serverError("blobConvert", "Failed to convert image")
+        }
+
+        return convertedBlobId
+    }
+
     // MARK: - Private Helpers
 
     private func authorizedRequest(
@@ -805,6 +931,7 @@ extension FileNode {
     /// The standard properties we request from FileNode/get.
     public static let standardProperties: [AnyCodable] = [
         "id", "parentId", "blobId", "name", "type",
-        "size", "created", "modified", "role", "myRights",
+        "size", "created", "modified", "accessed", "role",
+        "executable", "isSubscribed", "myRights", "shareWith",
     ].map { AnyCodable($0) }
 }

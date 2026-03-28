@@ -21,8 +21,9 @@ import Testing
     let db = await makeDatabase()
     let node = FileNode(
         id: "M1", parentId: "M0", blobId: "B1", name: "photo.jpg",
-        type: "image/jpeg", size: 2048, created: nil, modified: Date(),
-        role: nil, myRights: FileNodeRights(mayRead: true, mayWrite: false)
+        type: "image/jpeg", size: 2048, created: nil, modified: Date(), accessed: nil,
+        role: nil, executable: nil, isSubscribed: nil,
+        myRights: FileNodeRights(mayRead: true, mayWrite: false), shareWith: nil
     )
     await db.upsertFromServer(node)
     let entry = await db.entry(for: "M1")
@@ -37,8 +38,8 @@ import Testing
     let db = await makeDatabase()
     let folder = FileNode(
         id: "M2", parentId: "M0", blobId: nil, name: "Documents",
-        type: nil, size: nil, created: nil, modified: nil,
-        role: nil, myRights: nil
+        type: nil, size: nil, created: nil, modified: nil, accessed: nil,
+        role: nil, executable: nil, isSubscribed: nil, myRights: nil, shareWith: nil
     )
     await db.upsertFromServer(folder)
     let entry = await db.entry(for: "M2")

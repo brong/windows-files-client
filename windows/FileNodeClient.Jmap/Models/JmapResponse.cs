@@ -188,3 +188,13 @@ public class DataSourceObject
     [JsonPropertyName("digest:sha")]
     public string? DigestSha { get; set; }
 }
+
+public class DirectWriteResponse
+{
+    [JsonPropertyName("blobId")]
+    public string BlobId { get; set; } = "";
+    [JsonPropertyName("size")]
+    public long Size { get; set; }
+    [JsonPropertyName("type")]
+    public string Type { get; set; } = "";
+}

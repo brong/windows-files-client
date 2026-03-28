@@ -20,7 +20,8 @@ class FileNode:
 
     __slots__ = (
         "id", "parent_id", "blob_id", "name", "type", "size",
-        "created", "modified", "role", "my_rights",
+        "created", "modified", "accessed", "role", "my_rights",
+        "executable", "is_subscribed", "share_with",
     )
 
     def __init__(self, data: dict):
@@ -32,9 +33,13 @@ class FileNode:
         self.size: int = data.get("size") or 0
         self.created: datetime | None = _parse_dt(data.get("created"))
         self.modified: datetime | None = _parse_dt(data.get("modified"))
+        self.accessed: datetime | None = _parse_dt(data.get("accessed"))
         self.role: str | None = data.get("role")
         rights = data.get("myRights")
         self.my_rights: dict | None = rights
+        self.executable: bool = data.get("executable", False)
+        self.is_subscribed: bool = data.get("isSubscribed", True)
+        self.share_with: dict | None = data.get("shareWith")
 
     @property
     def is_folder(self) -> bool:
@@ -85,6 +90,12 @@ class JmapClient:
         self.download_url = session["downloadUrl"]
         self.event_source_url = session.get("eventSourceUrl", "")
         self.capabilities = session.get("capabilities", {})
+        self.accounts = session.get("accounts", {})
+
+        # Parse FileNode capability fields
+        self.web_write_url_template: str | None = None
+        self.web_url_template: str | None = None
+        self.web_trash_url: str | None = None
 
         # Find the FileNode capability and primary account
         primary = session.get("primaryAccounts", {})
@@ -96,6 +107,14 @@ class JmapClient:
             self.account_id = primary[CAP_FILENODE_DEV]
         else:
             raise RuntimeError("Server does not support FileNode capability")
+
+        # Parse FileNode capability fields from account capabilities
+        acct = self.accounts.get(self.account_id, {})
+        acct_caps = acct.get("accountCapabilities", {})
+        fn_cap = acct_caps.get(self.filenode_using, {})
+        self.web_write_url_template = fn_cap.get("webWriteUrlTemplate")
+        self.web_url_template = fn_cap.get("webUrlTemplate")
+        self.web_trash_url = fn_cap.get("webTrashUrl")
 
         log.info("Connected: account=%s, capability=%s", self.account_id, self.filenode_using)
 
@@ -172,7 +191,8 @@ class JmapClient:
         batch_size = 1024
         properties = [
             "id", "parentId", "blobId", "name", "type", "size",
-            "created", "modified", "role", "myRights",
+            "created", "modified", "accessed", "role", "myRights",
+            "executable", "isSubscribed", "shareWith",
         ]
         for i in range(0, len(all_ids), batch_size):
             batch = all_ids[i:i + batch_size]
@@ -217,7 +237,8 @@ class JmapClient:
             return []
         properties = [
             "id", "parentId", "blobId", "name", "type", "size",
-            "created", "modified", "role", "myRights",
+            "created", "modified", "accessed", "role", "myRights",
+            "executable", "isSubscribed", "shareWith",
         ]
         responses = await self._call([
             ["FileNode/get", {
@@ -344,37 +365,69 @@ class JmapClient:
 
     async def replace_file(self, node_id: str, parent_id: str, name: str,
                            data: bytes, content_type: str | None = None) -> FileNode:
-        """Replace a file's content by destroying and re-creating with onExists:'replace'."""
+        """Replace a file's content via blobId update (v10: blobId is mutable).
+
+        The node ID stays the same — no destroy+create needed.
+        """
         if content_type is None:
             content_type = mimetypes.guess_type(name)[0] or "application/octet-stream"
         blob_id = await self.upload_blob(data, content_type)
+        now = datetime.now(timezone.utc)
+        await self.update_file_content(node_id, blob_id, content_type, now)
+        # Return a FileNode with known values (node ID unchanged)
+        return FileNode({
+            "id": node_id,
+            "parentId": parent_id,
+            "name": name,
+            "blobId": blob_id,
+            "type": content_type,
+            "size": len(data),
+            "modified": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        })
+
+    async def update_file_content(self, node_id: str, blob_id: str,
+                                   content_type: str | None = None,
+                                   modified: datetime | None = None) -> None:
+        """Update a file's content by setting a new blobId (v10: blobId is mutable).
+
+        The node ID stays the same — no destroy+create needed.
+        """
+        update_fields: dict = {"blobId": blob_id}
+        if content_type is not None:
+            update_fields["type"] = content_type
+        if modified is not None:
+            update_fields["modified"] = modified.strftime("%Y-%m-%dT%H:%M:%SZ")
+        else:
+            # Client-managed timestamps: null tells server to use current time
+            update_fields["modified"] = None
+
         responses = await self._call([
             ["FileNode/set", {
                 "accountId": self.account_id,
-                "onExists": "replace",
-                "destroy": [node_id],
-                "create": {
-                    "c0": {
-                        "parentId": parent_id,
-                        "name": name,
-                        "blobId": blob_id,
-                        "type": content_type,
-                    }
+                "update": {
+                    node_id: update_fields,
                 },
             }, "s0"],
         ])
         _, result, _ = responses[0]
-        created = result.get("created", {}).get("c0")
-        if not created:
-            err = result.get("notCreated", {}).get("c0", {})
-            raise RuntimeError(f"FileNode/set replace failed: {err}")
-        created.setdefault("parentId", parent_id)
-        created.setdefault("name", name)
-        created.setdefault("blobId", blob_id)
-        created.setdefault("type", content_type)
-        created.setdefault("size", len(data))
+        if node_id in result.get("notUpdated", {}):
+            err = result["notUpdated"][node_id]
+            raise RuntimeError(f"FileNode/set update failed: {err}")
         self.state = result.get("newState", self.state)
-        return FileNode(created)
+
+    async def direct_write(self, node_id: str, data: bytes,
+                           content_type: str = "application/octet-stream") -> dict:
+        """Direct HTTP Write: PUT to webWriteUrlTemplate/{id}.
+
+        Returns dict with blobId, size, type. Only for small files (< 16 MB).
+        """
+        if not self.web_write_url_template:
+            raise RuntimeError("Server does not support direct HTTP write")
+        url = self.web_write_url_template.replace("{id}", node_id)
+        resp = await self._http.put(url, content=data,
+                                     headers={"Content-Type": content_type})
+        resp.raise_for_status()
+        return resp.json()
 
     def _blob_url(self, blob_id: str) -> str:
         return (self.download_url

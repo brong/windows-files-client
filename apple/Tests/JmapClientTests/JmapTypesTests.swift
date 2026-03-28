@@ -5,15 +5,15 @@ import Testing
 @Test func testFileNodeIsFolder() {
     let folder = FileNode(
         id: "M1", parentId: "M0", blobId: nil, name: "Documents",
-        type: nil, size: nil, created: nil, modified: nil,
-        role: nil, myRights: nil
+        type: nil, size: nil, created: nil, modified: nil, accessed: nil,
+        role: nil, executable: nil, isSubscribed: nil, myRights: nil, shareWith: nil
     )
     #expect(folder.isFolder == true)
 
     let file = FileNode(
         id: "M2", parentId: "M0", blobId: "B1", name: "test.txt",
-        type: "text/plain", size: 100, created: nil, modified: nil,
-        role: nil, myRights: nil
+        type: "text/plain", size: 100, created: nil, modified: nil, accessed: nil,
+        role: nil, executable: nil, isSubscribed: nil, myRights: nil, shareWith: nil
     )
     #expect(file.isFolder == false)
 }
@@ -21,16 +21,16 @@ import Testing
 @Test func testFileNodeRoles() {
     let home = FileNode(
         id: "M1", parentId: nil, blobId: nil, name: "Home",
-        type: nil, size: nil, created: nil, modified: nil,
-        role: "home", myRights: nil
+        type: nil, size: nil, created: nil, modified: nil, accessed: nil,
+        role: "home", executable: nil, isSubscribed: nil, myRights: nil, shareWith: nil
     )
     #expect(home.isHome == true)
     #expect(home.isTrash == false)
 
     let trash = FileNode(
         id: "M2", parentId: nil, blobId: nil, name: "Trash",
-        type: nil, size: nil, created: nil, modified: nil,
-        role: "trash", myRights: nil
+        type: nil, size: nil, created: nil, modified: nil, accessed: nil,
+        role: "trash", executable: nil, isSubscribed: nil, myRights: nil, shareWith: nil
     )
     #expect(trash.isTrash == true)
     #expect(trash.isHome == false)

@@ -162,6 +162,32 @@ public class JmapSession
             return webUrlTemplate.GetString();
         return null;
     }
+
+    public string? GetWebWriteUrlTemplate(string accountId)
+    {
+        if (!Accounts.TryGetValue(accountId, out var account))
+            return null;
+        if (!account.AccountCapabilities.TryGetValue(
+            "https://www.fastmail.com/dev/filenode", out var fileNodeCap))
+            return null;
+        if (fileNodeCap.TryGetProperty("webWriteUrlTemplate", out var webWriteUrlTemplate)
+            && webWriteUrlTemplate.ValueKind == JsonValueKind.String)
+            return webWriteUrlTemplate.GetString();
+        return null;
+    }
+
+    public bool? GetMayCreateTopLevelFileNode(string accountId)
+    {
+        if (!Accounts.TryGetValue(accountId, out var account))
+            return null;
+        if (!account.AccountCapabilities.TryGetValue(
+            "https://www.fastmail.com/dev/filenode", out var fileNodeCap))
+            return null;
+        if (fileNodeCap.TryGetProperty("mayCreateTopLevelFileNode", out var val)
+            && (val.ValueKind == JsonValueKind.True || val.ValueKind == JsonValueKind.False))
+            return val.GetBoolean();
+        return null;
+    }
 }
 
 public class JmapAccount

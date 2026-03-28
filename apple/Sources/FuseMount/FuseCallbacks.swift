@@ -254,14 +254,23 @@ func fuseRelease(_ path: UnsafePointer<CChar>?,
     if let newNode = fs.uploadAndReplace(parentId: parentId, name: name,
                                           data: data, existingNodeId: existingServerNodeId) {
         fs.lock.lock()
-        // Remove old local node entry
-        if let old = fs.nodes.removeValue(forKey: nodeId),
-           let pid = old.parentId {
-            fs.children[pid]?.removeAll { $0 == nodeId }
+        if newNode.id != nodeId {
+            // New node ID (new file creation) — remove old, add new
+            if let old = fs.nodes.removeValue(forKey: nodeId),
+               let pid = old.parentId {
+                fs.children[pid]?.removeAll { $0 == nodeId }
+            }
+            fs.blobCache.removeValue(forKey: nodeId)
+            let effectiveParentId = newNode.parentId ?? parentId
+            if !effectiveParentId.isEmpty,
+               !(fs.children[effectiveParentId]?.contains(newNode.id) ?? false) {
+                fs.children[effectiveParentId, default: []].append(newNode.id)
+            }
+        } else {
+            // Same node ID (blobId update) — just update in place
+            fs.blobCache.removeValue(forKey: nodeId)
         }
-        fs.blobCache.removeValue(forKey: nodeId)
 
-        // Add new node — use our known name/parentId since server response is partial
         let entry = FileNodeFuseFS.NodeEntry(
             nodeId: newNode.id, parentId: newNode.parentId ?? parentId,
             name: newNode.name ?? name, blobId: newNode.blobId,
@@ -270,10 +279,6 @@ func fuseRelease(_ path: UnsafePointer<CChar>?,
             modified: newNode.modified, mayWrite: newNode.myRights?.mayWrite ?? true
         )
         fs.nodes[newNode.id] = entry
-        let effectiveParentId = newNode.parentId ?? parentId
-        if !effectiveParentId.isEmpty {
-            fs.children[effectiveParentId, default: []].append(newNode.id)
-        }
         fs.blobCache[newNode.id] = data
         if let bid = newNode.blobId {
             fs.writeDiskCache(blobId: bid, data: data)
