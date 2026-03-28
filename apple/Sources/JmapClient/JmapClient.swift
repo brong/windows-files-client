@@ -33,6 +33,15 @@ public actor JmapClient {
     /// Optional hook called with (URL, statusCode, responseData) after each JMAP API response.
     nonisolated public let responseDidReceive: (@Sendable (URL, Int, Data) -> Void)?
 
+    /// Pending accessed timestamps to piggyback on the next JMAP call.
+    private var pendingAccessed: [String: Date] = [:]
+    /// Fallback timer: flushes pending accessed timestamps if no JMAP call happens within 5 minutes.
+    private var accessedFlushTask: Task<Void, Never>?
+    private let accessedFlushInterval: TimeInterval = 300 // 5 minutes
+    /// The accountId to use for piggybacked accessed updates.
+    /// Set by callers via recordAccess.
+    private var accessedAccountId: String?
+
     // MARK: - JMAP Method Calls
 
     /// Execute a batch of JMAP method calls.
@@ -45,10 +54,35 @@ public actor JmapClient {
             throw JmapError.invalidResponse
         }
 
-        let effectiveCapabilities = capabilities ?? buildCapabilities(session: session)
+        var effectiveCapabilities = capabilities ?? buildCapabilities(session: session)
+        var allMethodCalls = methodCalls
+
+        // Piggyback pending accessed timestamps
+        let accessedBatch = drainPendingAccessed()
+        if !accessedBatch.isEmpty, let accountId = accessedAccountId {
+            let formatter = ISO8601DateFormatter()
+            var updateFields: [String: AnyCodable] = [:]
+            for (nodeId, date) in accessedBatch {
+                updateFields[nodeId] = AnyCodable(["accessed": AnyCodable(formatter.string(from: date))])
+            }
+            allMethodCalls.append(JmapMethodCall(
+                name: "FileNode/set",
+                args: [
+                    "accountId": AnyCodable(accountId),
+                    "update": AnyCodable(updateFields),
+                ],
+                callId: "_accessed"
+            ))
+            // Ensure FileNode capability is included
+            if let fileNodeURI = session.fileNodeCapabilityURI,
+               !effectiveCapabilities.contains(fileNodeURI) {
+                effectiveCapabilities.append(fileNodeURI)
+            }
+        }
+
         let body = JmapRequestBody(
             using: effectiveCapabilities,
-            methodCalls: methodCalls.map { $0.asArray() }
+            methodCalls: allMethodCalls.map { $0.asArray() }
         )
 
         var request = URLRequest(url: apiURL)
@@ -63,7 +97,16 @@ public actor JmapClient {
         try checkHTTPStatus(httpResponse, data: data)
 
         let response = try decoder.decode(JmapResponse.self, from: data)
-        return response.methodResponses
+
+        // Filter out the piggybacked response — callers don't need it
+        if accessedBatch.isEmpty {
+            return response.methodResponses
+        } else {
+            return response.methodResponses.filter { entry in
+                guard entry.count >= 3 else { return true }
+                return entry[2].stringValue != "_accessed"
+            }
+        }
     }
 
     // MARK: - FileNode Operations
@@ -922,6 +965,50 @@ public actor JmapClient {
         }
 
         return convertedBlobId
+    }
+
+    /// Record that a file was accessed. The timestamp will be piggybacked
+    /// onto the next outgoing JMAP call, or flushed after 5 minutes.
+    public func recordAccess(accountId: String, nodeId: String, at date: Date = Date()) {
+        pendingAccessed[nodeId] = date
+        accessedAccountId = accountId
+        resetAccessedFlushTimer()
+    }
+
+    /// Reset the 5-minute fallback timer.
+    private func resetAccessedFlushTimer() {
+        accessedFlushTask?.cancel()
+        accessedFlushTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(300 * 1_000_000_000))
+            guard let self = self, !Task.isCancelled else { return }
+            await self.flushPendingAccessed()
+        }
+    }
+
+    /// Flush pending accessed timestamps as a standalone call.
+    private func flushPendingAccessed() async {
+        guard !pendingAccessed.isEmpty, let accountId = accessedAccountId else { return }
+        let batch = pendingAccessed
+        pendingAccessed.removeAll()
+        do {
+            try await batchUpdateAccessed(accountId: accountId, accessed: batch)
+        } catch {
+            // Re-add on failure so they'll be retried
+            for (nodeId, date) in batch {
+                if pendingAccessed[nodeId] == nil {
+                    pendingAccessed[nodeId] = date
+                }
+            }
+        }
+    }
+
+    /// Drain pending accessed timestamps for piggybacking.
+    private func drainPendingAccessed() -> [String: Date] {
+        guard !pendingAccessed.isEmpty else { return [:] }
+        let batch = pendingAccessed
+        pendingAccessed.removeAll()
+        accessedFlushTask?.cancel()
+        return batch
     }
 
     /// Batch-update accessed timestamps for multiple nodes.

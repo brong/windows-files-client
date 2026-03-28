@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using FileNodeClient.Jmap.Models;
@@ -27,6 +28,8 @@ public class AccountScopedJmapClient : IJmapClient
     private string? _webUrlTemplate;
     private bool _webWriteUrlTemplateResolved;
     private string? _webWriteUrlTemplate;
+    private readonly ConcurrentDictionary<string, DateTime> _pendingAccessed = new();
+    private Timer? _accessedFlushTimer;
     private static readonly HashSet<string> SupportedDigests = ["sha", "sha-256"];
 
     public AccountScopedJmapClient(JmapClient parent, string accountId)
@@ -150,7 +153,32 @@ public class AccountScopedJmapClient : IJmapClient
     private async Task<JsonElement> CallAsync(string[] capabilities, string method, object args, CancellationToken ct)
     {
         var callId = NextCallId();
-        var request = JmapRequest.Create(capabilities, (method, args, callId));
+
+        // Check for pending accessed timestamps to piggyback
+        var accessedBatch = DrainPendingAccessed();
+
+        JmapRequest request;
+        if (accessedBatch.Count > 0)
+        {
+            var accessedCallId = "_accessed";
+            var accessedUpdate = new Dictionary<string, object>();
+            foreach (var (nodeId, time) in accessedBatch)
+                accessedUpdate[nodeId] = new { accessed = time.ToUniversalTime() };
+
+            // Ensure FileNode capability is included
+            var caps = capabilities.Contains(JmapClient.FileNodeCapability)
+                ? capabilities
+                : capabilities.Append(JmapClient.FileNodeCapability).ToArray();
+
+            request = JmapRequest.Create(caps,
+                (method, args, callId),
+                ("FileNode/set", new { accountId = _accountId, update = accessedUpdate }, accessedCallId));
+        }
+        else
+        {
+            request = JmapRequest.Create(capabilities, (method, args, callId));
+        }
+
         var json = JsonSerializer.Serialize(request, JmapSerializerOptions.Default);
         var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
         var httpResponse = await Http.PostAsync(Session.ApiUrl, content, ct);
@@ -162,6 +190,7 @@ public class AccountScopedJmapClient : IJmapClient
         if (response.MethodResponses.Length == 0)
             throw new InvalidOperationException($"No response for {method} call");
 
+        // Return only the primary response (index 0), ignore the piggybacked accessed response
         var entry = response.MethodResponses[0];
         var respMethod = entry[0].GetString() ?? "";
         if (respMethod == "error")
@@ -364,6 +393,17 @@ public class AccountScopedJmapClient : IJmapClient
                 ["accountId"] = JsonSerializer.SerializeToElement(_accountId),
                 ["ids"] = JsonSerializer.SerializeToElement<string[]?>(null),
             }, quotaCallId));
+        }
+
+        // Piggyback pending accessed timestamps
+        var accessedBatch = DrainPendingAccessed();
+        if (accessedBatch.Count > 0)
+        {
+            var accessedCallId = "_accessed";
+            var accessedUpdate = new Dictionary<string, object>();
+            foreach (var (nodeId, time) in accessedBatch)
+                accessedUpdate[nodeId] = new { accessed = time.ToUniversalTime() };
+            calls.Add(("FileNode/set", (object)new { accountId = _accountId, update = accessedUpdate }, accessedCallId));
         }
 
         var request = JmapRequest.Create(capabilities, calls.ToArray());
@@ -786,6 +826,51 @@ public class AccountScopedJmapClient : IJmapClient
         // Ignore individual notUpdated errors — node may have been deleted
     }
 
+    public void RecordAccess(string nodeId)
+    {
+        _pendingAccessed[nodeId] = DateTime.UtcNow;
+        ResetAccessedFlushTimer();
+    }
+
+    private void ResetAccessedFlushTimer()
+    {
+        _accessedFlushTimer?.Dispose();
+        _accessedFlushTimer = new Timer(async _ =>
+        {
+            try { await FlushPendingAccessedAsync(); }
+            catch { /* best effort */ }
+        }, null, TimeSpan.FromMinutes(5), Timeout.InfiniteTimeSpan);
+    }
+
+    private async Task FlushPendingAccessedAsync(CancellationToken ct = default)
+    {
+        var batch = DrainPendingAccessed();
+        if (batch.Count == 0) return;
+        try
+        {
+            await BatchUpdateAccessedAsync(batch, ct);
+        }
+        catch
+        {
+            // Re-add on failure
+            foreach (var (nodeId, time) in batch)
+                _pendingAccessed.TryAdd(nodeId, time);
+        }
+    }
+
+    private Dictionary<string, DateTime> DrainPendingAccessed()
+    {
+        var batch = new Dictionary<string, DateTime>();
+        foreach (var key in _pendingAccessed.Keys.ToArray())
+        {
+            if (_pendingAccessed.TryRemove(key, out var time))
+                batch[key] = time;
+        }
+        if (batch.Count > 0)
+            _accessedFlushTimer?.Dispose();
+        return batch;
+    }
+
     public async Task DestroyFileNodeAsync(string nodeId, CancellationToken ct = default)
     {
         var setResponse = await CallAsync<SetResponse>(
@@ -945,7 +1030,12 @@ public class AccountScopedJmapClient : IJmapClient
 
     /// <summary>
     /// AccountScopedJmapClient does not own the parent's HttpClient.
-    /// Dispose is a no-op.
+    /// Disposes the flush timer and best-effort flushes pending accessed timestamps.
     /// </summary>
-    public void Dispose() { }
+    public void Dispose()
+    {
+        _accessedFlushTimer?.Dispose();
+        // Best-effort flush
+        try { FlushPendingAccessedAsync().GetAwaiter().GetResult(); } catch { }
+    }
 }

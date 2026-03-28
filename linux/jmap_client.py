@@ -75,6 +75,10 @@ class JmapClient:
         self.capabilities: dict = {}
         self.state: str | None = None
 
+        # Piggybackable accessed-timestamp queue
+        self._pending_accessed: dict[str, datetime] = {}
+        self._accessed_flush_task: object | None = None  # trio/asyncio cancel scope
+
     async def connect(self):
         """Fetch JMAP session and discover endpoints."""
         self._http = httpx.AsyncClient(
@@ -121,19 +125,61 @@ class JmapClient:
         log.info("Connected: account=%s, capability=%s", self.account_id, self.filenode_using)
 
     async def close(self):
+        # Flush pending accessed timestamps before closing
+        try:
+            await self.flush_pending_accessed()
+        except Exception:
+            pass
         if self._http:
             await self._http.aclose()
             self._http = None
 
     async def _call(self, method_calls: list[list]) -> list:
-        """Execute a JMAP request and return methodResponses."""
-        body = {"using": [CAP_CORE, self.filenode_using], "methodCalls": method_calls}
+        """Execute a JMAP request and return methodResponses.
+
+        Piggybacks any pending accessed timestamps onto the request.
+        """
+        body = {"using": [CAP_CORE, self.filenode_using], "methodCalls": list(method_calls)}
         if CAP_BLOB in self.capabilities:
             body["using"].append(CAP_BLOB)
 
+        # Piggyback pending accessed timestamps
+        piggybacked = False
+        if self._pending_accessed:
+            update = {}
+            for node_id, accessed_time in self._pending_accessed.items():
+                update[node_id] = {"accessed": accessed_time.strftime("%Y-%m-%dT%H:%M:%SZ")}
+            body["methodCalls"].append(
+                ["FileNode/set", {
+                    "accountId": self.account_id,
+                    "update": update,
+                }, "_accessed"]
+            )
+            # Ensure FileNode capability is in using
+            if self.filenode_using not in body["using"]:
+                body["using"].append(self.filenode_using)
+            self._pending_accessed.clear()
+            piggybacked = True
+
         resp = await self._http.post(self.api_url, json=body)
         resp.raise_for_status()
-        return resp.json()["methodResponses"]
+        responses = resp.json()["methodResponses"]
+
+        # Filter out piggybacked response — update state token if present
+        if piggybacked:
+            filtered = []
+            for r in responses:
+                name, result, tag = r
+                if tag == "_accessed":
+                    # Grab state token update from the piggybacked response
+                    new_state = result.get("newState")
+                    if new_state:
+                        self.state = new_state
+                else:
+                    filtered.append(r)
+            return filtered
+
+        return responses
 
     async def find_home_and_trash(self) -> tuple[str, str | None]:
         """Find the home (sync root) and trash node IDs."""
@@ -567,6 +613,27 @@ class JmapClient:
         # Best-effort — ignore errors
         _, result, _ = responses[0]
         self.state = result.get("newState", self.state)
+
+    def record_access(self, node_id: str, at: datetime | None = None) -> None:
+        """Record that a file was accessed. Will be piggybacked on the next JMAP call."""
+        self._pending_accessed[node_id] = at or datetime.now(timezone.utc)
+
+    async def flush_pending_accessed(self) -> None:
+        """Flush any pending accessed timestamps as a standalone call.
+
+        Called by a periodic timer (every 5 minutes) or on shutdown.
+        """
+        if not self._pending_accessed:
+            return
+        batch = dict(self._pending_accessed)
+        self._pending_accessed.clear()
+        try:
+            await self.batch_update_accessed(batch)
+        except Exception:
+            # Re-add on failure so they'll be retried
+            for node_id, accessed_time in batch.items():
+                if node_id not in self._pending_accessed:
+                    self._pending_accessed[node_id] = accessed_time
 
     async def direct_write(self, node_id: str, data: bytes,
                            content_type: str = "application/octet-stream") -> dict:

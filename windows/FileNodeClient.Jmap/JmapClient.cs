@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text.Json;
@@ -14,6 +15,8 @@ public class JmapClient : IJmapClient
     private JmapSession? _session;
     private JmapContext? _context;
     private int _nextCallId;
+    private readonly ConcurrentDictionary<string, DateTime> _pendingAccessed = new();
+    private Timer? _accessedFlushTimer;
 
     public const string CoreCapability = "urn:ietf:params:jmap:core";
     public const string FileNodeCapability = "https://www.fastmail.com/dev/filenode";
@@ -176,7 +179,32 @@ public class JmapClient : IJmapClient
     private async Task<JsonElement> CallAsync(string[] capabilities, string method, object args, CancellationToken ct)
     {
         var callId = "c" + Interlocked.Increment(ref _nextCallId);
-        var request = JmapRequest.Create(capabilities, (method, args, callId));
+
+        // Check for pending accessed timestamps to piggyback
+        var accessedBatch = DrainPendingAccessed();
+
+        JmapRequest request;
+        if (accessedBatch.Count > 0)
+        {
+            var accessedCallId = "_accessed";
+            var accessedUpdate = new Dictionary<string, object>();
+            foreach (var (nodeId, time) in accessedBatch)
+                accessedUpdate[nodeId] = new { accessed = time.ToUniversalTime() };
+
+            // Ensure FileNode capability is included
+            var caps = capabilities.Contains(FileNodeCapability)
+                ? capabilities
+                : capabilities.Append(FileNodeCapability).ToArray();
+
+            request = JmapRequest.Create(caps,
+                (method, args, callId),
+                ("FileNode/set", new { accountId = AccountId, update = accessedUpdate }, accessedCallId));
+        }
+        else
+        {
+            request = JmapRequest.Create(capabilities, (method, args, callId));
+        }
+
         var json = JsonSerializer.Serialize(request, JmapSerializerOptions.Default);
         var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
         var httpResponse = await _http.PostAsync(Session.ApiUrl, content, ct);
@@ -188,6 +216,7 @@ public class JmapClient : IJmapClient
         if (response.MethodResponses.Length == 0)
             throw new InvalidOperationException($"No response for {method} call");
 
+        // Return only the primary response (index 0), ignore the piggybacked accessed response
         var entry = response.MethodResponses[0];
         var respMethod = entry[0].GetString() ?? "";
         if (respMethod == "error")
@@ -1053,6 +1082,51 @@ public class JmapClient : IJmapClient
         // Ignore individual notUpdated errors — node may have been deleted
     }
 
+    public void RecordAccess(string nodeId)
+    {
+        _pendingAccessed[nodeId] = DateTime.UtcNow;
+        ResetAccessedFlushTimer();
+    }
+
+    private void ResetAccessedFlushTimer()
+    {
+        _accessedFlushTimer?.Dispose();
+        _accessedFlushTimer = new Timer(async _ =>
+        {
+            try { await FlushPendingAccessedAsync(); }
+            catch { /* best effort */ }
+        }, null, TimeSpan.FromMinutes(5), Timeout.InfiniteTimeSpan);
+    }
+
+    private async Task FlushPendingAccessedAsync(CancellationToken ct = default)
+    {
+        var batch = DrainPendingAccessed();
+        if (batch.Count == 0) return;
+        try
+        {
+            await BatchUpdateAccessedAsync(batch, ct);
+        }
+        catch
+        {
+            // Re-add on failure
+            foreach (var (nodeId, time) in batch)
+                _pendingAccessed.TryAdd(nodeId, time);
+        }
+    }
+
+    private Dictionary<string, DateTime> DrainPendingAccessed()
+    {
+        var batch = new Dictionary<string, DateTime>();
+        foreach (var key in _pendingAccessed.Keys.ToArray())
+        {
+            if (_pendingAccessed.TryRemove(key, out var time))
+                batch[key] = time;
+        }
+        if (batch.Count > 0)
+            _accessedFlushTimer?.Dispose();
+        return batch;
+    }
+
     public async Task DestroyFileNodeAsync(string nodeId, CancellationToken ct = default)
     {
         var setResponse = await CallAsync<SetResponse>(
@@ -1324,6 +1398,9 @@ public class JmapClient : IJmapClient
 
     public void Dispose()
     {
+        _accessedFlushTimer?.Dispose();
+        // Best-effort flush
+        try { FlushPendingAccessedAsync().GetAwaiter().GetResult(); } catch { }
         _http.Dispose();
     }
 }

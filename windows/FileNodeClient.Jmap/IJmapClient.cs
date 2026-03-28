@@ -80,6 +80,11 @@ public interface IJmapClient : IDisposable
     /// Batch-update accessed timestamps for multiple nodes in a single FileNode/set call.
     /// </summary>
     Task BatchUpdateAccessedAsync(Dictionary<string, DateTime> accessed, CancellationToken ct = default);
+    /// <summary>
+    /// Record that a file was accessed. The timestamp will be piggybacked
+    /// onto the next outgoing JMAP call, or flushed after 5 minutes.
+    /// </summary>
+    void RecordAccess(string nodeId);
     Task DestroyFileNodeAsync(string nodeId, CancellationToken ct = default);
     IAsyncEnumerable<string> WatchForChangesAsync(CancellationToken ct = default);
     /// <summary>
