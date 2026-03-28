@@ -537,7 +537,8 @@ public final class FileNodeFuseFS: @unchecked Sendable {
             do {
                 try await client.updateNode(
                     accountId: acctId, nodeId: nodeId,
-                    parentId: newParentId, name: newName)
+                    parentId: newParentId, name: newName,
+                    modified: Date())
                 return true
             } catch {
                 return false

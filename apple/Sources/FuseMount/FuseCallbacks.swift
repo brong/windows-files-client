@@ -480,6 +480,7 @@ func fuseRename(_ from: UnsafePointer<CChar>?, _ to: UnsafePointer<CChar>?) -> I
 
     fs.lock.lock()
     fs.nodes[nodeId]?.name = newName
+    fs.nodes[nodeId]?.modified = Date()
     if parentChanged {
         if let oldPid = oldParentId {
             fs.children[oldPid]?.removeAll { $0 == nodeId }
@@ -490,7 +491,7 @@ func fuseRename(_ from: UnsafePointer<CChar>?, _ to: UnsafePointer<CChar>?) -> I
             let newEntry = FileNodeFuseFS.NodeEntry(
                 nodeId: entry.nodeId, parentId: newParentId, name: newName,
                 blobId: entry.blobId, size: entry.size, isFolder: entry.isFolder,
-                type: entry.type, created: entry.created, modified: entry.modified,
+                type: entry.type, created: entry.created, modified: Date(),
                 mayWrite: entry.mayWrite
             )
             fs.nodes[nodeId] = newEntry

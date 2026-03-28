@@ -456,7 +456,8 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                     try await client.updateNode(
                         accountId: accountId,
                         nodeId: currentNodeId,
-                        name: desanitizeFilename(item.filename)
+                        name: desanitizeFilename(item.filename),
+                        modified: Date()
                     )
                 }
 
@@ -470,13 +471,15 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                             accountId: accountId,
                             nodeId: currentNodeId,
                             parentId: newParentId,
+                            modified: Date(),
                             onExists: "rename"
                         )
                     } else {
                         try await client.updateNode(
                             accountId: accountId,
                             nodeId: currentNodeId,
-                            parentId: newParentId
+                            parentId: newParentId,
+                            modified: Date()
                         )
                     }
                 }

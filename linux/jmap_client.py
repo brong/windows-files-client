@@ -1,5 +1,7 @@
 """JMAP client for FileNode API, using httpx (works with trio and asyncio)."""
 
+import base64
+import hashlib
 import logging
 import mimetypes
 from datetime import datetime, timezone
@@ -273,6 +275,137 @@ class JmapClient:
         result = resp.json()
         return result["blobId"]
 
+    async def upload_blob_delta(self, data: bytes, content_type: str,
+                                old_blob_id: str | None = None) -> str:
+        """Upload a blob using delta-aware chunking.
+
+        Queries the server for the old blob's chunk structure, compares
+        SHA1 hashes, and only uploads changed chunks. Falls back to full
+        upload if no old blob or server doesn't support chunks.
+        """
+        # No old blob or small file — use simple upload
+        if old_blob_id is None or len(data) < 5_000_000:
+            return await self.upload_blob(data, content_type)
+
+        # Query server for old blob's chunk structure
+        server_chunks = None
+        try:
+            body = {
+                "using": [CAP_CORE, CAP_BLOB],
+                "methodCalls": [
+                    ["Blob/get", {
+                        "accountId": self.account_id,
+                        "ids": [old_blob_id],
+                        "properties": ["id", "size", "chunks"],
+                    }, "b0"],
+                ],
+            }
+            resp = await self._http.post(self.api_url, json=body)
+            resp.raise_for_status()
+            responses = resp.json()["methodResponses"]
+            _, result, _ = responses[0]
+            blob_list = result.get("list", [])
+            if blob_list and "chunks" in blob_list[0]:
+                chunks = blob_list[0]["chunks"]
+                if chunks:
+                    server_chunks = [
+                        (c["blobId"], c["size"], c.get("digest:sha"))
+                        for c in chunks
+                    ]
+        except Exception:
+            pass  # Fall back to full upload
+
+        if not server_chunks:
+            return await self.upload_blob(data, content_type)
+
+        # Delta upload: compare local chunks against server chunks
+        url = self.upload_url.replace("{accountId}", self.account_id)
+        chunk_blob_ids: list[tuple[str, str]] = []  # (blobId, sha1_b64)
+        overall_hash = hashlib.sha1()
+        offset = 0
+        reused = 0
+
+        for server_blob_id, server_size, server_digest in server_chunks:
+            if offset >= len(data):
+                break
+            chunk_size = min(server_size, len(data) - offset)
+            chunk_data = data[offset:offset + chunk_size]
+
+            local_sha1 = hashlib.sha1(chunk_data).digest()
+            local_sha1_b64 = base64.b64encode(local_sha1).decode()
+            overall_hash.update(chunk_data)
+
+            if server_digest and local_sha1_b64 == server_digest:
+                # Reuse server chunk
+                chunk_blob_ids.append((server_blob_id, local_sha1_b64))
+                reused += 1
+            else:
+                # Upload new chunk
+                resp = await self._http.post(
+                    url, content=chunk_data,
+                    headers={"Content-Type": "application/octet-stream"})
+                resp.raise_for_status()
+                blob_id = resp.json()["blobId"]
+                chunk_blob_ids.append((blob_id, local_sha1_b64))
+
+            offset += chunk_size
+
+        # Upload any remaining data beyond server's chunk count
+        max_chunk = 64 * 1024 * 1024
+        while offset < len(data):
+            chunk_size = min(max_chunk, len(data) - offset)
+            chunk_data = data[offset:offset + chunk_size]
+
+            local_sha1 = hashlib.sha1(chunk_data).digest()
+            local_sha1_b64 = base64.b64encode(local_sha1).decode()
+            overall_hash.update(chunk_data)
+
+            resp = await self._http.post(
+                url, content=chunk_data,
+                headers={"Content-Type": "application/octet-stream"})
+            resp.raise_for_status()
+            blob_id = resp.json()["blobId"]
+            chunk_blob_ids.append((blob_id, local_sha1_b64))
+            offset += chunk_size
+
+        log.info("Delta upload: reused %d/%d chunks", reused, len(chunk_blob_ids))
+
+        if len(chunk_blob_ids) == 1:
+            return chunk_blob_ids[0][0]
+
+        # Combine chunks via Blob/upload
+        overall_sha1_b64 = base64.b64encode(overall_hash.digest()).decode()
+
+        data_sources = []
+        for blob_id, sha1_b64 in chunk_blob_ids:
+            obj = {"blobId": blob_id, "digest:sha": sha1_b64}
+            data_sources.append(obj)
+
+        create_obj = {
+            "data": data_sources,
+            "type": content_type,
+            "digest:sha": overall_sha1_b64,
+        }
+
+        body = {
+            "using": [CAP_CORE, CAP_BLOB],
+            "methodCalls": [
+                ["Blob/upload", {
+                    "accountId": self.account_id,
+                    "create": {"combined": create_obj},
+                }, "b0"],
+            ],
+        }
+        resp = await self._http.post(self.api_url, json=body)
+        resp.raise_for_status()
+        responses = resp.json()["methodResponses"]
+        _, result, _ = responses[0]
+        created = result.get("created", {}).get("combined")
+        if not created:
+            err = result.get("notCreated", {}).get("combined", {})
+            raise RuntimeError(f"Blob/upload combine failed: {err}")
+        return created.get("id") or created["blobId"]
+
     async def create_file(self, parent_id: str, name: str, data: bytes,
                           content_type: str | None = None) -> FileNode:
         """Upload blob and create a file node. Returns the new FileNode."""
@@ -364,14 +497,17 @@ class JmapClient:
         self.state = result.get("newState", self.state)
 
     async def replace_file(self, node_id: str, parent_id: str, name: str,
-                           data: bytes, content_type: str | None = None) -> FileNode:
+                           data: bytes, content_type: str | None = None,
+                           old_blob_id: str | None = None) -> FileNode:
         """Replace a file's content via blobId update (v10: blobId is mutable).
 
         The node ID stays the same — no destroy+create needed.
+        When old_blob_id is provided, uses delta-aware chunked upload to
+        skip unchanged chunks and save bandwidth.
         """
         if content_type is None:
             content_type = mimetypes.guess_type(name)[0] or "application/octet-stream"
-        blob_id = await self.upload_blob(data, content_type)
+        blob_id = await self.upload_blob_delta(data, content_type, old_blob_id)
         now = datetime.now(timezone.utc)
         await self.update_file_content(node_id, blob_id, content_type, now)
         # Return a FileNode with known values (node ID unchanged)
@@ -413,6 +549,23 @@ class JmapClient:
         if node_id in result.get("notUpdated", {}):
             err = result["notUpdated"][node_id]
             raise RuntimeError(f"FileNode/set update failed: {err}")
+        self.state = result.get("newState", self.state)
+
+    async def batch_update_accessed(self, accessed: dict[str, datetime]) -> None:
+        """Batch-update accessed timestamps for multiple nodes."""
+        if not accessed:
+            return
+        update = {}
+        for node_id, time in accessed.items():
+            update[node_id] = {"accessed": time.strftime("%Y-%m-%dT%H:%M:%SZ")}
+        responses = await self._call([
+            ["FileNode/set", {
+                "accountId": self.account_id,
+                "update": update,
+            }, "s0"],
+        ])
+        # Best-effort — ignore errors
+        _, result, _ = responses[0]
         self.state = result.get("newState", self.state)
 
     async def direct_write(self, node_id: str, data: bytes,

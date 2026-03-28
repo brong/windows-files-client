@@ -781,6 +781,167 @@ public class JmapClient : IJmapClient
             return created.Id;
     }
 
+    public async Task<string> UploadBlobDeltaAsync(Stream data, string contentType, long totalSize,
+        string? oldBlobId,
+        Action<long>? onProgress = null, CancellationToken ct = default)
+    {
+        // No old blob or no BlobExt → fall back to full chunked upload
+        if (oldBlobId == null || !HasBlobExt)
+            return await UploadBlobChunkedAsync(data, contentType, totalSize, onProgress, ct: ct);
+
+        // Query server for old blob's chunk structure
+        List<(string blobId, long size, string? digestSha)>? serverChunks = null;
+        try
+        {
+            var blobResult = await CallAsync(BlobUsing, "Blob/get", new
+            {
+                accountId = AccountId,
+                ids = new[] { oldBlobId },
+                properties = new[] { "id", "size", "chunks" },
+            }, ct);
+
+            var blobResponse = blobResult.Deserialize<BlobGetResponse>(JmapSerializerOptions.Default);
+            if (blobResponse?.List.Length > 0)
+            {
+                var blob = blobResponse.List[0];
+                if (blob.Chunks != null && blob.Chunks.Length > 0)
+                {
+                    serverChunks = blob.Chunks.Select(c => (c.BlobId, c.Size, c.DigestSha)).ToList();
+                }
+            }
+        }
+        catch
+        {
+            // Blob/get failed — fall back to full upload
+        }
+
+        if (serverChunks == null || serverChunks.Count == 0)
+            return await UploadBlobChunkedAsync(data, contentType, totalSize, onProgress, ct: ct);
+
+        // Delta upload: compare local chunks against server chunks
+        var uploadUrl = Session.GetUploadUrl(AccountId);
+        var hasBlobExt = HasBlobExt;
+        var chunkBlobIds = new List<(string BlobId, string Sha1Base64)>();
+        using var overallHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA1);
+        long totalUploaded = 0;
+        int reusedChunks = 0;
+
+        for (int i = 0; i < serverChunks.Count && totalUploaded < totalSize; i++)
+        {
+            var serverChunk = serverChunks[i];
+            var thisChunkSize = (int)Math.Min(serverChunk.size, totalSize - totalUploaded);
+
+            // Read local chunk data and compute hash
+            var chunkData = new byte[thisChunkSize];
+            int bytesRead = 0;
+            while (bytesRead < thisChunkSize)
+            {
+                var n = await data.ReadAsync(chunkData.AsMemory(bytesRead, thisChunkSize - bytesRead), ct);
+                if (n == 0) break;
+                bytesRead += n;
+            }
+
+            overallHash.AppendData(chunkData, 0, bytesRead);
+            var localSha1 = Convert.ToBase64String(SHA1.HashData(chunkData.AsSpan(0, bytesRead)));
+
+            // Compare: if server has a digest and it matches, reuse the server chunk
+            if (serverChunk.digestSha != null && localSha1 == serverChunk.digestSha)
+            {
+                chunkBlobIds.Add((serverChunk.blobId, localSha1));
+                reusedChunks++;
+                Log.Info($"[DeltaUpload] Chunk {i}: reused (SHA1 match)");
+            }
+            else
+            {
+                // Upload this chunk
+                using var chunkStream = new MemoryStream(chunkData, 0, bytesRead);
+                var chunkContent = new StreamContent(chunkStream);
+                chunkContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
+                using var chunkRequest = new HttpRequestMessage(HttpMethod.Post, uploadUrl) { Content = chunkContent, Version = System.Net.HttpVersion.Version11 };
+                var response = await _http.SendAsync(chunkRequest, ct);
+                response.EnsureSuccessStatusCode();
+                var json = await response.Content.ReadAsStringAsync(ct);
+                var upload = JsonSerializer.Deserialize<UploadResponse>(json, JmapSerializerOptions.Default)
+                    ?? throw new InvalidOperationException("Failed to parse chunk upload response");
+                chunkBlobIds.Add((upload.BlobId, localSha1));
+                Log.Info($"[DeltaUpload] Chunk {i}: uploaded new ({bytesRead} bytes)");
+            }
+
+            totalUploaded += bytesRead;
+            onProgress?.Invoke(totalUploaded);
+        }
+
+        // If there's remaining data beyond the server's chunk count, upload those too
+        while (totalUploaded < totalSize)
+        {
+            var remaining = (int)Math.Min(MaxChunkSize, totalSize - totalUploaded);
+            var chunkData = new byte[remaining];
+            int bytesRead = 0;
+            while (bytesRead < remaining)
+            {
+                var n = await data.ReadAsync(chunkData.AsMemory(bytesRead, remaining - bytesRead), ct);
+                if (n == 0) break;
+                bytesRead += n;
+            }
+
+            overallHash.AppendData(chunkData, 0, bytesRead);
+            var localSha1 = Convert.ToBase64String(SHA1.HashData(chunkData.AsSpan(0, bytesRead)));
+
+            using var chunkStream = new MemoryStream(chunkData, 0, bytesRead);
+            var chunkContent = new StreamContent(chunkStream);
+            chunkContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
+            using var chunkRequest = new HttpRequestMessage(HttpMethod.Post, uploadUrl) { Content = chunkContent, Version = System.Net.HttpVersion.Version11 };
+            var uploadResp = await _http.SendAsync(chunkRequest, ct);
+            uploadResp.EnsureSuccessStatusCode();
+            var uploadJson = await uploadResp.Content.ReadAsStringAsync(ct);
+            var upload = JsonSerializer.Deserialize<UploadResponse>(uploadJson, JmapSerializerOptions.Default)
+                ?? throw new InvalidOperationException("Failed to parse chunk upload response");
+            chunkBlobIds.Add((upload.BlobId, localSha1));
+            totalUploaded += bytesRead;
+            onProgress?.Invoke(totalUploaded);
+        }
+
+        Log.Info($"[DeltaUpload] Reused {reusedChunks}/{chunkBlobIds.Count} chunks");
+
+        if (chunkBlobIds.Count == 1)
+            return chunkBlobIds[0].BlobId;
+
+        // Combine chunks via Blob/upload (same as existing code)
+        var overallSha1Base64 = Convert.ToBase64String(overallHash.GetHashAndReset());
+        var dataArray = chunkBlobIds.Select(c =>
+        {
+            var item = new Dictionary<string, object?> { ["blobId"] = c.BlobId };
+            if (hasBlobExt)
+                item["digest:sha"] = c.Sha1Base64;
+            return item;
+        }).ToArray();
+
+        var createId = "delta0";
+        var createItem = new Dictionary<string, object>
+        {
+            ["data"] = dataArray,
+            ["type"] = contentType,
+        };
+        if (hasBlobExt)
+            createItem["digest:sha"] = overallSha1Base64;
+
+        var combineCapabilities = hasBlobExt ? BlobExtUsing : BlobUsing;
+        var result = await CallAsync(combineCapabilities, "Blob/upload", new
+        {
+            accountId = AccountId,
+            create = new Dictionary<string, object> { [createId] = createItem },
+        }, ct);
+
+        var blobUpload = result.Deserialize<BlobUploadResponse>(JmapSerializerOptions.Default)
+            ?? throw new InvalidOperationException("Failed to parse Blob/upload response");
+        if (blobUpload.NotCreated != null && blobUpload.NotCreated.TryGetValue(createId, out var err))
+            throw new InvalidOperationException($"Blob/upload failed: {err.Type} — {err.Description}");
+        if (blobUpload.Created == null || !blobUpload.Created.TryGetValue(createId, out var created))
+            throw new InvalidOperationException("Blob/upload returned no result");
+
+        return created.Id;
+    }
+
     public async Task<FileNode> CreateFileNodeAsync(string parentId, string? blobId, string name, string? type = null, string? onExists = null, DateTime? createdAt = null, DateTime? modifiedAt = null, CancellationToken ct = default)
     {
         var createObj = new Dictionary<string, object?>
@@ -848,15 +1009,20 @@ public class JmapClient : IJmapClient
         };
     }
 
-    public async Task MoveFileNodeAsync(string nodeId, string parentId, string newName, string? onExists = null, CancellationToken ct = default)
+    public async Task MoveFileNodeAsync(string nodeId, string parentId, string newName, string? onExists = null, DateTime? modifiedAt = null, CancellationToken ct = default)
     {
+        var updateFields = new Dictionary<string, object?> { };
+        updateFields["parentId"] = parentId;
+        updateFields["name"] = newName;
+        if (modifiedAt.HasValue)
+            updateFields["modified"] = modifiedAt.Value.ToUniversalTime();
+        else
+            updateFields["modified"] = null; // Server sets current time
+
         var args = new Dictionary<string, object>
         {
             ["accountId"] = AccountId,
-            ["update"] = new Dictionary<string, object>
-            {
-                [nodeId] = new { parentId, name = newName },
-            },
+            ["update"] = new Dictionary<string, object?> { [nodeId] = updateFields },
         };
         if (onExists != null)
             args["onExists"] = onExists;
@@ -866,6 +1032,25 @@ public class JmapClient : IJmapClient
 
         if (setResponse.NotUpdated != null && setResponse.NotUpdated.TryGetValue(nodeId, out var setError))
             throw new InvalidOperationException($"FileNode/set move failed: {setError.Type} — {setError.Description}");
+    }
+
+    public async Task BatchUpdateAccessedAsync(Dictionary<string, DateTime> accessed, CancellationToken ct = default)
+    {
+        if (accessed.Count == 0) return;
+
+        var update = new Dictionary<string, object>();
+        foreach (var (nodeId, time) in accessed)
+        {
+            update[nodeId] = new { accessed = time.ToUniversalTime() };
+        }
+
+        var setResponse = await CallAsync<SetResponse>(
+            FileNodeUsing, "FileNode/set", new
+            {
+                accountId = AccountId,
+                update,
+            }, ct);
+        // Ignore individual notUpdated errors — node may have been deleted
     }
 
     public async Task DestroyFileNodeAsync(string nodeId, CancellationToken ct = default)

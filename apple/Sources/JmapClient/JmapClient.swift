@@ -296,11 +296,18 @@ public actor JmapClient {
         nodeId: String,
         parentId: String? = nil,
         name: String? = nil,
+        modified: Date? = nil,
         onExists: String? = nil
     ) async throws {
         var updateFields: [String: AnyCodable] = [:]
         if let parentId = parentId { updateFields["parentId"] = AnyCodable(parentId) }
         if let name = name { updateFields["name"] = AnyCodable(name) }
+        if let modified = modified {
+            updateFields["modified"] = AnyCodable(ISO8601DateFormatter().string(from: modified))
+        } else if parentId != nil || name != nil {
+            // Metadata change — set modified to null so server uses current time
+            updateFields["modified"] = AnyCodable(NSNull())
+        }
 
         var setArgs: [String: AnyCodable] = [
             "accountId": AnyCodable(accountId),
@@ -589,6 +596,219 @@ public actor JmapClient {
         return BlobUploadResponse(blobId: blobId, size: size, type: contentType)
     }
 
+    /// Upload a file using delta-aware chunking: queries the server for the old blob's
+    /// chunk structure, compares SHA1 hashes, and only uploads changed chunks.
+    /// Falls back to full chunked upload if no old blob or server doesn't support chunks.
+    public func uploadBlobDelta(
+        accountId: String,
+        fileURL: URL,
+        contentType: String,
+        oldBlobId: String?,
+        progress: (@Sendable (Int64, Int64) -> Void)? = nil
+    ) async throws -> BlobUploadResponse {
+        let session = try await sessionManager.session()
+
+        // No old blob or no BlobExt → fall back to full chunked upload
+        guard let oldBlobId = oldBlobId,
+              session.hasBlobExt(accountId: accountId) else {
+            return try await uploadBlobChunked(
+                accountId: accountId, fileURL: fileURL,
+                contentType: contentType, progress: progress)
+        }
+
+        let fileSize = try FileManager.default.attributesOfItem(
+            atPath: fileURL.path)[.size] as? Int64 ?? 0
+
+        // Small files — no benefit from delta
+        guard fileSize > Int64(Self.chunkThreshold) else {
+            return try await uploadBlob(
+                accountId: accountId, fileURL: fileURL,
+                contentType: contentType, progress: progress)
+        }
+
+        // Query server for old blob's chunk structure
+        var serverChunks: [(blobId: String, size: Int, digestSha: String?)]?
+        do {
+            let capabilities = [JmapCapability.core, JmapCapability.blob]
+            let responses = try await call([
+                JmapMethodCall(
+                    name: "Blob/get",
+                    args: [
+                        "accountId": AnyCodable(accountId),
+                        "ids": AnyCodable([AnyCodable(oldBlobId)]),
+                        "properties": AnyCodable(["id", "size", "chunks"].map { AnyCodable($0) }),
+                    ],
+                    callId: "b0"
+                ),
+            ], using: capabilities)
+
+            if let response = responses.first,
+               response.count >= 3,
+               let argsDict = response[1].dictValue,
+               let list = argsDict["list"]?.arrayValue,
+               let blob = list.first?.dictValue,
+               let chunks = blob["chunks"]?.arrayValue {
+                serverChunks = chunks.compactMap { chunk -> (String, Int, String?)? in
+                    guard let dict = chunk.dictValue,
+                          let blobId = dict["blobId"]?.stringValue,
+                          let size = dict["size"]?.intValue else { return nil }
+                    let digestSha = dict["digest:sha"]?.stringValue
+                    return (blobId, size, digestSha)
+                }
+            }
+        } catch {
+            // Fall back to full upload
+        }
+
+        guard let serverChunks = serverChunks, !serverChunks.isEmpty else {
+            return try await uploadBlobChunked(
+                accountId: accountId, fileURL: fileURL,
+                contentType: contentType, progress: progress)
+        }
+
+        // Delta upload
+        guard let uploadURL = session.uploadURL(accountId: accountId) else {
+            throw JmapError.invalidResponse
+        }
+
+        let hasBlobExt = session.hasBlobExt(accountId: accountId)
+        let fileHandle = try FileHandle(forReadingFrom: fileURL)
+        defer { try? fileHandle.close() }
+
+        var chunkBlobIds: [(blobId: String, sha1: String)] = []
+        var totalUploaded: Int64 = 0
+        var overallHashContext = SHA1Context()
+        var reusedChunks = 0
+
+        for serverChunk in serverChunks {
+            guard totalUploaded < fileSize else { break }
+            let thisChunkSize = min(serverChunk.size, Int(fileSize - totalUploaded))
+
+            guard let chunkData = fileHandle.readData(ofLength: thisChunkSize) as Data?,
+                  !chunkData.isEmpty else { break }
+
+            let chunkSha1 = sha1Digest(chunkData)
+            overallHashContext.update(chunkData)
+
+            if let serverDigest = serverChunk.digestSha, chunkSha1 == serverDigest {
+                // Reuse server chunk
+                chunkBlobIds.append((serverChunk.blobId, chunkSha1))
+                reusedChunks += 1
+            } else {
+                // Upload new chunk
+                let tempChunkFile = FileManager.default.temporaryDirectory
+                    .appendingPathComponent(UUID().uuidString)
+                try chunkData.write(to: tempChunkFile)
+                defer { try? FileManager.default.removeItem(at: tempChunkFile) }
+
+                var request = URLRequest(url: uploadURL)
+                request.httpMethod = "POST"
+                request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+
+                let (data, httpResponse) = try await authorizedUpload(
+                    request, fromFile: tempChunkFile, session: backgroundSession)
+                try checkHTTPStatus(httpResponse, data: data)
+
+                let uploadResponse = try decoder.decode(BlobUploadResponse.self, from: data)
+                chunkBlobIds.append((uploadResponse.blobId, chunkSha1))
+            }
+
+            totalUploaded += Int64(thisChunkSize)
+            progress?(totalUploaded, fileSize)
+        }
+
+        // Upload any remaining data beyond server's chunk count
+        let defaultChunk = Self.defaultChunkSize
+        while totalUploaded < fileSize {
+            let remaining = Int(fileSize - totalUploaded)
+            let thisChunkSize = min(defaultChunk, remaining)
+
+            guard let chunkData = fileHandle.readData(ofLength: thisChunkSize) as Data?,
+                  !chunkData.isEmpty else { break }
+
+            let chunkSha1 = sha1Digest(chunkData)
+            overallHashContext.update(chunkData)
+
+            let tempChunkFile = FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString)
+            try chunkData.write(to: tempChunkFile)
+            defer { try? FileManager.default.removeItem(at: tempChunkFile) }
+
+            var request = URLRequest(url: uploadURL)
+            request.httpMethod = "POST"
+            request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+
+            let (data, httpResponse) = try await authorizedUpload(
+                request, fromFile: tempChunkFile, session: backgroundSession)
+            try checkHTTPStatus(httpResponse, data: data)
+
+            let uploadResponse = try decoder.decode(BlobUploadResponse.self, from: data)
+            chunkBlobIds.append((uploadResponse.blobId, chunkSha1))
+
+            totalUploaded += Int64(thisChunkSize)
+            progress?(totalUploaded, fileSize)
+        }
+
+        #if canImport(os)
+        logger.info("Delta upload: reused \(reusedChunks)/\(chunkBlobIds.count) chunks")
+        #endif
+
+        if chunkBlobIds.count == 1 {
+            return BlobUploadResponse(
+                blobId: chunkBlobIds[0].blobId,
+                size: Int(fileSize), type: contentType)
+        }
+
+        // Combine chunks via Blob/upload
+        let overallSha1 = overallHashContext.finalize()
+
+        var dataSourceObjects: [[String: AnyCodable]] = []
+        for chunk in chunkBlobIds {
+            var obj: [String: AnyCodable] = ["blobId": AnyCodable(chunk.blobId)]
+            if hasBlobExt {
+                obj["digest:sha"] = AnyCodable(chunk.sha1)
+            }
+            dataSourceObjects.append(obj)
+        }
+
+        var createObj: [String: AnyCodable] = [
+            "data": AnyCodable(dataSourceObjects.map { AnyCodable($0) }),
+            "type": AnyCodable(contentType),
+        ]
+        if hasBlobExt {
+            createObj["digest:sha"] = AnyCodable(overallSha1)
+        }
+
+        var capabilities = [JmapCapability.core, JmapCapability.blob]
+        if hasBlobExt {
+            capabilities.append(JmapCapability.blobExt)
+        }
+
+        let combineResponses = try await call([
+            JmapMethodCall(
+                name: "Blob/upload",
+                args: [
+                    "accountId": AnyCodable(accountId),
+                    "create": ["combined": AnyCodable(createObj)],
+                ],
+                callId: "b0"
+            ),
+        ], using: capabilities)
+
+        guard let response = combineResponses.first,
+              response.count >= 3,
+              let argsDict = response[1].dictValue,
+              let created = argsDict["created"]?.dictValue,
+              let combined = created["combined"]?.dictValue,
+              let blobId = combined["id"]?.stringValue ?? combined["blobId"]?.stringValue
+        else {
+            throw JmapError.serverError("blobUpload", "Failed to combine delta chunks")
+        }
+
+        let size = combined["size"]?.intValue ?? Int(fileSize)
+        return BlobUploadResponse(blobId: blobId, size: size, type: contentType)
+    }
+
     /// Download a blob to a temporary file. Returns the temp file URL.
     public func downloadBlob(
         accountId: String,
@@ -702,6 +922,34 @@ public actor JmapClient {
         }
 
         return convertedBlobId
+    }
+
+    /// Batch-update accessed timestamps for multiple nodes.
+    public func batchUpdateAccessed(
+        accountId: String,
+        accessed: [String: Date]
+    ) async throws {
+        if accessed.isEmpty { return }
+
+        let formatter = ISO8601DateFormatter()
+        var updateFields: [String: AnyCodable] = [:]
+        for (nodeId, time) in accessed {
+            updateFields[nodeId] = AnyCodable(["accessed": AnyCodable(formatter.string(from: time))])
+        }
+
+        let responses = try await call([
+            JmapMethodCall(
+                name: "FileNode/set",
+                args: [
+                    "accountId": AnyCodable(accountId),
+                    "update": AnyCodable(updateFields),
+                ],
+                callId: "s0"
+            ),
+        ])
+
+        // Best-effort — ignore errors for individual nodes
+        _ = try? extractResponse(FileNodeSetResponse.self, from: responses, callId: "s0")
     }
 
     // MARK: - Private Helpers

@@ -154,6 +154,21 @@ public class BlobDataItem
 
     [JsonPropertyName("isTruncated")]
     public bool IsTruncated { get; set; }
+
+    [JsonPropertyName("chunks")]
+    public BlobChunkInfo[]? Chunks { get; set; }
+}
+
+public class BlobChunkInfo
+{
+    [JsonPropertyName("blobId")]
+    public string BlobId { get; set; } = "";
+
+    [JsonPropertyName("size")]
+    public long Size { get; set; }
+
+    [JsonPropertyName("digest:sha")]
+    public string? DigestSha { get; set; }
 }
 
 public class BlobUploadResponse

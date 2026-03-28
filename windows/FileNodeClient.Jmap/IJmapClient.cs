@@ -65,9 +65,21 @@ public interface IJmapClient : IDisposable
         Action<long>? onProgress = null, Action<JmapClient.UploadedChunkInfo>? onChunkUploaded = null,
         List<JmapClient.UploadedChunkInfo>? previousChunks = null,
         CancellationToken ct = default);
+    /// <summary>
+    /// Upload a file using delta-aware chunking: queries the server for the old blob's
+    /// chunk structure, compares SHA1 hashes, and only uploads changed chunks.
+    /// Falls back to full chunked upload if no old blob or server doesn't support chunks.
+    /// </summary>
+    Task<string> UploadBlobDeltaAsync(Stream data, string contentType, long totalSize,
+        string? oldBlobId,
+        Action<long>? onProgress = null, CancellationToken ct = default);
     Task<FileNode> CreateFileNodeAsync(string parentId, string? blobId, string name, string? type = null, string? onExists = null, DateTime? createdAt = null, DateTime? modifiedAt = null, CancellationToken ct = default);
     Task<FileNode> ReplaceFileNodeBlobAsync(string nodeId, string parentId, string name, string blobId, string? type = null, DateTime? createdAt = null, DateTime? modifiedAt = null, CancellationToken ct = default);
-    Task MoveFileNodeAsync(string nodeId, string parentId, string newName, string? onExists = null, CancellationToken ct = default);
+    Task MoveFileNodeAsync(string nodeId, string parentId, string newName, string? onExists = null, DateTime? modifiedAt = null, CancellationToken ct = default);
+    /// <summary>
+    /// Batch-update accessed timestamps for multiple nodes in a single FileNode/set call.
+    /// </summary>
+    Task BatchUpdateAccessedAsync(Dictionary<string, DateTime> accessed, CancellationToken ct = default);
     Task DestroyFileNodeAsync(string nodeId, CancellationToken ct = default);
     IAsyncEnumerable<string> WatchForChangesAsync(CancellationToken ct = default);
     /// <summary>

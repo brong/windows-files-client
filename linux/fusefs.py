@@ -411,9 +411,16 @@ class FileNodeFS(pyfuse3.Operations):
                     self._cache_write(new_node.blob_id, data)
             else:
                 # Existing file — update content on server (v10: blobId is mutable)
-                log.info("Updating file content: %s (%d bytes)", name, len(data))
+                # Pass old blobId for delta-aware chunked upload
+                old_blob_id = None
+                old_node = self._nodes.get(existing_node_id)
+                if old_node is not None:
+                    old_blob_id = old_node.blob_id
+                log.info("Updating file content: %s (%d bytes, old_blob=%s)",
+                         name, len(data), old_blob_id)
                 new_node = await self._jmap.replace_file(
-                    existing_node_id, parent_id, name, data)
+                    existing_node_id, parent_id, name, data,
+                    old_blob_id=old_blob_id)
                 if new_node.id != existing_node_id:
                     # Different ID (shouldn't happen with v10 but handle gracefully)
                     self._remove_node(existing_node_id)
@@ -552,6 +559,8 @@ class FileNodeFS(pyfuse3.Operations):
             updates["parentId"] = new_parent_id
 
         if updates:
+            # Set modified timestamp on rename/move
+            updates["modified"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             try:
                 await self._jmap.update_node(source.id, **updates)
                 log.info("Renamed: %s → %s (id=%s)", old_name_str, new_name_str, source.id)
