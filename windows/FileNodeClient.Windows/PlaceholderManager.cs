@@ -10,7 +10,24 @@ namespace FileNodeClient.Windows;
 
 internal class PlaceholderManager
 {
-    private static readonly char[] InvalidChars = ['\\', '/', ':', '*', '?', '"', '<', '>', '|'];
+    // Windows-invalid filename characters and their Unicode look-alike replacements.
+    // Fullwidth forms are visually similar and commonly used by cloud sync clients
+    // (OneDrive, rclone, etc.) for lossless bidirectional filename mapping.
+    private static readonly (char Invalid, char Safe)[] CharMap =
+    [
+        ('\\', '\uFF3C'), // FULLWIDTH REVERSE SOLIDUS
+        ('/',  '\u2215'), // DIVISION SLASH
+        (':',  '\uA789'), // MODIFIER LETTER COLON
+        ('*',  '\uFF0A'), // FULLWIDTH ASTERISK
+        ('?',  '\uFF1F'), // FULLWIDTH QUESTION MARK
+        ('"',  '\uFF02'), // FULLWIDTH QUOTATION MARK
+        ('<',  '\uFF1C'), // FULLWIDTH LESS-THAN SIGN
+        ('>',  '\uFF1E'), // FULLWIDTH GREATER-THAN SIGN
+        ('|',  '\uFF5C'), // FULLWIDTH VERTICAL LINE
+    ];
+
+    private static readonly char[] InvalidChars = CharMap.Select(m => m.Invalid).ToArray();
+    private static readonly char[] SafeChars = CharMap.Select(m => m.Safe).ToArray();
 
     private readonly string _syncRootPath;
     private readonly string _logPrefix;
@@ -31,32 +48,76 @@ internal class PlaceholderManager
         "LPT0", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
     };
 
+    // Zero-width no-break space — invisible prefix/suffix for reserved name
+    // and trailing dot/space round-tripping.
+    private const char Marker = '\uFEFF';
+
     /// <summary>
-    /// Replace characters that are invalid in Windows filenames with underscore,
-    /// and prefix reserved names (., .., CON, etc.) to avoid path traversal
-    /// or device name collisions.
+    /// Replace characters that are invalid in Windows filenames with visually
+    /// similar Unicode look-alikes (fullwidth forms). This mapping is lossless
+    /// and reversible via <see cref="DesanitizeName"/>.
+    /// Reserved names (CON, etc.) and trailing dots/spaces are preserved using
+    /// a zero-width marker character.
     /// </summary>
     internal static string SanitizeName(string name)
     {
         var result = name;
 
+        // Replace invalid chars with Unicode look-alikes
         if (result.IndexOfAny(InvalidChars) >= 0)
         {
             var chars = result.ToCharArray();
             for (int i = 0; i < chars.Length; i++)
             {
-                if (Array.IndexOf(InvalidChars, chars[i]) >= 0)
-                    chars[i] = '_';
+                int idx = Array.IndexOf(InvalidChars, chars[i]);
+                if (idx >= 0)
+                    chars[i] = SafeChars[idx];
             }
             result = new string(chars);
         }
 
-        result = result.TrimEnd(' ', '.');
+        // Preserve trailing spaces/dots with an invisible marker so
+        // DesanitizeName can restore them. Windows silently strips these.
+        if (result.Length > 0 && (result[^1] == ' ' || result[^1] == '.'))
+            result += Marker;
 
-        // After trimming, check if empty or a reserved name (e.g. ".." or "CON").
-        // Prefix with underscore to avoid path traversal or device name collisions.
+        // Prefix reserved names with invisible marker to avoid device name
+        // collisions and path traversal, while keeping the name readable.
         if (result.Length == 0 || ReservedNames.Contains(result))
-            result = "_" + result;
+            result = Marker + result;
+
+        return result;
+    }
+
+    /// <summary>
+    /// Reverse of <see cref="SanitizeName"/>: restore Unicode look-alikes back
+    /// to their original characters for sending to the server.
+    /// Call this on local filenames before using them in JMAP calls.
+    /// </summary>
+    internal static string DesanitizeName(string localName)
+    {
+        var result = localName;
+
+        // Remove marker prefix (reserved name protection)
+        if (result.Length > 0 && result[0] == Marker)
+            result = result[1..];
+
+        // Remove marker suffix (trailing dot/space preservation)
+        if (result.Length > 0 && result[^1] == Marker)
+            result = result[..^1];
+
+        // Restore Unicode look-alikes to original characters
+        if (result.IndexOfAny(SafeChars) >= 0)
+        {
+            var chars = result.ToCharArray();
+            for (int i = 0; i < chars.Length; i++)
+            {
+                int idx = Array.IndexOf(SafeChars, chars[i]);
+                if (idx >= 0)
+                    chars[i] = InvalidChars[idx];
+            }
+            result = new string(chars);
+        }
 
         return result;
     }

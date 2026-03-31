@@ -2209,7 +2209,7 @@ public class SyncEngine : IDisposable
             return raceId;
 
         // Create the directory on the server
-        var folderName = Path.GetFileName(localDir);
+        var folderName = PlaceholderManager.DesanitizeName(Path.GetFileName(localDir));
         Log.Info($"{_logPrefix} Auto-creating missing parent folder on server: {folderName}");
         var node = await _queue.EnqueueAsync(QueuePriority.Background,
             () => _jmapClient.CreateFileNodeAsync(parentNodeId, null, folderName));

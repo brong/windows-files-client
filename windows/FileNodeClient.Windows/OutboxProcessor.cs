@@ -250,7 +250,7 @@ public class OutboxProcessor : IDisposable
         if (change.NodeId == null)
             return; // Nothing to delete on server
 
-        var name = change.LocalPath != null ? Path.GetFileName(change.LocalPath) : change.NodeId;
+        var name = change.LocalPath != null ? PlaceholderManager.DesanitizeName(Path.GetFileName(change.LocalPath)) : change.NodeId;
 
         // Fetch blobId before trashing so we can use it for restore from Recycle Bin
         string? blobId = null;
@@ -269,7 +269,7 @@ public class OutboxProcessor : IDisposable
             {
                 Log.Info($"{_logPrefix} Outbox: trashing node {change.NodeId}");
                 await _queue.EnqueueAsync(QueuePriority.Background,
-                    () => _jmapClient.MoveFileNodeAsync(change.NodeId, _trashNodeId, name, "rename", ct), ct);
+                    () => _jmapClient.MoveFileNodeAsync(change.NodeId, _trashNodeId, name, "rename", ct: ct), ct);
             }
             else
             {
@@ -297,7 +297,7 @@ public class OutboxProcessor : IDisposable
         if (change.LocalPath == null || !Directory.Exists(change.LocalPath))
             return true; // Folder no longer exists — nothing to do
 
-        var folderName = Path.GetFileName(change.LocalPath);
+        var folderName = PlaceholderManager.DesanitizeName(Path.GetFileName(change.LocalPath));
         var parentDir = Path.GetDirectoryName(change.LocalPath)!;
         var parentId = _engine.ResolveParentNodeId(parentDir);
         if (parentId == null)
@@ -324,7 +324,7 @@ public class OutboxProcessor : IDisposable
             return true; // File gone — delete entry will handle server cleanup
         }
 
-        var fileName = Path.GetFileName(change.LocalPath);
+        var fileName = PlaceholderManager.DesanitizeName(Path.GetFileName(change.LocalPath));
         var parentDir = Path.GetDirectoryName(change.LocalPath)!;
         var contentType = change.ContentType ?? "application/octet-stream";
 
@@ -570,7 +570,7 @@ public class OutboxProcessor : IDisposable
             return false;
         }
 
-        var newName = Path.GetFileName(change.LocalPath);
+        var newName = PlaceholderManager.DesanitizeName(Path.GetFileName(change.LocalPath));
         Log.Info($"{_logPrefix} Outbox: moving node {change.NodeId} → {parentId}/{newName}");
 
         try
