@@ -164,5 +164,19 @@ if [ "$INSTALL" = true ]; then
     echo "=== Installed ==="
 fi
 
+# Create distributable zip with installer
+echo "=== Creating distributable zip ==="
+DIST_DIR="$WINSRC/FileNodeClient.Package/bin/Release/dist"
+rm -rf "$DIST_DIR"
+mkdir -p "$DIST_DIR"
+cp "$WINSRC/FileNodeClient.Package/bin/Release/FileNodeClient.msix" "$DIST_DIR/"
+cp "$WINSRC/install.ps1" "$DIST_DIR/"
+cp "$WINSRC/Install FileNodeClient.bat" "$DIST_DIR/"
+ZIPFILE="$WINSRC/FileNodeClient.Package/bin/Release/FileNodeClient-${APP_VERSION}.zip"
+rm -f "$ZIPFILE"
+(cd "$DIST_DIR" && powershell.exe -NoProfile -Command "Compress-Archive -Path '.\*' -DestinationPath '$(wslpath -w "$ZIPFILE")'")
+rm -rf "$DIST_DIR"
+echo "Distributable: FileNodeClient.Package/bin/Release/FileNodeClient-${APP_VERSION}.zip"
+
 echo ""
 echo "=== Success: FileNodeClient.Package/bin/Release/FileNodeClient.msix ==="

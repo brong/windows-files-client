@@ -1,0 +1,3 @@
+@echo off
+echo Installing Fastmail Files...
+powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0install.ps1"
