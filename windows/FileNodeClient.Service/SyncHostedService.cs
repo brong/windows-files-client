@@ -173,49 +173,56 @@ sealed class SyncHostedService : BackgroundService
 
     private void FlushBroadcasts(object? state)
     {
-        if (_handler == null || _ipcServer == null) return;
-
-        bool sendAggregate;
-        List<string> accountIds;
-        List<string> activityAccountIds;
-
-        lock (_throttleLock)
+        try
         {
-            sendAggregate = _dirtyAggregate;
-            _dirtyAggregate = false;
-            accountIds = _dirtyAccounts.ToList();
-            _dirtyAccounts.Clear();
-            activityAccountIds = _dirtyActivity.ToList();
-            _dirtyActivity.Clear();
-            _broadcastThrottle?.Dispose();
-            _broadcastThrottle = null;
-        }
+            if (_handler == null || _ipcServer == null) return;
 
-        if (sendAggregate)
-        {
-            var snapshot = _handler.BuildStatusSnapshot();
-            Log.FireAndForget(_ipcServer.BroadcastAsync("statusSnapshot", snapshot), "BroadcastStatusSnapshot");
-        }
+            bool sendAggregate;
+            List<string> accountIds;
+            List<string> activityAccountIds;
 
-        foreach (var accountId in accountIds)
-        {
-            var supervisor = _loginManager?.Supervisors.FirstOrDefault(s => s.AccountId == accountId);
-            if (supervisor != null)
+            lock (_throttleLock)
             {
-                var payload = _handler.BuildAccountStatus(supervisor);
-                Log.FireAndForget(_ipcServer.BroadcastAsync("accountStatusChanged", payload), "BroadcastAccountStatus");
+                sendAggregate = _dirtyAggregate;
+                _dirtyAggregate = false;
+                accountIds = _dirtyAccounts.ToList();
+                _dirtyAccounts.Clear();
+                activityAccountIds = _dirtyActivity.ToList();
+                _dirtyActivity.Clear();
+                _broadcastThrottle?.Dispose();
+                _broadcastThrottle = null;
+            }
+
+            if (sendAggregate)
+            {
+                var snapshot = _handler.BuildStatusSnapshot();
+                Log.FireAndForget(_ipcServer.BroadcastAsync("statusSnapshot", snapshot), "BroadcastStatusSnapshot");
+            }
+
+            foreach (var accountId in accountIds)
+            {
+                var supervisor = _loginManager?.Supervisors.FirstOrDefault(s => s.AccountId == accountId);
+                if (supervisor != null)
+                {
+                    var payload = _handler.BuildAccountStatus(supervisor);
+                    Log.FireAndForget(_ipcServer.BroadcastAsync("accountStatusChanged", payload), "BroadcastAccountStatus");
+                }
+            }
+
+            foreach (var accountId in activityAccountIds)
+            {
+                var supervisor = _loginManager?.Supervisors.FirstOrDefault(s => s.AccountId == accountId);
+                if (supervisor != null)
+                {
+                    var activitySnapshot = _handler.BuildActivitySnapshot(supervisor);
+                    if (activitySnapshot != null)
+                        Log.FireAndForget(_ipcServer.BroadcastAsync("activityChanged", activitySnapshot), "BroadcastActivityChanged");
+                }
             }
         }
-
-        foreach (var accountId in activityAccountIds)
+        catch (Exception ex)
         {
-            var supervisor = _loginManager?.Supervisors.FirstOrDefault(s => s.AccountId == accountId);
-            if (supervisor != null)
-            {
-                var activitySnapshot = _handler.BuildActivitySnapshot(supervisor);
-                if (activitySnapshot != null)
-                    Log.FireAndForget(_ipcServer.BroadcastAsync("activityChanged", activitySnapshot), "BroadcastActivityChanged");
-            }
+            Log.Error($"FlushBroadcasts failed: {ex.Message}");
         }
     }
 

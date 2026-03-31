@@ -90,9 +90,9 @@ Two paths depending on whether a node cache exists:
 **Cold start** (`PopulateFullAsync`):
 
 1. `FindHomeNodeIdAsync` — two-call JMAP batch:
-   - `FileNode/query { filter: { hasRole: "home" } }` → IDs
+   - `FileNode/query { filter: { role: "home" } }` → IDs
    - `FileNode/get { #ids: resultOf query }` → home node
-2. `FindTrashNodeIdAsync` — same pattern with `hasRole: "trash"`
+2. `FindTrashNodeIdAsync` — same pattern with `role: "trash"`
 3. `QueryAllFileNodeIdsAsync` — paginated `FileNode/query` (limit 4096/page)
 4. `GetFileNodesByIdsPagedAsync` — paginated `FileNode/get` (1024 IDs/page)
 5. `BuildTreeAndCreatePlaceholders` — BFS from home node, create placeholders

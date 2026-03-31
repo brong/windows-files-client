@@ -126,7 +126,7 @@ Key design points:
 
 - **Timestamps are client-managed.** The server does NOT auto-update `modified` or `accessed`. Clients SHOULD explicitly set `modified` on content changes and metadata changes (rename, move). Setting a timestamp to `null` tells the server to use the current time.
 
-- **`role: "home"`** is the sync root. Find it with `FileNode/query { filter: { hasRole: "home" } }`. Do not hardcode an ID.
+- **`role: "home"`** is the sync root. Find it with `FileNode/query { filter: { role: "home" } }`. Do not hardcode an ID.
 
 - **`role: "trash"`** is the server-side recycle bin. Moving nodes here (via `FileNode/set update { parentId: trashNodeId }`) instead of destroying them enables restore.
 
@@ -140,7 +140,7 @@ Key design points:
 
 ```json
 [
-    ["FileNode/query", { "accountId": "A", "filter": { "hasRole": "home" } }, "c0"],
+    ["FileNode/query", { "accountId": "A", "filter": { "role": "home" } }, "c0"],
     ["FileNode/get", { "accountId": "A", "#ids": { "resultOf": "c0", "name": "FileNode/query", "path": "/ids" } }, "c1"]
 ]
 ```

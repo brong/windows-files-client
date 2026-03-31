@@ -243,7 +243,7 @@ public class JmapClient : IJmapClient
             ("FileNode/query", new
             {
                 accountId = AccountId,
-                filter = new { hasRole = "home" },
+                filter = new { role = "home" },
             }, queryCallId),
             ("FileNode/get", new Dictionary<string, object>
             {
@@ -285,7 +285,7 @@ public class JmapClient : IJmapClient
             ("FileNode/query", new
             {
                 accountId = AccountId,
-                filter = new { hasRole = "trash" },
+                filter = new { role = "trash" },
             }, queryCallId),
             ("FileNode/get", new Dictionary<string, object>
             {

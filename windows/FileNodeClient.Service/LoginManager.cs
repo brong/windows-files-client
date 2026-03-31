@@ -1315,30 +1315,37 @@ sealed class LoginManager : IDisposable
 
     private void CheckDiskSpace()
     {
-        List<AccountSupervisor> supervisors;
-        lock (_lock)
-            supervisors = _supervisors.ToList();
-
-        foreach (var supervisor in supervisors)
+        try
         {
-            var freeBytes = supervisor.GetFreeDiskSpace();
-            if (freeBytes == null) continue;
+            List<AccountSupervisor> supervisors;
+            lock (_lock)
+                supervisors = _supervisors.ToList();
 
-            var isPausedForDisk = supervisor.PauseReason.HasFlag(SyncPauseReason.DiskFull);
+            foreach (var supervisor in supervisors)
+            {
+                var freeBytes = supervisor.GetFreeDiskSpace();
+                if (freeBytes == null) continue;
 
-            if (!isPausedForDisk && freeBytes < DiskFullThresholdBytes)
-            {
-                Log.Warn($"[DiskCheck] {supervisor.DisplayName}: {freeBytes / (1024 * 1024)}MB free — pausing sync");
-                supervisor.Pause(SyncPauseReason.DiskFull);
-                RaiseAggregateStatus();
+                var isPausedForDisk = supervisor.PauseReason.HasFlag(SyncPauseReason.DiskFull);
+
+                if (!isPausedForDisk && freeBytes < DiskFullThresholdBytes)
+                {
+                    Log.Warn($"[DiskCheck] {supervisor.DisplayName}: {freeBytes / (1024 * 1024)}MB free — pausing sync");
+                    supervisor.Pause(SyncPauseReason.DiskFull);
+                    RaiseAggregateStatus();
+                }
+                else if (isPausedForDisk && freeBytes > DiskResumeThresholdBytes)
+                {
+                    Log.Info($"[DiskCheck] {supervisor.DisplayName}: {freeBytes / (1024 * 1024)}MB free — resuming sync");
+                    supervisor.Resume(SyncPauseReason.DiskFull);
+                    supervisor.PushState(""); // Catch up
+                    RaiseAggregateStatus();
+                }
             }
-            else if (isPausedForDisk && freeBytes > DiskResumeThresholdBytes)
-            {
-                Log.Info($"[DiskCheck] {supervisor.DisplayName}: {freeBytes / (1024 * 1024)}MB free — resuming sync");
-                supervisor.Resume(SyncPauseReason.DiskFull);
-                supervisor.PushState(""); // Catch up
-                RaiseAggregateStatus();
-            }
+        }
+        catch (Exception ex)
+        {
+            Log.Error($"CheckDiskSpace failed: {ex.Message}");
         }
     }
 
