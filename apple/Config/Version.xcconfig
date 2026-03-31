@@ -1,0 +1,4 @@
+// Version configuration — single source of truth
+// Bump these for each TestFlight / release build
+MARKETING_VERSION = 0.1.0
+CURRENT_PROJECT_VERSION = 1

@@ -68,6 +68,7 @@
 		BFED148431F2C47FE97F5379 /* FileProviderExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = FileProviderExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		ECC98B8960F04E89C08BAF0F /* FileProviderItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileProviderItem.swift; sourceTree = "<group>"; };
 		FDEF0E7F2F693A6800C196AD /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; name = Assets.xcassets; path = Resources/Assets.xcassets; sourceTree = "<group>"; };
+		AAAA000000000000VERSION0 /* Version.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Version.xcconfig; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -139,9 +140,18 @@
 			path = Sources/App;
 			sourceTree = "<group>";
 		};
+		AAAA000000000000CONFIG00 /* Config */ = {
+			isa = PBXGroup;
+			children = (
+				AAAA000000000000VERSION0 /* Version.xcconfig */,
+			);
+			path = Config;
+			sourceTree = "<group>";
+		};
 		F064B01F0D8A6D3839C2053B = {
 			isa = PBXGroup;
 			children = (
+				AAAA000000000000CONFIG00 /* Config */,
 				FDEF0E7F2F693A6800C196AD /* Assets.xcassets */,
 				C7FA296452F5DAB540EB82F6 /* App */,
 				66552E3D3A0E59F69BFAB9DF /* FileProvider */,
@@ -295,7 +305,9 @@
 					"@executable_path/../Frameworks",
 					"@executable_path/../../../../Frameworks",
 				);
+				CURRENT_PROJECT_VERSION = 1;
 				MACOSX_DEPLOYMENT_TARGET = 12.0;
+				MARKETING_VERSION = 0.1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.fastmail.files.app.FileProvider;
 				PRODUCT_NAME = FileProviderExtension;
 				PROVISIONING_PROFILE_SPECIFIER = "";
@@ -326,6 +338,7 @@
 		};
 		55FC78B9C245165E28BDFFEA /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = AAAA000000000000VERSION0 /* Version.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				CLANG_ANALYZER_NONNULL = YES;
@@ -386,6 +399,7 @@
 		};
 		C4995770E0338A6999A23409 /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = AAAA000000000000VERSION0 /* Version.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				CLANG_ANALYZER_NONNULL = YES;
