@@ -45,6 +45,19 @@ public record FailedLogin(string LoginId, string Error);
 public record ActiveDownloadEntry(string FileName, DateTime StartedAt,
     int? Progress = null, long? TotalSize = null, bool IsPending = false);
 
+public record CompletedEntry(
+    string FileName,
+    string Action,
+    bool Succeeded,
+    string? Error,
+    long? FileSize,
+    DateTime CompletedAt);
+
+public record SyncProgressInfo(
+    string Phase,
+    int? ProcessedCount,
+    int? TotalCount);
+
 // ---- Wire-format envelope types ----
 
 public abstract record IpcMessage;
@@ -81,13 +94,16 @@ public record AccountsChangedPush(List<AccountInfo> Accounts, List<string> Conne
 
 public record ActivitySnapshot(
     string AccountId,
+    string DisplayName,
     List<OutboxEntry> ActiveEntries,
     List<OutboxEntry> ErrorEntries,
     List<OutboxEntry> PendingEntries,
     List<OutboxEntry> RejectedEntries,
     List<ActiveDownloadEntry>? ActiveDownloads,
     int TotalPendingCount,
-    int TotalDownloadCount);
+    int TotalDownloadCount,
+    List<CompletedEntry>? RecentlyCompleted = null,
+    SyncProgressInfo? SyncProgress = null);
 
 public record VersionInfo(string Version, string BuildDate);
 

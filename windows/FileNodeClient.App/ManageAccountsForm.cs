@@ -335,10 +335,8 @@ sealed partial class ManageAccountsForm : Form
             OwnerDraw = true,
         };
         _activityListView.Columns.Add("Name", 100);
-        _activityListView.Columns.Add("Size", 60, HorizontalAlignment.Right);
-        _activityListView.Columns.Add("Action", 60);
-        _activityListView.Columns.Add("Status", 60);
-        _activityListView.Columns.Add("Updated", 80);
+        _activityListView.Columns.Add("Action", 80);
+        _activityListView.Columns.Add("Status", 80);
         _activityListView.Resize += (_, _) => AutoSizeActivityColumns();
 
         _activityListView.DrawColumnHeader += (_, e) => e.DrawDefault = true;
@@ -349,7 +347,7 @@ sealed partial class ManageAccountsForm : Form
         // Empty activity label — shown when nothing to sync
         _activityEmptyLabel = new Label
         {
-            Text = "Nothing to sync",
+            Text = "All synced",
             Dock = DockStyle.Fill,
             ForeColor = Color.Green,
             TextAlign = ContentAlignment.MiddleCenter,
@@ -897,55 +895,10 @@ sealed partial class ManageAccountsForm : Form
             return;
         }
 
-        // No activity display when nothing selected
-        var selectedNode = _treeView.SelectedNode;
-        if (selectedNode == null)
-        {
-            _activityListView.Visible = false;
-            _activityEmptyLabel.Visible = false;
-            _activityListView.Items.Clear();
-            return;
-        }
+        // Cross-account: gather activity from all accounts (no filtering by selection)
+        bool multiAccount = _vm.Accounts.Count(a => a.Status != AccountStatus.Disconnected) > 1;
 
-        var allEntries = new List<(string DisplayName, string AccountId, string LoginId, OutboxEntry Entry)>();
-        var allDownloads = new List<(string DisplayName, string AccountId, string LoginId, ActiveDownloadEntry Download)>();
-
-        foreach (var acct in _vm.Accounts)
-        {
-            if (!_vm.ActivityCache.TryGetValue(acct.AccountId, out var snap)) continue;
-
-            foreach (var entry in snap.ActiveEntries)
-                allEntries.Add((acct.DisplayName, acct.AccountId, acct.LoginId, entry));
-            foreach (var entry in snap.ErrorEntries)
-                allEntries.Add((acct.DisplayName, acct.AccountId, acct.LoginId, entry));
-            foreach (var entry in snap.PendingEntries)
-                allEntries.Add((acct.DisplayName, acct.AccountId, acct.LoginId, entry));
-            foreach (var entry in snap.RejectedEntries)
-                allEntries.Add((acct.DisplayName, acct.AccountId, acct.LoginId, entry));
-
-            if (snap.ActiveDownloads is { } dls)
-                foreach (var dl in dls)
-                    allDownloads.Add((acct.DisplayName, acct.AccountId, acct.LoginId, dl));
-        }
-
-        // Filter by selection
-        if (_vm.SelectedAccountId != null)
-        {
-            allEntries = allEntries.Where(e => e.AccountId == _vm.SelectedAccountId).ToList();
-            allDownloads = allDownloads.Where(d => d.AccountId == _vm.SelectedAccountId).ToList();
-        }
-        else if (_vm.SelectedLoginId != null)
-        {
-            allEntries = allEntries.Where(e => e.LoginId == _vm.SelectedLoginId).ToList();
-            allDownloads = allDownloads.Where(d => d.LoginId == _vm.SelectedLoginId).ToList();
-        }
-
-        bool hasSyncedSelection = selectedNode?.Tag is AccountNode selAcct && selAcct.IsSynced
-                && selAcct.SyncInfo?.Status != AccountStatus.Disconnected
-            || (selectedNode?.Tag is LoginNode && _vm.Accounts.Any(a => a.LoginId == _vm.SelectedLoginId
-                && a.Status != AccountStatus.Disconnected));
-
-        RefreshActivityList(allEntries, allDownloads, hasSyncedSelection);
+        RefreshActivityList(multiAccount);
     }
 
     private void OnExitClicked(object? sender, EventArgs e)
@@ -1113,153 +1066,154 @@ sealed partial class ManageAccountsForm : Form
         }
     }
 
-    private void RefreshActivityList(
-        List<(string DisplayName, string AccountId, string LoginId, OutboxEntry Entry)> entries,
-        List<(string DisplayName, string AccountId, string LoginId, ActiveDownloadEntry Download)> downloads,
-        bool showEmptyLabel = true)
+    private void RefreshActivityList(bool multiAccount)
     {
         var now = DateTime.UtcNow;
 
-        // Build all items into a flat list, then sort by progress descending
-        // IsRejected flag distinguishes permanent rejections from transient errors
-        // ActivityTag carries context for context menu actions
-        var desired = new List<(string Key, string Col0, string Col1, string Col2, string Col3, string Col4,
+        // 3-column items: Name, Action, Status (with optional progress bar)
+        var desired = new List<(string Key, string Col0, string Col1, string Col2,
             Color ForeColor, string Tooltip, int? ProgressTag, int SortProgress, bool IsRejected,
             ActivityItemTag? Tag)>();
 
-        // Downloads (active and pending)
-        foreach (var (displayName, accountId, _, dl) in downloads)
-        {
-            if (dl.IsPending)
-            {
-                desired.Add(($"pending:{accountId}:{dl.FileName}", dl.FileName, FormatFileSize(dl.TotalSize), "Download",
-                    "Queued", "", Color.Gray, dl.FileName, null, -2, false, null));
-            }
-            else
-            {
-                var statusText = dl.Progress.HasValue ? "" : "Downloading...";
-                var tooltip = dl.Progress.HasValue ? $"Downloading {dl.Progress.Value}%" : dl.FileName;
-                desired.Add(($"dl:{accountId}:{dl.FileName}", dl.FileName, FormatFileSize(dl.TotalSize), "Download",
-                    statusText, FormatRelativeTime(dl.StartedAt, now),
-                    Color.DodgerBlue, tooltip, dl.Progress, dl.Progress ?? -1, false, null));
-            }
-        }
+        // Helper: prefix name with account when multiple accounts active
+        string PrefixName(string displayName, string fileName)
+            => multiAccount ? $"{displayName}: {fileName}" : fileName;
 
-        // Outbox entries
-        foreach (var (displayName, accountId, _, entry) in entries)
+        foreach (var snap in _vm.ActivityCache.Values)
         {
-            var name = entry.LocalPath != null
-                ? Path.GetFileName(entry.LocalPath)
-                : entry.NodeId ?? "(unknown)";
+            var displayName = snap.DisplayName;
+            var accountId = snap.AccountId;
 
-            var action = DeriveAction(entry);
-            string status;
-            int? progressPercent = null;
-            int sortProgress = -2;
-            if (entry.IsProcessing)
+            // --- Sync progress (initial sync) ---
+            if (snap.SyncProgress is { } sp)
             {
+                var progressText = sp.TotalCount.HasValue && sp.ProcessedCount.HasValue
+                    ? $"{sp.Phase} ({sp.ProcessedCount:N0}/{sp.TotalCount:N0})"
+                    : sp.ProcessedCount.HasValue
+                        ? $"{sp.Phase} ({sp.ProcessedCount:N0})"
+                        : sp.Phase;
+                var name = multiAccount ? $"{displayName}" : "Initial sync";
+                desired.Add(($"sync:{accountId}", name, "Syncing", progressText,
+                    Color.DodgerBlue, $"Initial sync: {progressText}", null, 200, false, null));
+            }
+
+            // --- In-flight downloads ---
+            if (snap.ActiveDownloads is { } dls)
+            {
+                foreach (var dl in dls)
+                {
+                    if (dl.IsPending) continue; // Don't show queued downloads
+                    var statusText = dl.Progress.HasValue ? "" : "Downloading...";
+                    var tooltip = dl.Progress.HasValue ? $"Downloading {dl.Progress.Value}%" : dl.FileName;
+                    desired.Add(($"dl:{accountId}:{dl.FileName}",
+                        PrefixName(displayName, dl.FileName), "Downloading", statusText,
+                        Color.DodgerBlue, tooltip, dl.Progress, dl.Progress ?? 50, false, null));
+                }
+            }
+
+            // --- In-flight outbox entries (uploads, moves, deletes) ---
+            foreach (var entry in snap.ActiveEntries)
+            {
+                var fileName = entry.LocalPath != null ? Path.GetFileName(entry.LocalPath) : entry.NodeId ?? "(unknown)";
+                var action = DeriveAction(entry) + "ing";
+                int? progressPercent = null;
                 if (entry.UploadedBytes.HasValue && entry.FileSize.HasValue && entry.FileSize.Value > 0)
                     progressPercent = (int)(entry.UploadedBytes.Value * 100 / entry.FileSize.Value);
                 else if (entry.UploadedBytes.HasValue)
                     progressPercent = 0;
-                status = progressPercent.HasValue ? "" : "Syncing...";
-                sortProgress = progressPercent ?? -1;
+                var statusText = progressPercent.HasValue ? "" : "...";
+
+                desired.Add(($"outbox:{entry.Id}",
+                    PrefixName(displayName, fileName), action, statusText,
+                    Color.DodgerBlue,
+                    entry.LocalPath ?? entry.NodeId ?? "",
+                    progressPercent, progressPercent ?? 50, false, null));
             }
-            else
+
+            // --- Error entries (will retry) ---
+            foreach (var entry in snap.ErrorEntries)
             {
-                status = DeriveStatus(entry, now);
+                var fileName = entry.LocalPath != null ? Path.GetFileName(entry.LocalPath) : entry.NodeId ?? "(unknown)";
+                var action = DeriveAction(entry);
+                var tooltip = entry.LocalPath ?? entry.NodeId ?? "";
+                if (entry.LastError != null) tooltip += $"\nError: {entry.LastError}";
+
+                desired.Add(($"outbox:{entry.Id}",
+                    PrefixName(displayName, fileName), action, $"Error ({entry.AttemptCount})",
+                    Color.FromArgb(200, 120, 0), tooltip, null, 10, false, null));
             }
 
-            var tooltip = entry.LocalPath ?? entry.NodeId ?? "";
-            if (entry.LastError != null)
-                tooltip += $"\nError: {entry.LastError}";
+            // --- Rejected entries (permanent, user must fix) ---
+            foreach (var entry in snap.RejectedEntries)
+            {
+                var fileName = entry.LocalPath != null ? Path.GetFileName(entry.LocalPath) : entry.NodeId ?? "(unknown)";
+                var action = DeriveAction(entry);
+                var tooltip = entry.LocalPath ?? entry.NodeId ?? "";
+                if (entry.RejectionReason != null) tooltip += $"\nRejected: {entry.RejectionReason}";
 
-            // Permanent rejections = red (user must fix), temp errors = orange (will retry)
-            var color = entry.IsRejected ? Color.Red
-                : entry.IsProcessing ? Color.DodgerBlue
-                : entry.LastError != null ? Color.FromArgb(200, 120, 0)
-                : _activityListView.ForeColor;
+                desired.Add(($"outbox:{entry.Id}",
+                    PrefixName(displayName, fileName), action, "Rejected",
+                    Color.Red, tooltip, null, 5, true,
+                    new ActivityItemTag(accountId, entry.Id, entry.LocalPath)));
+            }
 
-            // Rejected and errored entries sort in active tier so they stay visible
-            if (entry.IsRejected || entry.LastError != null)
-                sortProgress = -1;
+            // --- Recently completed items (last 60 seconds) ---
+            if (snap.RecentlyCompleted is { } completed)
+            {
+                foreach (var c in completed)
+                {
+                    var color = c.Succeeded ? Color.Green : Color.FromArgb(200, 120, 0);
+                    var statusText = c.Succeeded ? "Done" : "Failed";
+                    var tooltip = c.Succeeded ? c.FileName : $"{c.FileName}\nError: {c.Error}";
 
-            var tag = entry.IsRejected
-                ? new ActivityItemTag(accountId, entry.Id, entry.LocalPath)
-                : null;
-
-            desired.Add(($"outbox:{entry.Id}", name, FormatFileSize(entry.FileSize), action,
-                status, FormatRelativeTime(entry.UpdatedAt, now),
-                color, tooltip, progressPercent, sortProgress, entry.IsRejected, tag));
+                    desired.Add(($"done:{accountId}:{c.FileName}:{c.CompletedAt.Ticks}",
+                        PrefixName(displayName, c.FileName), c.Action, statusText,
+                        color, tooltip, null, -5, false, null));
+                }
+            }
         }
 
-        // Sort: highest progress first, then in-progress without %, then queued/waiting
-        // Stable tiebreaker by key to prevent items at similar progress from swapping
+        // Also add pending summary if any accounts have pending work
+        int totalPending = _vm.ActivityCache.Values.Sum(s => s.TotalPendingCount);
+        int totalDownloads = _vm.ActivityCache.Values.Sum(s => s.TotalDownloadCount);
+        int shownInFlight = desired.Count(d => d.SortProgress >= 50);
+        int pendingRemaining = totalPending + totalDownloads - shownInFlight;
+        if (pendingRemaining > 0)
+        {
+            desired.Add(("summary:pending",
+                $"+ {pendingRemaining:N0} more queued", "", "",
+                Color.Gray, $"{pendingRemaining} additional items queued", null, -10, false, null));
+        }
+
+        // Sort: sync progress first, then in-flight (by progress), then errors, then rejected, then completed, then pending summary
         desired.Sort((a, b) =>
         {
             var c = b.SortProgress.CompareTo(a.SortProgress);
             return c != 0 ? c : string.Compare(a.Key, b.Key, StringComparison.Ordinal);
         });
 
-        // Cap the list: show active/rejected/errored items (progress >= -1) individually,
-        // collapse remaining pending items into a single summary row.
-        const int MaxVisiblePending = 5;
+        // Cap rejected at 5
         const int MaxVisibleRejected = 5;
-
-        // Count active-tier items (sortProgress >= -1)
-        int activeCount = 0;
-        while (activeCount < desired.Count && desired[activeCount].SortProgress >= -1)
-            activeCount++;
-
-        // Among the active tier, count permanent rejections
-        int rejectedInActive = 0;
-        for (int i = 0; i < activeCount; i++)
-            if (desired[i].IsRejected)
-                rejectedInActive++;
-
-        int pendingCount = desired.Count - activeCount;
-        var kept = new List<(string Key, string Col0, string Col1, string Col2, string Col3, string Col4,
-            Color ForeColor, string Tooltip, int? ProgressTag, int SortProgress, bool IsRejected,
-            ActivityItemTag? Tag)>();
-
-        // Keep all active items, cap rejected to MaxVisibleRejected
-        int shownRejected = 0;
-        for (int i = 0; i < activeCount; i++)
+        int rejectedCount = desired.Count(d => d.IsRejected);
+        if (rejectedCount > MaxVisibleRejected)
         {
-            if (desired[i].IsRejected && shownRejected >= MaxVisibleRejected)
-                continue;
-            if (desired[i].IsRejected) shownRejected++;
-            kept.Add(desired[i]);
+            int shown = 0;
+            desired = desired.Where(d =>
+            {
+                if (!d.IsRejected) return true;
+                return ++shown <= MaxVisibleRejected;
+            }).ToList();
+            int hidden = rejectedCount - MaxVisibleRejected;
+            desired.Add(("summary:rejected", $"+ {hidden:N0} more rejected", "", "",
+                Color.Red, $"{hidden} additional files rejected", null, 4, true, null));
         }
-
-        if (rejectedInActive > MaxVisibleRejected)
-        {
-            int hiddenRejected = rejectedInActive - MaxVisibleRejected;
-            kept.Add(("summary:rejected", $"+ {hiddenRejected:N0} more rejected", "", "",
-                "", "",
-                Color.Red, $"{hiddenRejected} additional files rejected", null, -1, true, null));
-        }
-
-        // Add pending items with cap
-        int shownPending = 0;
-        for (int i = activeCount; i < desired.Count && shownPending < MaxVisiblePending; i++, shownPending++)
-            kept.Add(desired[i]);
-
-        if (pendingCount > MaxVisiblePending)
-        {
-            int hiddenCount = pendingCount - MaxVisiblePending;
-            kept.Add(("summary:pending", $"+ {hiddenCount:N0} more pending", "", "",
-                "", "",
-                Color.Gray, $"{hiddenCount} additional items queued", null, -3, false, null));
-        }
-
-        desired = kept;
 
         // Toggle between empty label and list view
+        bool hasSyncedAccount = _vm.Accounts.Any(a => a.Status != AccountStatus.Disconnected);
         if (desired.Count == 0)
         {
             _activityListView.Visible = false;
-            _activityEmptyLabel.Visible = showEmptyLabel;
+            _activityEmptyLabel.Visible = hasSyncedAccount;
             _activityListView.Items.Clear();
             return;
         }
@@ -1276,12 +1230,10 @@ sealed partial class ManageAccountsForm : Form
 
             if (i < _activityListView.Items.Count && _activityListView.Items[i].Name == d.Key)
             {
-                // Key already in the right position — update fields only if changed
                 UpdateItemFields(_activityListView.Items[i], d);
             }
             else
             {
-                // Look for this key later in the current list
                 int foundAt = -1;
                 for (int j = i + 1; j < _activityListView.Items.Count; j++)
                 {
@@ -1294,7 +1246,6 @@ sealed partial class ManageAccountsForm : Form
 
                 if (foundAt >= 0)
                 {
-                    // Move existing item from foundAt to position i
                     var item = _activityListView.Items[foundAt];
                     _activityListView.Items.RemoveAt(foundAt);
                     _activityListView.Items.Insert(i, item);
@@ -1302,14 +1253,11 @@ sealed partial class ManageAccountsForm : Form
                 }
                 else
                 {
-                    // New item — insert at position i
                     var item = new ListViewItem(d.Col0) { Name = d.Key };
                     item.SubItems.Add(d.Col1);
-                    item.SubItems.Add(d.Col2);
-                    var statusSub = item.SubItems.Add(d.Col3);
+                    var statusSub = item.SubItems.Add(d.Col2);
                     if (d.ProgressTag.HasValue)
                         statusSub.Tag = d.ProgressTag.Value;
-                    item.SubItems.Add(d.Col4);
                     item.ForeColor = d.ForeColor;
                     item.ToolTipText = d.Tooltip;
                     item.Tag = d.Tag;
@@ -1318,36 +1266,31 @@ sealed partial class ManageAccountsForm : Form
             }
         }
 
-        // Remove any trailing items no longer in the desired list
         while (_activityListView.Items.Count > desired.Count)
             _activityListView.Items.RemoveAt(_activityListView.Items.Count - 1);
 
         _activityListView.EndUpdate();
 
-        // Ensure the list is scrolled to the top — item insertions/removals
-        // can leave the scroll position so that items render above the viewport.
         if (_activityListView.Items.Count > 0)
             _activityListView.EnsureVisible(0);
     }
 
     private void UpdateItemFields(ListViewItem item,
-        (string Key, string Col0, string Col1, string Col2, string Col3, string Col4,
+        (string Key, string Col0, string Col1, string Col2,
          Color ForeColor, string Tooltip, int? ProgressTag, int SortProgress, bool IsRejected,
          ActivityItemTag? Tag) d)
     {
         if (item.Text != d.Col0) item.Text = d.Col0;
         if (item.SubItems[1].Text != d.Col1) item.SubItems[1].Text = d.Col1;
         if (item.SubItems[2].Text != d.Col2) item.SubItems[2].Text = d.Col2;
-        if (item.SubItems[3].Text != d.Col3) item.SubItems[3].Text = d.Col3;
 
-        var oldTag = item.SubItems[3].Tag as int?;
+        var oldTag = item.SubItems[2].Tag as int?;
         if (oldTag != d.ProgressTag)
         {
-            item.SubItems[3].Tag = d.ProgressTag.HasValue ? (object)d.ProgressTag.Value : null;
-            _activityListView.Invalidate(item.SubItems[3].Bounds);
+            item.SubItems[2].Tag = d.ProgressTag.HasValue ? (object)d.ProgressTag.Value : null;
+            _activityListView.Invalidate(item.SubItems[2].Bounds);
         }
 
-        if (item.SubItems[4].Text != d.Col4) item.SubItems[4].Text = d.Col4;
         if (item.ForeColor != d.ForeColor) item.ForeColor = d.ForeColor;
         if (item.ToolTipText != d.Tooltip) item.ToolTipText = d.Tooltip;
         item.Tag = d.Tag;
@@ -1389,25 +1332,20 @@ sealed partial class ManageAccountsForm : Form
 
     private void AutoSizeActivityColumns()
     {
-        if (_activityListView.Columns.Count < 5) return;
+        if (_activityListView.Columns.Count < 3) return;
         var w = _activityListView.ClientSize.Width;
         var em = Font.Height;
-        // Fixed columns: Size, Action, Status, Updated
-        var sizeW = (int)(4.5 * em);
-        var actionW = (int)(5.5 * em);
-        var statusW = (int)(5.5 * em);
-        var updatedW = (int)(6.5 * em);
-        var nameW = Math.Max(4 * em, w - sizeW - actionW - statusW - updatedW);
+        var actionW = (int)(7 * em);
+        var statusW = (int)(6 * em);
+        var nameW = Math.Max(6 * em, w - actionW - statusW);
         _activityListView.Columns[0].Width = nameW;
-        _activityListView.Columns[1].Width = sizeW;
-        _activityListView.Columns[2].Width = actionW;
-        _activityListView.Columns[3].Width = statusW;
-        _activityListView.Columns[4].Width = updatedW;
+        _activityListView.Columns[1].Width = actionW;
+        _activityListView.Columns[2].Width = statusW;
     }
 
     private void OnDrawActivitySubItem(object? sender, DrawListViewSubItemEventArgs e)
     {
-        if (e.ColumnIndex == 3 && e.SubItem?.Tag is int percent)
+        if (e.ColumnIndex == 2 && e.SubItem?.Tag is int percent)
         {
             var g = e.Graphics!;
             var bounds = e.Bounds;

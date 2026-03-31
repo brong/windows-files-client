@@ -19,6 +19,14 @@ sealed class IpcCommandHandler
     // Progress updates on already-visible entries flow through immediately.
     private readonly Dictionary<string, (ActivitySnapshot Snapshot, DateTime BuiltAt)> _lastActivity = new();
 
+    // Completion tracking: detect items that leave the outbox between snapshots
+    private readonly Dictionary<string, HashSet<Guid>> _previousEntryIds = new();
+    private readonly Dictionary<string, HashSet<string>> _previousDownloadNames = new();
+    private readonly Dictionary<string, List<CompletedEntry>> _recentlyCompleted = new();
+
+    // Snapshot of outbox entries for completion detection (need filename/action)
+    private readonly Dictionary<string, Dictionary<Guid, (string FileName, string Action, long? FileSize)>> _previousEntryInfo = new();
+
     public IpcCommandHandler(LoginManager loginManager, string? iconPath)
     {
         _loginManager = loginManager;
@@ -219,7 +227,7 @@ sealed class IpcCommandHandler
         var supervisor = _loginManager.Supervisors.FirstOrDefault(s => s.AccountId == p.AccountId);
         var snapshot = supervisor != null ? BuildActivitySnapshot(supervisor) : null;
         return IpcSerializer.SerializeResponse(request.Id,
-            snapshot ?? new ActivitySnapshot(p.AccountId, new(), new(), new(), new(), null, 0, 0));
+            snapshot ?? new ActivitySnapshot(p.AccountId, "", new(), new(), new(), new(), null, 0, 0));
     }
 
     private string HandleGetLoginAccounts(IpcRequest request)
@@ -326,11 +334,12 @@ sealed class IpcCommandHandler
         if (supervisor.Outbox == null) return null;
 
         var now = DateTime.UtcNow;
+        var accountId = supervisor.AccountId;
         var fullRebuild = true;
 
         // Check if we can reuse the previous snapshot's entry list (< 1s old)
         // and just update progress on already-visible entries.
-        if (_lastActivity.TryGetValue(supervisor.AccountId, out var cached)
+        if (_lastActivity.TryGetValue(accountId, out var cached)
             && (now - cached.BuiltAt).TotalMilliseconds < 1000)
         {
             fullRebuild = false;
@@ -353,6 +362,72 @@ sealed class IpcCommandHandler
             }
         }
 
+        // --- Completion tracking: detect items that left the outbox ---
+        var currentEntryIds = new HashSet<Guid>(entries.Select(e => e.Id));
+        var currentDownloadNames = new HashSet<string>(downloadSnapshot.Where(d => !d.IsPending).Select(d => d.FileName));
+
+        if (!_recentlyCompleted.ContainsKey(accountId))
+            _recentlyCompleted[accountId] = new();
+
+        // Detect completed outbox entries
+        if (_previousEntryIds.TryGetValue(accountId, out var prevIds))
+        {
+            _previousEntryInfo.TryGetValue(accountId, out var prevInfo);
+            foreach (var id in prevIds)
+            {
+                if (!currentEntryIds.Contains(id) && prevInfo != null && prevInfo.TryGetValue(id, out var info))
+                {
+                    _recentlyCompleted[accountId].Add(new CompletedEntry(
+                        info.FileName, info.Action, true, null, info.FileSize, now));
+                }
+            }
+        }
+
+        // Detect completed downloads
+        if (_previousDownloadNames.TryGetValue(accountId, out var prevDlNames))
+        {
+            foreach (var name in prevDlNames)
+            {
+                if (!currentDownloadNames.Contains(name))
+                {
+                    _recentlyCompleted[accountId].Add(new CompletedEntry(
+                        name, "Download", true, null, null, now));
+                }
+            }
+        }
+
+        // Purge entries older than 60 seconds
+        _recentlyCompleted[accountId].RemoveAll(c => (now - c.CompletedAt).TotalSeconds > 60);
+
+        // Update previous state for next diff
+        _previousEntryIds[accountId] = currentEntryIds;
+        _previousDownloadNames[accountId] = currentDownloadNames;
+
+        // Build entry info map for next completion detection
+        var entryInfo = new Dictionary<Guid, (string FileName, string Action, long? FileSize)>();
+        foreach (var e in entries)
+        {
+            var fileName = e.LocalPath != null ? Path.GetFileName(e.LocalPath) : e.NodeId ?? "(unknown)";
+            var action = e.IsDeleted ? "Delete" : e.IsFolder && e.NodeId == null ? "Create folder"
+                : e.IsDirtyContent ? "Upload" : e.IsDirtyLocation ? "Move" : "Sync";
+            long? fileSize = null;
+            if (e.LocalPath != null && !e.IsFolder && !e.IsDeleted)
+            {
+                try { fileSize = new FileInfo(e.LocalPath).Length; } catch { }
+            }
+            entryInfo[e.Id] = (fileName, action, fileSize);
+        }
+        _previousEntryInfo[accountId] = entryInfo;
+
+        // Build SyncProgress from supervisor
+        SyncProgressInfo? syncProgress = null;
+        if (supervisor.SyncProgress is var sp && sp != null)
+            syncProgress = new SyncProgressInfo(sp.Value.Phase, sp.Value.Processed, sp.Value.Total);
+
+        var recentlyCompleted = _recentlyCompleted[accountId].Count > 0
+            ? _recentlyCompleted[accountId].ToList()
+            : null;
+
         if (!fullRebuild)
         {
             // Quick update: reuse previous entry lists but refresh progress
@@ -365,14 +440,17 @@ sealed class IpcCommandHandler
             }).ToList();
 
             return new ActivitySnapshot(
-                supervisor.AccountId,
+                accountId,
+                supervisor.DisplayName,
                 updatedActive,
                 prev.ErrorEntries,
                 prev.PendingEntries,
                 prev.RejectedEntries,
                 downloads,
                 entries.Length,
-                downloadSnapshot.Count);
+                downloadSnapshot.Count,
+                recentlyCompleted,
+                syncProgress);
         }
 
         // Full rebuild: categorize all entries
@@ -381,11 +459,7 @@ sealed class IpcCommandHandler
         var pending = new List<OutboxEntry>();
         foreach (var e in entries)
         {
-            long? fileSize = null;
-            if (e.LocalPath != null && !e.IsFolder && !e.IsDeleted)
-            {
-                try { fileSize = new FileInfo(e.LocalPath).Length; } catch { }
-            }
+            var info = entryInfo[e.Id];
 
             var oe = new OutboxEntry(
                 e.Id, e.LocalPath, e.NodeId, e.IsFolder,
@@ -394,7 +468,7 @@ sealed class IpcCommandHandler
                 e.LastError, e.NextRetryAfter,
                 processingIds.Contains(e.Id),
                 supervisor.Outbox.GetProgress(e.Id),
-                fileSize);
+                info.FileSize);
 
             if (oe.IsProcessing) active.Add(oe);
             else if (oe.LastError != null) errors.Add(oe);
@@ -403,8 +477,6 @@ sealed class IpcCommandHandler
 
         // Always include a few pending entries in the active list so there's
         // always something visible during rapid small-file processing.
-        // This prevents the "empty flash" between one file completing and
-        // the next starting.
         if (active.Count == 0 && pending.Count > 0)
         {
             active.AddRange(pending.Take(3));
@@ -429,16 +501,19 @@ sealed class IpcCommandHandler
         }).ToList();
 
         var snapshot = new ActivitySnapshot(
-            supervisor.AccountId,
+            accountId,
+            supervisor.DisplayName,
             active,
             errors,
             pending.Take(10).ToList(),
             rejected,
             downloads,
             entries.Length,
-            downloadSnapshot.Count);
+            downloadSnapshot.Count,
+            recentlyCompleted,
+            syncProgress);
 
-        _lastActivity[supervisor.AccountId] = (snapshot, now);
+        _lastActivity[accountId] = (snapshot, now);
         return snapshot;
     }
 

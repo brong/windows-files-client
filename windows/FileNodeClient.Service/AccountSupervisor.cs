@@ -42,6 +42,7 @@ sealed class AccountSupervisor : IDisposable
     public long? QuotaLimit { get; private set; }
     public SyncPauseReason PauseReason => _engine?.PauseReason ?? SyncPauseReason.None;
     public int ActiveDownloadCount => _engine?.ActiveDownloadCount ?? 0;
+    public (string Phase, int? Processed, int? Total)? SyncProgress { get; private set; }
 
     public List<(string FileName, DateTime StartedAt, int? Progress, long? TotalSize, bool IsPending)> GetActiveDownloadSnapshot()
         => _engine?.GetActiveDownloadSnapshot() ?? new();
@@ -80,6 +81,7 @@ sealed class AccountSupervisor : IDisposable
         _engine.PendingCountChanged += OnEnginePendingCountChanged;
         _engine.ActiveDownloadCountChanged += OnEngineActiveDownloadCountChanged;
         _engine.ActivityChanged += OnEngineActivityChanged;
+        _engine.SyncProgressChanged += OnEngineSyncProgressChanged;
 
         // Register sync root
         Log.Info($"[{_displayName}] Registering sync root...");
@@ -276,6 +278,12 @@ sealed class AccountSupervisor : IDisposable
 
     private void OnEngineActivityChanged() =>
         Log.SafeInvoke(() => ActivityChanged?.Invoke(this), "AccountSupervisor.ActivityChanged");
+
+    private void OnEngineSyncProgressChanged((string Phase, int? Processed, int? Total)? progress)
+    {
+        SyncProgress = progress;
+        Log.SafeInvoke(() => ActivityChanged?.Invoke(this), "AccountSupervisor.SyncProgressChanged");
+    }
 
     private void UpdateQuota(Quota[]? quotas)
     {

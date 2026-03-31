@@ -80,6 +80,8 @@ public class SyncEngine : IDisposable
     public event Action<int>? PendingCountChanged;
     public event Action<int>? ActiveDownloadCountChanged;
     public event Action? ActivityChanged;
+    /// <summary>Fires during initial sync with (phase, processedCount, totalCount). Null to clear.</summary>
+    public event Action<(string Phase, int? Processed, int? Total)?>? SyncProgressChanged;
 
     private readonly ConcurrentDictionary<long, (string FileName, DateTime StartedAt, long? TotalSize)> _activeDownloads = new();
     private readonly ConcurrentDictionary<long, int> _downloadProgress = new();
@@ -521,9 +523,21 @@ public class SyncEngine : IDisposable
         return await PopulateFullAsync(ct);
     }
 
+    private void ReportSyncProgress(string phase, int? processed = null, int? total = null)
+    {
+        Log.SafeInvoke(() => SyncProgressChanged?.Invoke((phase, processed, total)),
+            "SyncEngine.SyncProgressChanged");
+    }
+
+    private void ClearSyncProgress()
+    {
+        Log.SafeInvoke(() => SyncProgressChanged?.Invoke(null), "SyncEngine.ClearSyncProgress");
+    }
+
     private async Task<string> PopulateFullAsync(CancellationToken ct)
     {
         ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_POPULATE_NAMESPACE);
+        ReportSyncProgress("Discovering...");
 
         // Discover home node
         _homeNodeId = await _queue.EnqueueAsync(QueuePriority.Background,
@@ -538,15 +552,18 @@ public class SyncEngine : IDisposable
 
         // Phase 1: Bulk fetch all FileNode IDs, then all nodes in pages
         Log.Info($"{_logPrefix} Fetching all FileNode IDs...");
+        ReportSyncProgress("Fetching node list...");
         var (allIds, _, total) = await _queue.EnqueueAsync(QueuePriority.Background,
             () => _jmapClient.QueryAllFileNodeIdsAsync(ct), ct);
         Log.Info($"{_logPrefix} Found {allIds.Length} FileNodes (total: {total})");
 
+        ReportSyncProgress("Fetching nodes...", 0, allIds.Length);
         Log.Info($"{_logPrefix} Fetching FileNode details...");
         var (allNodes, state) = await _queue.EnqueueAsync(QueuePriority.Background,
             () => _jmapClient.GetFileNodesByIdsPagedAsync(allIds, 1024, ct), ct);
         Log.Info($"{_logPrefix} Fetched {allNodes.Length} FileNodes, state: {state}");
 
+        ReportSyncProgress("Creating placeholders...", 0, allNodes.Length);
         BuildTreeAndCreatePlaceholders(allNodes);
 
         // Track permissions on the home node (sync root folder itself)
@@ -559,6 +576,7 @@ public class SyncEngine : IDisposable
 
 
         SaveNodeCache(state);
+        ClearSyncProgress();
         ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_IDLE);
         return state;
     }
