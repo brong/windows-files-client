@@ -2,6 +2,7 @@
 #   1. This file (VERSION)
 #   2. windows/FileNodeClient.Package/AppxManifest.xml  (<Identity Version="...">)
 
+1.0.58.0 2026-03-31  Fix hydration deadlock on multi-directory pin
 1.0.57.0 2026-03-31  Cross-account activity display, initial sync progress, hasRole→role
 1.0.56.0 2026-03-11  Revert IL trimming (too aggressive), keep debug DLL stripping
 1.0.54.0 2026-03-11  Parallel hydration (2 concurrent), trimmed MSIX (53MB→20MB)
