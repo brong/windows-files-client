@@ -732,14 +732,9 @@ public class SyncEngine : IDisposable
                 {
                     try
                     {
-                        _hydrationGate.Wait(kvp.Value.Token);
-                        try
-                        {
-                            var (count, allHydrated) = HydrateDehydratedFiles(kvp.Key, kvp.Value.Token);
-                            if (count > 0)
-                                Log.Info($"{_logPrefix} Hydrated {count} files in pinned directory: {kvp.Key}{(allHydrated ? "" : " (some files still dehydrated)")}");
-                        }
-                        finally { _hydrationGate.Release(); }
+                        var (count, allHydrated) = HydrateDehydratedFiles(kvp.Key, kvp.Value.Token);
+                        if (count > 0)
+                            Log.Info($"{_logPrefix} Hydrated {count} files in pinned directory: {kvp.Key}{(allHydrated ? "" : " (some files still dehydrated)")}");
                     }
                     catch (OperationCanceledException)
                     {
@@ -1515,14 +1510,9 @@ public class SyncEngine : IDisposable
             {
                 try
                 {
-                    _hydrationGate.Wait(cts.Token);
-                    try
-                    {
-                        var (count, allHydrated) = HydrateDehydratedFiles(info.DirectoryPath, cts.Token);
-                        if (count > 0)
-                            Log.Info($"{_logPrefix} Hydrated {count} files after directory populated: {info.DirectoryPath}{(allHydrated ? "" : " (some files still dehydrated)")}");
-                    }
-                    finally { _hydrationGate.Release(); }
+                    var (count, allHydrated) = HydrateDehydratedFiles(info.DirectoryPath, cts.Token);
+                    if (count > 0)
+                        Log.Info($"{_logPrefix} Hydrated {count} files after directory populated: {info.DirectoryPath}{(allHydrated ? "" : " (some files still dehydrated)")}");
                 }
                 catch (OperationCanceledException)
                 {
@@ -1546,14 +1536,13 @@ public class SyncEngine : IDisposable
             {
                 try
                 {
-                    _hydrationGate.Wait(cts.Token);
-                    try
-                    {
-                        var (count, allHydrated) = HydrateDehydratedFiles(directoryPath, cts.Token);
-                        if (count > 0)
-                            Log.Info($"{_logPrefix} Hydrated {count} files in {directoryPath}{(allHydrated ? "" : " (some files still dehydrated)")}");
-                    }
-                    finally { _hydrationGate.Release(); }
+                    // Don't acquire _hydrationGate here — HydrateDehydratedFiles
+                    // acquires it per-file internally. Holding a slot here while
+                    // waiting on inner tasks causes deadlock when multiple
+                    // directories are pinned simultaneously.
+                    var (count, allHydrated) = HydrateDehydratedFiles(directoryPath, cts.Token);
+                    if (count > 0)
+                        Log.Info($"{_logPrefix} Hydrated {count} files in {directoryPath}{(allHydrated ? "" : " (some files still dehydrated)")}");
                 }
                 catch (OperationCanceledException)
                 {
