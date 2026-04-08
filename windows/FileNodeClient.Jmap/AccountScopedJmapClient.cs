@@ -729,6 +729,7 @@ public class AccountScopedJmapClient : IJmapClient
         var args = new Dictionary<string, object?>
         {
             ["accountId"] = _accountId,
+            ["compareCaseInsensitively"] = true,
             ["create"] = new Dictionary<string, object?> { ["c0"] = createObj },
         };
         if (onExists != null)
@@ -795,6 +796,7 @@ public class AccountScopedJmapClient : IJmapClient
         var args = new Dictionary<string, object>
         {
             ["accountId"] = _accountId,
+            ["compareCaseInsensitively"] = true,
             ["update"] = new Dictionary<string, object?> { [nodeId] = updateFields },
         };
         if (onExists != null)

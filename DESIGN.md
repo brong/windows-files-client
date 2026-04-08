@@ -86,9 +86,9 @@ The **Jmap** and **Logging** layers are cross-platform (no OS dependencies). The
 | Capability | URI | What It Provides |
 |-----------|-----|-----------------|
 | JMAP Core | `urn:ietf:params:jmap:core` | Method call limits, upload limits |
-| FileNode | `urn:ietf:params:jmap:filenode` (or dev URI) | File sync API. Account capability includes: `webTrashUrl`, `webUrlTemplate`, `webWriteUrlTemplate`, `mayCreateTopLevelFileNode` |
+| FileNode | `urn:ietf:params:jmap:filenode` (or dev URI) | File sync API. Account capability includes: `webTrashUrl`, `webUrlTemplate`, `webWriteUrlTemplate`, `mayCreateTopLevelFileNode`, `caseInsensitiveNames` |
 | Blob | `urn:ietf:params:jmap:blob` | `Blob/upload` (chunked combine, update/destroy), `Blob/get` (inline fetch + digest verification + chunks), `maxDataSources`, `maxSizeBlobSet` (RFC 9404) |
-| BlobExt | `urn:ietf:params:jmap:blobext` | `Blob/convert` (ImageConvert, Archive, Compress, Delta/Patch), `chunkSize` hint, `digest:sha` verification, `supportedImageTypes`, `supportedArchiveTypes`, `supportedCompressionTypes`, `supportedPatchTypes`, `maxConvertSize`, `resumableUploadUrl` |
+| BlobExt | `urn:ietf:params:jmap:blobext` | `Blob/convert` (ImageConvert, Archive, Compress, Delta/Patch), `chunkSize` hint, `digest:sha` verification, `supportedImageReadTypes`/`supportedImageWriteTypes`, `supportedArchiveTypes`, `supportedCompressTypes`, `supportedDeltaTypes`, `supportedPatchTypes`, `maxConvertSize` |
 | Quota | `urn:ietf:params:jmap:quota` | Storage quota reporting (RFC 9425) |
 
 Always check for capability presence before using its methods. The server may not support all capabilities, and the client must degrade gracefully. For example, if `Blob` capability is absent, fall back to simple uploads (no chunked combine). If `BlobExt` is absent, skip thumbnail fetching via `Blob/convert` and omit `digest:sha` fields from chunked upload combine requests.

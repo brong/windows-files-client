@@ -118,7 +118,7 @@ public actor JmapClient {
                 name: "FileNode/query",
                 args: [
                     "accountId": AnyCodable(accountId),
-                    "filter": ["hasRole": "home"],
+                    "filter": ["role": "home"],
                 ],
                 callId: "q0"
             ),
@@ -151,7 +151,7 @@ public actor JmapClient {
                 name: "FileNode/query",
                 args: [
                     "accountId": AnyCodable(accountId),
-                    "filter": ["hasRole": "trash"],
+                    "filter": ["role": "trash"],
                 ],
                 callId: "q0"
             ),
@@ -308,6 +308,7 @@ public actor JmapClient {
 
         var setArgs: [String: AnyCodable] = [
             "accountId": AnyCodable(accountId),
+            "compareCaseInsensitively": AnyCodable(true),
             "create": ["c0": AnyCodable(createArgs)],
         ]
         if let onExists = onExists {
@@ -354,6 +355,7 @@ public actor JmapClient {
 
         var setArgs: [String: AnyCodable] = [
             "accountId": AnyCodable(accountId),
+            "compareCaseInsensitively": AnyCodable(true),
             "update": [nodeId: AnyCodable(updateFields)],
         ]
         if let onExists = onExists {

@@ -188,6 +188,7 @@ public class JmapSession
             return val.GetBoolean();
         return null;
     }
+
 }
 
 public class JmapAccount

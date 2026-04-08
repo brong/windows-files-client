@@ -186,11 +186,11 @@ class JmapClient:
         responses = await self._call([
             ["FileNode/query", {
                 "accountId": self.account_id,
-                "filter": {"hasRole": "home"},
+                "filter": {"role": "home"},
             }, "home"],
             ["FileNode/query", {
                 "accountId": self.account_id,
-                "filter": {"hasRole": "trash"},
+                "filter": {"role": "trash"},
             }, "trash"],
         ])
 

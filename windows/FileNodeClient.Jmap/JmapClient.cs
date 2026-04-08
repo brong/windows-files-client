@@ -985,6 +985,7 @@ public class JmapClient : IJmapClient
         var args = new Dictionary<string, object?>
         {
             ["accountId"] = AccountId,
+            ["compareCaseInsensitively"] = true,
             ["create"] = new Dictionary<string, object?> { ["c0"] = createObj },
         };
         if (onExists != null)
@@ -1051,6 +1052,7 @@ public class JmapClient : IJmapClient
         var args = new Dictionary<string, object>
         {
             ["accountId"] = AccountId,
+            ["compareCaseInsensitively"] = true,
             ["update"] = new Dictionary<string, object?> { [nodeId] = updateFields },
         };
         if (onExists != null)
