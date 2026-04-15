@@ -1159,12 +1159,14 @@ public class JmapClient : IJmapClient
     public async IAsyncEnumerable<(string AccountId, string State)> WatchAllAccountChangesAsync(
         [EnumeratorCancellation] CancellationToken ct = default)
     {
-        var url = Session.GetEventSourceUrl("FileNode", "no", "60");
+        var url = Session.GetEventSourceUrl("*", "no", "60");
+        Log.Debug($"SSE connecting: {url}");
         var request = new HttpRequestMessage(HttpMethod.Get, url);
         request.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("text/event-stream"));
 
         using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
         response.EnsureSuccessStatusCode();
+        Log.Debug($"SSE connected: {response.StatusCode} {response.Content.Headers.ContentType}");
 
         using var stream = await response.Content.ReadAsStreamAsync(ct);
         using var reader = new StreamReader(stream);
