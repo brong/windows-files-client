@@ -1223,8 +1223,11 @@ sealed class LoginManager : IDisposable
                     supervisor?.PushState(state);
                 }
 
-                // Stream ended normally — reconnect
-                Log.Info($"[Push:{username}] SSE stream ended, reconnecting...");
+                // Stream ended normally — reconnect after a short delay
+                // to avoid tight-looping if the server immediately closes
+                Log.Info($"[Push:{username}] SSE stream ended, reconnecting in 5s...");
+                try { await Task.Delay(5000, ct); }
+                catch (OperationCanceledException) { break; }
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {

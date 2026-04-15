@@ -100,7 +100,7 @@ sealed class SyncHostedService : BackgroundService
         Log.Info("FileNodeClient service stopped");
     }
 
-    private HashSet<string> _subscribedAccountIds = new();
+    private readonly HashSet<AccountSupervisor> _subscribedSupervisors = new(ReferenceEqualityComparer.Instance);
 
     // Throttle IPC broadcasts to avoid flooding the App with rapid-fire events
     // (e.g. thousands of outbox additions when dragging in a large folder)
@@ -117,7 +117,7 @@ sealed class SyncHostedService : BackgroundService
 
         foreach (var supervisor in _loginManager.Supervisors)
         {
-            if (_subscribedAccountIds.Add(supervisor.AccountId))
+            if (_subscribedSupervisors.Add(supervisor))
             {
                 supervisor.StatusChanged += OnSupervisorStatusChanged;
                 supervisor.StatusDetailChanged += OnSupervisorStatusChanged;
