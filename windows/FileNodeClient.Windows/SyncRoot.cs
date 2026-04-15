@@ -52,15 +52,25 @@ internal class SyncRoot : IDisposable
 
         var folder = await StorageFolder.GetFolderFromPathAsync(_syncRootPath);
 
-        // If a different sync root is already registered at this path (e.g. server
-        // was wiped and account IDs changed), unregister it first.
+        // If a sync root is already registered at this path, handle it:
+        // - Same ID: skip re-registration (already set up from a previous run)
+        // - Different ID: unregister the stale one first (e.g. server account IDs changed)
+        bool alreadyRegistered = false;
         try
         {
             var existing = StorageProviderSyncRootManager.GetSyncRootInformationForFolder(folder);
-            if (existing?.Id != null && existing.Id != _syncRootId)
+            if (existing?.Id != null)
             {
-                Log.Info($"{_logPrefix} Unregistering stale sync root at same path: {existing.Id}");
-                StorageProviderSyncRootManager.Unregister(existing.Id);
+                if (existing.Id == _syncRootId)
+                {
+                    Log.Info($"{_logPrefix} Sync root already registered: {_syncRootId}");
+                    alreadyRegistered = true;
+                }
+                else
+                {
+                    Log.Info($"{_logPrefix} Unregistering stale sync root at same path: {existing.Id}");
+                    StorageProviderSyncRootManager.Unregister(existing.Id);
+                }
             }
         }
         catch { /* No existing sync root at this path */ }
@@ -93,24 +103,27 @@ internal class SyncRoot : IDisposable
         if (recycleBinUri != null)
             info.RecycleBinUri = recycleBinUri;
 
-        // Register with retry — cfapi can transiently fail with 0x80070490
-        // (Element not found) if a previous sync root was recently unregistered.
-        for (int attempt = 0; ; attempt++)
+        if (!alreadyRegistered)
         {
-            try
+            // Register with retry — cfapi can transiently fail with 0x80070490
+            // (Element not found) if a previous sync root was recently unregistered.
+            for (int attempt = 0; ; attempt++)
             {
-                StorageProviderSyncRootManager.Register(info);
-                break;
+                try
+                {
+                    StorageProviderSyncRootManager.Register(info);
+                    break;
+                }
+                catch (System.Runtime.InteropServices.COMException ex) when (
+                    attempt < 3 && (uint)ex.HResult == 0x80070490)
+                {
+                    Log.Warn($"{_logPrefix} Register attempt {attempt + 1} failed (0x80070490), retrying...");
+                    await Task.Delay(1000 * (attempt + 1));
+                }
             }
-            catch (System.Runtime.InteropServices.COMException ex) when (
-                attempt < 3 && (uint)ex.HResult == 0x80070490)
-            {
-                Log.Warn($"{_logPrefix} Register attempt {attempt + 1} failed (0x80070490), retrying...");
-                await Task.Delay(1000 * (attempt + 1));
-            }
+            Log.Info($"{_logPrefix} Sync root registered: {_syncRootPath} (id={_syncRootId})");
         }
         _registered = true;
-        Log.Info($"{_logPrefix} Sync root registered: {_syncRootPath} (id={_syncRootId})");
 
         // Write AUMID to link sync root to MSIX package identity.
         // Without this, cloud file shell extensions (icons, thumbnails, context menus)
