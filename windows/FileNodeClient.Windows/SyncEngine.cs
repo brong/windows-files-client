@@ -564,7 +564,7 @@ public class SyncEngine : IDisposable
         Log.Info($"{_logPrefix} Fetched {allNodes.Length} FileNodes, state: {state}");
 
         ReportSyncProgress("Creating placeholders...", 0, allNodes.Length);
-        BuildTreeAndCreatePlaceholders(allNodes);
+        BuildTreeAndCreatePlaceholders(allNodes, ct);
 
         // Track permissions on the home node (sync root folder itself)
         var homeNode = allNodes.FirstOrDefault(n => n.Id == _homeNodeId);
@@ -581,7 +581,7 @@ public class SyncEngine : IDisposable
         return state;
     }
 
-    private void BuildTreeAndCreatePlaceholders(FileNode[] allNodes)
+    private void BuildTreeAndCreatePlaceholders(FileNode[] allNodes, CancellationToken ct = default)
     {
         // Build tree client-side: group by parentId, BFS from home node
         var childrenByParent = allNodes
@@ -613,6 +613,8 @@ public class SyncEngine : IDisposable
         Log.Info($"{_logPrefix} Creating placeholders ({tree.Sum(t => t.children.Length)} items)...");
         foreach (var (parentId, localParentPath, children) in tree)
         {
+            ct.ThrowIfCancellationRequested();
+
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var newChildren = children
                 .Where(c =>
@@ -639,7 +641,9 @@ public class SyncEngine : IDisposable
                     _nodeIdToBlobId[child.Id] = child.BlobId;
                 TrackFolderPermissions(child, childPath);
 
-                // Ensure pre-existing items are proper placeholders and in-sync
+                // Ensure pre-existing items are proper placeholders and in-sync.
+                // Use single-attempt open (no retry) to avoid blocking populate
+                // for seconds per directory when handles are held open.
                 if (!newChildren.Contains(child))
                 {
                     try { SetInSync(childPath); }
@@ -651,10 +655,10 @@ public class SyncEngine : IDisposable
                         }
                         else
                         {
-                            try { ConvertToPlaceholder(childPath, child.Id, child.IsFolder); }
+                            try { ConvertToPlaceholderNoRetry(childPath, child.Id, child.IsFolder); }
                             catch (Exception ex)
                             {
-                                Log.Error($"{_logPrefix}  Convert failed for {child.Name}: {ex.Message}");
+                                Log.Debug($"{_logPrefix}  Convert skipped for {child.Name}: {ex.Message}");
                             }
                         }
                     }
@@ -2255,6 +2259,32 @@ public class SyncEngine : IDisposable
         }
     }
 
+    /// <summary>
+    /// Like ConvertToPlaceholder but with a single open attempt (no retry).
+    /// Used during initial populate where blocking on locked directories is unacceptable.
+    /// </summary>
+    internal static unsafe void ConvertToPlaceholderNoRetry(string filePath, string nodeId, bool isDirectory = false)
+    {
+        var identityBytes = Encoding.UTF8.GetBytes(nodeId);
+        using var safeHandle = OpenNoRetry(filePath, isDirectory);
+        var handle = new global::Windows.Win32.Foundation.HANDLE(safeHandle.DangerousGetHandle());
+        fixed (byte* pIdentity = identityBytes)
+        {
+            var flags = CF_CONVERT_FLAGS.CF_CONVERT_FLAG_MARK_IN_SYNC;
+            if (isDirectory)
+                flags |= CF_CONVERT_FLAGS.CF_CONVERT_FLAG_ALWAYS_FULL;
+
+            long usn = 0;
+            PInvoke.CfConvertToPlaceholder(
+                handle,
+                pIdentity,
+                (uint)identityBytes.Length,
+                flags,
+                &usn,
+                null).ThrowOnFailure();
+        }
+    }
+
     internal static unsafe void ConvertToPlaceholder(string filePath, string nodeId, bool isDirectory = false)
     {
         var identityBytes = Encoding.UTF8.GetBytes(nodeId);
@@ -2465,6 +2495,26 @@ public class SyncEngine : IDisposable
     /// placeholders.  Uses GENERIC_WRITE (not GENERIC_READ | GENERIC_WRITE)
     /// because GENERIC_READ on a dehydrated placeholder triggers FETCH_DATA.
     /// </summary>
+    private static unsafe Microsoft.Win32.SafeHandles.SafeFileHandle OpenNoRetry(string filePath, bool isDirectory = false)
+    {
+        var flags = isDirectory ? FILE_FLAG_BACKUP_SEMANTICS : 0u;
+        var handle = PInvoke.CreateFile(
+            filePath,
+            GENERIC_WRITE,
+            global::Windows.Win32.Storage.FileSystem.FILE_SHARE_MODE.FILE_SHARE_READ
+                | global::Windows.Win32.Storage.FileSystem.FILE_SHARE_MODE.FILE_SHARE_WRITE
+                | global::Windows.Win32.Storage.FileSystem.FILE_SHARE_MODE.FILE_SHARE_DELETE,
+            null,
+            global::Windows.Win32.Storage.FileSystem.FILE_CREATION_DISPOSITION.OPEN_EXISTING,
+            (global::Windows.Win32.Storage.FileSystem.FILE_FLAGS_AND_ATTRIBUTES)flags,
+            null);
+
+        if (handle.IsInvalid)
+            throw new IOException($"CreateFile failed for {filePath}");
+
+        return new Microsoft.Win32.SafeHandles.SafeFileHandle(handle.DangerousGetHandle(), ownsHandle: true);
+    }
+
     private static unsafe Microsoft.Win32.SafeHandles.SafeFileHandle OpenWithRetry(string filePath, bool isDirectory = false)
     {
         const int maxRetries = 5;
