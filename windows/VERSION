@@ -2,6 +2,7 @@
 #   1. This file (VERSION)
 #   2. windows/FileNodeClient.Package/AppxManifest.xml  (<Identity Version="...">)
 
+1.0.63.0 2026-04-15  Fix activity display, SSE reconnect loop, types=* for push events
 1.0.62.0 2026-04-14  Fix stuck "Setting up": skip re-registration of existing sync root
 1.0.61.0 2026-04-14  Fix permissions: update FilesRights for FileNode draft-12 (mayWrite→4 granular)
 1.0.60.0 2026-04-14  Fix populate stall (no-retry convert, cancellation checks)
