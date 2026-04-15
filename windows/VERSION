@@ -2,6 +2,7 @@
 #   1. This file (VERSION)
 #   2. windows/FileNodeClient.Package/AppxManifest.xml  (<Identity Version="...">)
 
+1.0.60.0 2026-04-14  Fix populate stall (no-retry convert, cancellation checks)
 1.0.59.0 2026-03-31  Update to latest specs (filenode 13, gondwana-blob-06)
 1.0.58.0 2026-03-31  Fix hydration deadlock on multi-directory pin
 1.0.57.0 2026-03-31  Cross-account activity display, initial sync progress, hasRole→role
