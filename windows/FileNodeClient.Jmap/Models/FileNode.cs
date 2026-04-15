@@ -55,9 +55,26 @@ public class FilesRights
     [JsonPropertyName("mayRead")]
     public bool MayRead { get; set; }
 
-    [JsonPropertyName("mayWrite")]
-    public bool MayWrite { get; set; }
+    // draft-12 split mayWrite into four granular rights
+    [JsonPropertyName("mayAddChildren")]
+    public bool MayAddChildren { get; set; }
+
+    [JsonPropertyName("mayRename")]
+    public bool MayRename { get; set; }
+
+    [JsonPropertyName("mayDelete")]
+    public bool MayDelete { get; set; }
+
+    [JsonPropertyName("mayModifyContent")]
+    public bool MayModifyContent { get; set; }
 
     [JsonPropertyName("mayShare")]
     public bool MayShare { get; set; }
+
+    /// <summary>
+    /// Convenience: true if the user can add children, rename, delete, and modify content.
+    /// Replaces the old mayWrite property (removed in draft-12).
+    /// </summary>
+    [JsonIgnore]
+    public bool MayWrite => MayAddChildren && MayRename && MayDelete && MayModifyContent;
 }
