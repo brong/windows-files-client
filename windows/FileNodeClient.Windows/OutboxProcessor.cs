@@ -370,7 +370,16 @@ public class OutboxProcessor : IDisposable
             var newNode = await _queue.EnqueueAsync(QueuePriority.Background,
                 () => _jmapClient.ReplaceFileNodeBlobAsync(change.NodeId, parentId, fileName, blobId, contentType, localCtime, localMtime, ct), ct);
 
-            SyncEngine.UpdatePlaceholderIdentity(change.LocalPath, newNode.Id);
+            try
+            {
+                SyncEngine.UpdatePlaceholderIdentity(change.LocalPath, newNode.Id);
+                SyncEngine.StripZoneIdentifier(change.LocalPath);
+                SyncEngine.SetInSync(change.LocalPath);
+            }
+            catch (Exception ex)
+            {
+                Log.Info($"{_logPrefix} Outbox: placeholder update deferred for {fileName}: {ex.Message}");
+            }
             _engine.RecordRecentUpload(change.LocalPath);
             _engine.UpdateMappings(change.LocalPath, change.NodeId, newNode.Id, newNode.BlobId);
 
@@ -384,9 +393,6 @@ public class OutboxProcessor : IDisposable
                         () => _jmapClient.MoveFileNodeAsync(newNode.Id, newParentId, fileName, ct: ct), ct);
                 }
             }
-
-            SyncEngine.StripZoneIdentifier(change.LocalPath);
-            SyncEngine.SetInSync(change.LocalPath);
             Log.Info($"{_logPrefix} Outbox: updated {fileName} → node {newNode.Id}");
         }
         else
@@ -476,12 +482,21 @@ public class OutboxProcessor : IDisposable
                 () => _jmapClient.CreateFileNodeAsync(parentId, blobId, fileName, contentType, "replace", localCtime, localMtime, ct), ct);
 
             Log.Info($"{_logPrefix} Outbox: EnsurePlaceholder {change.LocalPath} nodeId={node.Id}");
-            SyncEngine.EnsurePlaceholder(change.LocalPath, node.Id);
+            try
+            {
+                SyncEngine.EnsurePlaceholder(change.LocalPath, node.Id);
+                SyncEngine.StripZoneIdentifier(change.LocalPath);
+                SyncEngine.SetInSync(change.LocalPath);
+            }
+            catch (Exception ex)
+            {
+                // Non-fatal: file uploaded successfully but cfapi placeholder
+                // conversion failed (e.g. sync root was re-registered after file
+                // was copied). Next sync cycle will adopt it.
+                Log.Info($"{_logPrefix} Outbox: placeholder conversion deferred for {fileName}: {ex.Message}");
+            }
             _engine.UpdateMappings(change.LocalPath, null, node.Id);
             _engine.RecordRecentUpload(change.LocalPath);
-            SyncEngine.StripZoneIdentifier(change.LocalPath);
-            Log.Info($"{_logPrefix} Outbox: SetInSync {change.LocalPath}");
-            SyncEngine.SetInSync(change.LocalPath);
             Log.Info($"{_logPrefix} Outbox: created {fileName} → node {node.Id}");
         }
 
