@@ -138,7 +138,10 @@ internal class PlaceholderManager
                 var node = children[i];
 
                 // Pin the name string — PCWSTR needs a char*
-                var nameChars = (SanitizeName(node.Name) + "\0").ToCharArray();
+                var sanitized = SanitizeName(node.Name);
+                var nameChars = new char[sanitized.Length + 1];
+                sanitized.CopyTo(nameChars);
+                nameChars[sanitized.Length] = '\0';
                 pinnedNames[i] = GCHandle.Alloc(nameChars, GCHandleType.Pinned);
 
                 // Identity blob: store the FileNode ID as UTF-8

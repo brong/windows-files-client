@@ -260,58 +260,71 @@ internal class SyncCallbacks
         var cts = new CancellationTokenSource();
         _inFlightFetches[transferKey] = (cts, null, DateTime.UtcNow);
 
+        // Materialize cfapi-owned data synchronously — pointers invalidate after callback returns.
         var fullPath = callbackInfo->NormalizedPath.ToString();
         var fileName = Path.GetFileName(fullPath);
+        var cbInfo = *callbackInfo;
+        var fetchParams = callbackParameters->Anonymous.FetchData;
+        long requiredOffset = fetchParams.RequiredFileOffset;
+        long requiredLength = fetchParams.RequiredLength;
+        var nodeId = ExtractNodeId(callbackInfo);
 
-        // Set to false when the async streaming path takes ownership of cleanup.
+        if (string.IsNullOrEmpty(nodeId))
+        {
+            Log.Error($"{_logPrefix} FETCH_DATA: No identity for {fileName}");
+            _inFlightFetches.TryRemove(transferKey, out _);
+            cts.Dispose();
+            TransferError(cbInfo, new NTSTATUS(unchecked((int)0xC000000D)), "File not recognized by sync engine"); // STATUS_INVALID_PARAMETER
+            return;
+        }
+
+        // Check if hydration is blocked (disk full, user paused, etc.)
+        var blockedReason = HydrationBlockedReason?.Invoke();
+        if (blockedReason != null)
+        {
+            Log.Info($"{_logPrefix} FETCH_DATA: blocked for {fileName}: {blockedReason}");
+            _inFlightFetches.TryRemove(transferKey, out _);
+            cts.Dispose();
+            TransferError(cbInfo, new NTSTATUS(unchecked((int)0xC00000CF)), blockedReason); // STATUS_DEVICE_NOT_READY
+            return;
+        }
+
+        // Store node ID so CancelFetchesWhere can match by node
+        _inFlightFetches[transferKey] = (cts, nodeId, DateTime.UtcNow);
+
+        // Log the requesting process so we can understand what triggers
+        // FETCH_DATA (e.g. Explorer thumbnails, Search indexer, etc.)
+        var processName = "(unknown)";
+        if (callbackInfo->ProcessInfo != null)
+        {
+            try
+            {
+                var processId = callbackInfo->ProcessInfo->ProcessId;
+                processName = $"PID={processId}";
+                if (callbackInfo->ProcessInfo->ImagePath.Length > 0)
+                    processName = Path.GetFileName(callbackInfo->ProcessInfo->ImagePath.ToString());
+            }
+            catch { }
+        }
+        Log.Info($"{_logPrefix} FETCH_DATA: node={nodeId}, offset={requiredOffset}, len={requiredLength}, caller={processName}");
+
+        // All JMAP/HTTP work happens on a background thread so the cfapi callback
+        // returns immediately, allowing cfapi to dispatch further callbacks in parallel.
+        Log.FireAndForget(Task.Run(() => FetchDataAsync(
+            cbInfo, nodeId, fullPath, fileName, transferKey,
+            requiredOffset, requiredLength, cts)), $"{_logPrefix}.FetchDataCallback");
+    }
+
+    private async Task FetchDataAsync(
+        CF_CALLBACK_INFO cbInfo, string nodeId, string fullPath, string fileName,
+        long transferKey, long requiredOffset, long requiredLength,
+        CancellationTokenSource cts)
+    {
         bool cleanupHere = true;
-
         try
         {
-            var fetchParams = callbackParameters->Anonymous.FetchData;
-            long requiredOffset = fetchParams.RequiredFileOffset;
-            long requiredLength = fetchParams.RequiredLength;
-
-            // Extract the FileNode ID from the file identity blob
-            var nodeId = ExtractNodeId(callbackInfo);
-
-            if (string.IsNullOrEmpty(nodeId))
-            {
-                Log.Error($"{_logPrefix} FETCH_DATA: No identity for {fileName}");
-                TransferError(*callbackInfo, new NTSTATUS(unchecked((int)0xC000000D)), "File not recognized by sync engine"); // STATUS_INVALID_PARAMETER
-                return;
-            }
-
-            // Check if hydration is blocked (disk full, user paused, etc.)
-            var blockedReason = HydrationBlockedReason?.Invoke();
-            if (blockedReason != null)
-            {
-                Log.Info($"{_logPrefix} FETCH_DATA: blocked for {fileName}: {blockedReason}");
-                TransferError(*callbackInfo, new NTSTATUS(unchecked((int)0xC00000CF)), blockedReason); // STATUS_DEVICE_NOT_READY
-                return;
-            }
-
-            // Store node ID so CancelFetchesWhere can match by node
-            _inFlightFetches[transferKey] = (cts, nodeId, DateTime.UtcNow);
-
-            // Log the requesting process so we can understand what triggers
-            // FETCH_DATA (e.g. Explorer thumbnails, Search indexer, etc.)
-            var processName = "(unknown)";
-            if (callbackInfo->ProcessInfo != null)
-            {
-                try
-                {
-                    var processId = callbackInfo->ProcessInfo->ProcessId;
-                    processName = $"PID={processId}";
-                    if (callbackInfo->ProcessInfo->ImagePath.Length > 0)
-                        processName = Path.GetFileName(callbackInfo->ProcessInfo->ImagePath.ToString());
-                }
-                catch { }
-            }
-            Log.Info($"{_logPrefix} FETCH_DATA: node={nodeId}, offset={requiredOffset}, len={requiredLength}, caller={processName}");
-
             // Fetch node metadata first (shared by both paths)
-            var node = FetchNodeAsync(nodeId, cts.Token).GetAwaiter().GetResult();
+            var node = await FetchNodeAsync(nodeId, cts.Token);
             var nodeSize = node.Size ?? 0;
             bool isFullHydration = requiredOffset == 0 && requiredLength >= nodeSize;
 
@@ -323,35 +336,25 @@ internal class SyncCallbacks
 
             if (isFullHydration && nodeSize > BlobGetMaxSize)
             {
-                // Large full hydration — transfer data asynchronously on a
-                // background thread so this callback returns immediately.
-                // cfapi releases data to the reading app as each chunk is
-                // transferred via CfExecute (which works from any thread).
-                var cbInfo = *callbackInfo;
+                // Streaming path owns cleanup of _inFlightFetches/cts.
                 cleanupHere = false;
                 StreamBlobAsync(cbInfo, node, transferKey, nodeId, fullPath, cts);
                 return;
             }
 
             // Small file, partial request, or Blob/get eligible — use buffered path
-            var (data, dataStartOffset, totalSize) = FetchBlobDataAsync(node, requiredOffset, requiredLength, cts.Token)
-                .GetAwaiter().GetResult();
+            var (data, dataStartOffset, totalSize) = await FetchBlobDataAsync(node, requiredOffset, requiredLength, cts.Token);
 
             Log.Info($"{_logPrefix} FETCH_DATA: buffered {data.Length} bytes for node={nodeId}, dataStartOffset={dataStartOffset}, totalSize={totalSize}");
 
             int sourceOffset = (int)(requiredOffset - dataStartOffset);
-            TransferData(*callbackInfo, data, sourceOffset, requiredOffset, requiredLength, totalSize, cts.Token);
+            TransferData(cbInfo, data, sourceOffset, requiredOffset, requiredLength, totalSize, cts.Token);
 
             Log.Info($"{_logPrefix} FETCH_DATA: transfer complete for node={nodeId}");
 
             // Record that we just hydrated this file so SyncEngine doesn't
             // re-upload it when FileSystemWatcher fires a Changed event.
-            // Store the post-hydration mtime so real edits can be distinguished.
-            if (nodeId != null)
-            {
-                var hydratedPath = callbackInfo->NormalizedPath.ToString();
-                RecentlyHydrated[nodeId] = (GetLastWriteTimeSafe(hydratedPath), DateTime.UtcNow);
-            }
+            RecentlyHydrated[nodeId] = (GetLastWriteTimeSafe(fullPath), DateTime.UtcNow);
         }
         catch (OperationCanceledException)
         {
@@ -360,7 +363,7 @@ internal class SyncCallbacks
         catch (Exception ex)
         {
             Log.Error($"{_logPrefix} FETCH_DATA error: {ex.Message}");
-            TransferError(*callbackInfo, new NTSTATUS(unchecked((int)0xC0000001)), $"Download failed: {ex.Message}"); // STATUS_UNSUCCESSFUL
+            TransferError(cbInfo, new NTSTATUS(unchecked((int)0xC0000001)), $"Download failed: {ex.Message}"); // STATUS_UNSUCCESSFUL
         }
         finally
         {
@@ -376,59 +379,80 @@ internal class SyncCallbacks
 
     private unsafe void NotifyDeleteCallback(CF_CALLBACK_INFO* callbackInfo, CF_CALLBACK_PARAMETERS* callbackParameters)
     {
-        bool allowed = true;
-        try
+        // Materialize everything cfapi owns (strings, identity) synchronously;
+        // PCWSTR + FileIdentity pointers are invalid after the callback returns.
+        var nodeId = ExtractNodeId(callbackInfo);
+        var fullPath = ExtractFullPath(callbackInfo);
+        var cbInfo = *callbackInfo; // scalar fields only used async
+
+        Log.Info($"{_logPrefix} NOTIFY_DELETE: node={nodeId}, path={fullPath}");
+
+        var handler = OnDeleteRequested;
+        if (handler == null)
         {
-            var nodeId = ExtractNodeId(callbackInfo);
-            var fullPath = ExtractFullPath(callbackInfo);
-
-            Log.Info($"{_logPrefix} NOTIFY_DELETE: node={nodeId}, path={fullPath}");
-
-            if (OnDeleteRequested != null)
-                allowed = OnDeleteRequested(nodeId, fullPath).GetAwaiter().GetResult();
+            try { AckDelete(cbInfo, true); }
+            catch (Exception ex) { Log.Error($"{_logPrefix} AckDelete failed: {ex.Message}"); }
+            return;
         }
+
+        Log.FireAndForget(Task.Run(() => HandleNotifyDeleteAsync(cbInfo, handler, nodeId, fullPath)),
+            $"{_logPrefix}.NotifyDeleteCallback");
+    }
+
+    private async Task HandleNotifyDeleteAsync(CF_CALLBACK_INFO cbInfo,
+        Func<string?, string, Task<bool>> handler, string? nodeId, string fullPath)
+    {
+        bool allowed;
+        try { allowed = await handler(nodeId, fullPath); }
         catch (Exception ex)
         {
             Log.Error($"{_logPrefix} NOTIFY_DELETE error: {ex.Message}");
             allowed = false;
         }
-        finally
-        {
-            try { AckDelete(callbackInfo, allowed); }
-            catch (Exception ex) { Log.Error($"{_logPrefix} AckDelete failed: {ex.Message}"); }
-        }
+        try { AckDelete(cbInfo, allowed); }
+        catch (Exception ex) { Log.Error($"{_logPrefix} AckDelete failed: {ex.Message}"); }
     }
 
     private unsafe void NotifyRenameCallback(CF_CALLBACK_INFO* callbackInfo, CF_CALLBACK_PARAMETERS* callbackParameters)
     {
-        bool allowed = true;
-        try
+        var nodeId = ExtractNodeId(callbackInfo);
+        var sourcePath = ExtractFullPath(callbackInfo);
+
+        var renameParams = callbackParameters->Anonymous.Rename;
+        var targetPath = callbackInfo->VolumeDosName.ToString() + renameParams.TargetPath.ToString();
+        if (targetPath.StartsWith(@"\\?\"))
+            targetPath = targetPath.Substring(4);
+
+        bool targetInScope = ((uint)renameParams.Flags & 0x4) != 0; // CF_CALLBACK_RENAME_FLAG_TARGET_IN_SCOPE
+        var cbInfo = *callbackInfo;
+
+        Log.Info($"{_logPrefix} NOTIFY_RENAME: node={nodeId}, {sourcePath} → {targetPath} (inScope={targetInScope})");
+
+        var handler = OnRenameRequested;
+        if (handler == null)
         {
-            var nodeId = ExtractNodeId(callbackInfo);
-            var sourcePath = ExtractFullPath(callbackInfo);
-
-            var renameParams = callbackParameters->Anonymous.Rename;
-            var targetPath = callbackInfo->VolumeDosName.ToString() + renameParams.TargetPath.ToString();
-            if (targetPath.StartsWith(@"\\?\"))
-                targetPath = targetPath.Substring(4);
-
-            bool targetInScope = ((uint)renameParams.Flags & 0x4) != 0; // CF_CALLBACK_RENAME_FLAG_TARGET_IN_SCOPE
-
-            Log.Info($"{_logPrefix} NOTIFY_RENAME: node={nodeId}, {sourcePath} → {targetPath} (inScope={targetInScope})");
-
-            if (OnRenameRequested != null)
-                allowed = OnRenameRequested(nodeId, sourcePath, targetPath, targetInScope).GetAwaiter().GetResult();
+            try { AckRename(cbInfo, true); }
+            catch (Exception ex) { Log.Error($"{_logPrefix} AckRename failed: {ex.Message}"); }
+            return;
         }
+
+        Log.FireAndForget(Task.Run(() => HandleNotifyRenameAsync(cbInfo, handler, nodeId, sourcePath, targetPath, targetInScope)),
+            $"{_logPrefix}.NotifyRenameCallback");
+    }
+
+    private async Task HandleNotifyRenameAsync(CF_CALLBACK_INFO cbInfo,
+        Func<string?, string, string, bool, Task<bool>> handler,
+        string? nodeId, string sourcePath, string targetPath, bool targetInScope)
+    {
+        bool allowed;
+        try { allowed = await handler(nodeId, sourcePath, targetPath, targetInScope); }
         catch (Exception ex)
         {
             Log.Error($"{_logPrefix} NOTIFY_RENAME error: {ex.Message}");
             allowed = false;
         }
-        finally
-        {
-            try { AckRename(callbackInfo, allowed); }
-            catch (Exception ex) { Log.Error($"{_logPrefix} AckRename failed: {ex.Message}"); }
-        }
+        try { AckRename(cbInfo, allowed); }
+        catch (Exception ex) { Log.Error($"{_logPrefix} AckRename failed: {ex.Message}"); }
     }
 
     private unsafe void CancelFetchDataCallback(CF_CALLBACK_INFO* callbackInfo, CF_CALLBACK_PARAMETERS* callbackParameters)
@@ -468,27 +492,36 @@ internal class SyncCallbacks
 
     private unsafe void NotifyDehydrateCallback(CF_CALLBACK_INFO* callbackInfo, CF_CALLBACK_PARAMETERS* callbackParameters)
     {
-        bool allowed = true;
-        try
+        var nodeId = ExtractNodeId(callbackInfo);
+        var fullPath = ExtractFullPath(callbackInfo);
+        var cbInfo = *callbackInfo;
+
+        Log.Info($"{_logPrefix} NOTIFY_DEHYDRATE: node={nodeId}, path={fullPath}");
+
+        var handler = OnDehydrateRequested;
+        if (handler == null)
         {
-            var nodeId = ExtractNodeId(callbackInfo);
-            var fullPath = ExtractFullPath(callbackInfo);
-
-            Log.Info($"{_logPrefix} NOTIFY_DEHYDRATE: node={nodeId}, path={fullPath}");
-
-            if (OnDehydrateRequested != null)
-                allowed = OnDehydrateRequested(nodeId, fullPath).GetAwaiter().GetResult();
+            try { AckDehydrate(cbInfo, true); }
+            catch (Exception ex) { Log.Error($"{_logPrefix} AckDehydrate failed: {ex.Message}"); }
+            return;
         }
+
+        Log.FireAndForget(Task.Run(() => HandleNotifyDehydrateAsync(cbInfo, handler, nodeId, fullPath)),
+            $"{_logPrefix}.NotifyDehydrateCallback");
+    }
+
+    private async Task HandleNotifyDehydrateAsync(CF_CALLBACK_INFO cbInfo,
+        Func<string?, string, Task<bool>> handler, string? nodeId, string fullPath)
+    {
+        bool allowed;
+        try { allowed = await handler(nodeId, fullPath); }
         catch (Exception ex)
         {
             Log.Error($"{_logPrefix} NOTIFY_DEHYDRATE error: {ex.Message}");
             allowed = false;
         }
-        finally
-        {
-            try { AckDehydrate(callbackInfo, allowed); }
-            catch (Exception ex) { Log.Error($"{_logPrefix} AckDehydrate failed: {ex.Message}"); }
-        }
+        try { AckDehydrate(cbInfo, allowed); }
+        catch (Exception ex) { Log.Error($"{_logPrefix} AckDehydrate failed: {ex.Message}"); }
     }
 
     private unsafe void NotifyDehydrateCompletionCallback(CF_CALLBACK_INFO* callbackInfo, CF_CALLBACK_PARAMETERS* callbackParameters)
@@ -577,15 +610,15 @@ internal class SyncCallbacks
         catch { return DateTime.MinValue; }
     }
 
-    private static unsafe void AckDehydrate(CF_CALLBACK_INFO* callbackInfo, bool allow)
+    private static unsafe void AckDehydrate(CF_CALLBACK_INFO callbackInfo, bool allow)
     {
         var opInfo = new CF_OPERATION_INFO
         {
             StructSize = (uint)sizeof(CF_OPERATION_INFO),
             Type = CF_OPERATION_TYPE.CF_OPERATION_TYPE_ACK_DEHYDRATE,
-            ConnectionKey = callbackInfo->ConnectionKey,
-            TransferKey = callbackInfo->TransferKey,
-            RequestKey = callbackInfo->RequestKey,
+            ConnectionKey = callbackInfo.ConnectionKey,
+            TransferKey = callbackInfo.TransferKey,
+            RequestKey = callbackInfo.RequestKey,
         };
 
         var opParams = new CF_OPERATION_PARAMETERS();
@@ -615,15 +648,15 @@ internal class SyncCallbacks
         return path;
     }
 
-    private static unsafe void AckDelete(CF_CALLBACK_INFO* callbackInfo, bool allow)
+    private static unsafe void AckDelete(CF_CALLBACK_INFO callbackInfo, bool allow)
     {
         var opInfo = new CF_OPERATION_INFO
         {
             StructSize = (uint)sizeof(CF_OPERATION_INFO),
             Type = CF_OPERATION_TYPE.CF_OPERATION_TYPE_ACK_DELETE,
-            ConnectionKey = callbackInfo->ConnectionKey,
-            TransferKey = callbackInfo->TransferKey,
-            RequestKey = callbackInfo->RequestKey,
+            ConnectionKey = callbackInfo.ConnectionKey,
+            TransferKey = callbackInfo.TransferKey,
+            RequestKey = callbackInfo.RequestKey,
         };
 
         var opParams = new CF_OPERATION_PARAMETERS();
@@ -635,15 +668,15 @@ internal class SyncCallbacks
         PInvoke.CfExecute(in opInfo, ref opParams).ThrowOnFailure();
     }
 
-    private static unsafe void AckRename(CF_CALLBACK_INFO* callbackInfo, bool allow)
+    private static unsafe void AckRename(CF_CALLBACK_INFO callbackInfo, bool allow)
     {
         var opInfo = new CF_OPERATION_INFO
         {
             StructSize = (uint)sizeof(CF_OPERATION_INFO),
             Type = CF_OPERATION_TYPE.CF_OPERATION_TYPE_ACK_RENAME,
-            ConnectionKey = callbackInfo->ConnectionKey,
-            TransferKey = callbackInfo->TransferKey,
-            RequestKey = callbackInfo->RequestKey,
+            ConnectionKey = callbackInfo.ConnectionKey,
+            TransferKey = callbackInfo.TransferKey,
+            RequestKey = callbackInfo.RequestKey,
         };
 
         var opParams = new CF_OPERATION_PARAMETERS();

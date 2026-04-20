@@ -151,7 +151,7 @@ public static class NodeCache
         {
             var json = JsonSerializer.Serialize(snapshot, new JsonSerializerOptions
             {
-                WriteIndented = true,
+                WriteIndented = false,
             });
 
             var tempPath = path + ".tmp";

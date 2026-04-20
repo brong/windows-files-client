@@ -861,73 +861,87 @@ public class JmapClient : IJmapClient
             var thisChunkSize = (int)Math.Min(serverChunk.size, totalSize - totalUploaded);
 
             // Read local chunk data and compute hash
-            var chunkData = new byte[thisChunkSize];
-            int bytesRead = 0;
-            while (bytesRead < thisChunkSize)
+            var chunkData = ArrayPool<byte>.Shared.Rent(thisChunkSize);
+            try
             {
-                var n = await data.ReadAsync(chunkData.AsMemory(bytesRead, thisChunkSize - bytesRead), ct);
-                if (n == 0) break;
-                bytesRead += n;
+                int bytesRead = 0;
+                while (bytesRead < thisChunkSize)
+                {
+                    var n = await data.ReadAsync(chunkData.AsMemory(bytesRead, thisChunkSize - bytesRead), ct);
+                    if (n == 0) break;
+                    bytesRead += n;
+                }
+
+                overallHash.AppendData(chunkData, 0, bytesRead);
+                var localSha1 = Convert.ToBase64String(SHA1.HashData(chunkData.AsSpan(0, bytesRead)));
+
+                // Compare: if server has a digest and it matches, reuse the server chunk
+                if (serverChunk.digestSha != null && localSha1 == serverChunk.digestSha)
+                {
+                    chunkBlobIds.Add((serverChunk.blobId, localSha1));
+                    reusedChunks++;
+                    Log.Info($"[DeltaUpload] Chunk {i}: reused (SHA1 match)");
+                }
+                else
+                {
+                    // Upload this chunk
+                    using var chunkStream = new MemoryStream(chunkData, 0, bytesRead);
+                    var chunkContent = new StreamContent(chunkStream);
+                    chunkContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
+                    using var chunkRequest = new HttpRequestMessage(HttpMethod.Post, uploadUrl) { Content = chunkContent, Version = System.Net.HttpVersion.Version11 };
+                    var response = await _http.SendAsync(chunkRequest, ct);
+                    response.EnsureSuccessStatusCode();
+                    var json = await response.Content.ReadAsStringAsync(ct);
+                    var upload = JsonSerializer.Deserialize<UploadResponse>(json, JmapSerializerOptions.Default)
+                        ?? throw new InvalidOperationException("Failed to parse chunk upload response");
+                    chunkBlobIds.Add((upload.BlobId, localSha1));
+                    Log.Info($"[DeltaUpload] Chunk {i}: uploaded new ({bytesRead} bytes)");
+                }
+
+                totalUploaded += bytesRead;
+                onProgress?.Invoke(totalUploaded);
             }
-
-            overallHash.AppendData(chunkData, 0, bytesRead);
-            var localSha1 = Convert.ToBase64String(SHA1.HashData(chunkData.AsSpan(0, bytesRead)));
-
-            // Compare: if server has a digest and it matches, reuse the server chunk
-            if (serverChunk.digestSha != null && localSha1 == serverChunk.digestSha)
+            finally
             {
-                chunkBlobIds.Add((serverChunk.blobId, localSha1));
-                reusedChunks++;
-                Log.Info($"[DeltaUpload] Chunk {i}: reused (SHA1 match)");
+                ArrayPool<byte>.Shared.Return(chunkData);
             }
-            else
-            {
-                // Upload this chunk
-                using var chunkStream = new MemoryStream(chunkData, 0, bytesRead);
-                var chunkContent = new StreamContent(chunkStream);
-                chunkContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
-                using var chunkRequest = new HttpRequestMessage(HttpMethod.Post, uploadUrl) { Content = chunkContent, Version = System.Net.HttpVersion.Version11 };
-                var response = await _http.SendAsync(chunkRequest, ct);
-                response.EnsureSuccessStatusCode();
-                var json = await response.Content.ReadAsStringAsync(ct);
-                var upload = JsonSerializer.Deserialize<UploadResponse>(json, JmapSerializerOptions.Default)
-                    ?? throw new InvalidOperationException("Failed to parse chunk upload response");
-                chunkBlobIds.Add((upload.BlobId, localSha1));
-                Log.Info($"[DeltaUpload] Chunk {i}: uploaded new ({bytesRead} bytes)");
-            }
-
-            totalUploaded += bytesRead;
-            onProgress?.Invoke(totalUploaded);
         }
 
         // If there's remaining data beyond the server's chunk count, upload those too
         while (totalUploaded < totalSize)
         {
             var remaining = (int)Math.Min(MaxChunkSize, totalSize - totalUploaded);
-            var chunkData = new byte[remaining];
-            int bytesRead = 0;
-            while (bytesRead < remaining)
+            var chunkData = ArrayPool<byte>.Shared.Rent(remaining);
+            try
             {
-                var n = await data.ReadAsync(chunkData.AsMemory(bytesRead, remaining - bytesRead), ct);
-                if (n == 0) break;
-                bytesRead += n;
+                int bytesRead = 0;
+                while (bytesRead < remaining)
+                {
+                    var n = await data.ReadAsync(chunkData.AsMemory(bytesRead, remaining - bytesRead), ct);
+                    if (n == 0) break;
+                    bytesRead += n;
+                }
+
+                overallHash.AppendData(chunkData, 0, bytesRead);
+                var localSha1 = Convert.ToBase64String(SHA1.HashData(chunkData.AsSpan(0, bytesRead)));
+
+                using var chunkStream = new MemoryStream(chunkData, 0, bytesRead);
+                var chunkContent = new StreamContent(chunkStream);
+                chunkContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
+                using var chunkRequest = new HttpRequestMessage(HttpMethod.Post, uploadUrl) { Content = chunkContent, Version = System.Net.HttpVersion.Version11 };
+                var uploadResp = await _http.SendAsync(chunkRequest, ct);
+                uploadResp.EnsureSuccessStatusCode();
+                var uploadJson = await uploadResp.Content.ReadAsStringAsync(ct);
+                var upload = JsonSerializer.Deserialize<UploadResponse>(uploadJson, JmapSerializerOptions.Default)
+                    ?? throw new InvalidOperationException("Failed to parse chunk upload response");
+                chunkBlobIds.Add((upload.BlobId, localSha1));
+                totalUploaded += bytesRead;
+                onProgress?.Invoke(totalUploaded);
             }
-
-            overallHash.AppendData(chunkData, 0, bytesRead);
-            var localSha1 = Convert.ToBase64String(SHA1.HashData(chunkData.AsSpan(0, bytesRead)));
-
-            using var chunkStream = new MemoryStream(chunkData, 0, bytesRead);
-            var chunkContent = new StreamContent(chunkStream);
-            chunkContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
-            using var chunkRequest = new HttpRequestMessage(HttpMethod.Post, uploadUrl) { Content = chunkContent, Version = System.Net.HttpVersion.Version11 };
-            var uploadResp = await _http.SendAsync(chunkRequest, ct);
-            uploadResp.EnsureSuccessStatusCode();
-            var uploadJson = await uploadResp.Content.ReadAsStringAsync(ct);
-            var upload = JsonSerializer.Deserialize<UploadResponse>(uploadJson, JmapSerializerOptions.Default)
-                ?? throw new InvalidOperationException("Failed to parse chunk upload response");
-            chunkBlobIds.Add((upload.BlobId, localSha1));
-            totalUploaded += bytesRead;
-            onProgress?.Invoke(totalUploaded);
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(chunkData);
+            }
         }
 
         Log.Info($"[DeltaUpload] Reused {reusedChunks}/{chunkBlobIds.Count} chunks");

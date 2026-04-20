@@ -539,14 +539,14 @@ public class SyncEngine : IDisposable
         ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_POPULATE_NAMESPACE);
         ReportSyncProgress("Discovering...");
 
-        // Discover home node
-        _homeNodeId = await _queue.EnqueueAsync(QueuePriority.Background,
+        // Discover home and trash nodes in parallel — independent role lookups
+        var homeTask = _queue.EnqueueAsync(QueuePriority.Background,
             () => _jmapClient.FindHomeNodeIdAsync(ct), ct);
-        Log.Info($"{_logPrefix} Home node: {_homeNodeId}");
-
-        // Discover trash node
-        _trashNodeId = await _queue.EnqueueAsync(QueuePriority.Background,
+        var trashTask = _queue.EnqueueAsync(QueuePriority.Background,
             () => _jmapClient.FindTrashNodeIdAsync(ct), ct);
+        _homeNodeId = await homeTask;
+        _trashNodeId = await trashTask;
+        Log.Info($"{_logPrefix} Home node: {_homeNodeId}");
         Log.Info($"{_logPrefix} Trash node: {_trashNodeId ?? "(none)"}");
         _outboxProcessor.SetTrashNodeId(_trashNodeId);
 
@@ -730,26 +730,28 @@ public class SyncEngine : IDisposable
         if (!_pinnedDirectories.IsEmpty)
         {
             Log.Info($"{_logPrefix} Found {_pinnedDirectories.Count} pinned directories, hydrating...");
-            _ = Task.Run(() =>
+            Log.FireAndForget(HydrateAllPinnedDirectoriesAsync(), $"{_logPrefix}.HydrateAllPinned");
+        }
+    }
+
+    private async Task HydrateAllPinnedDirectoriesAsync()
+    {
+        foreach (var kvp in _pinnedDirectories)
+        {
+            try
             {
-                foreach (var kvp in _pinnedDirectories)
-                {
-                    try
-                    {
-                        var (count, allHydrated) = HydrateDehydratedFiles(kvp.Key, kvp.Value.Token);
-                        if (count > 0)
-                            Log.Info($"{_logPrefix} Hydrated {count} files in pinned directory: {kvp.Key}{(allHydrated ? "" : " (some files still dehydrated)")}");
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        Log.Info($"{_logPrefix} Hydration cancelled for pinned directory: {kvp.Key}");
-                    }
-                    catch (Exception ex)
-                    {
-                        Log.Error($"{_logPrefix} Pin hydration error for {kvp.Key}: {ex.Message}");
-                    }
-                }
-            });
+                var (count, allHydrated) = await HydrateDehydratedFilesAsync(kvp.Key, kvp.Value.Token);
+                if (count > 0)
+                    Log.Info($"{_logPrefix} Hydrated {count} files in pinned directory: {kvp.Key}{(allHydrated ? "" : " (some files still dehydrated)")}");
+            }
+            catch (OperationCanceledException)
+            {
+                Log.Info($"{_logPrefix} Hydration cancelled for pinned directory: {kvp.Key}");
+            }
+            catch (Exception ex)
+            {
+                Log.Error($"{_logPrefix} Pin hydration error for {kvp.Key}: {ex.Message}");
+            }
         }
     }
 
@@ -1510,23 +1512,26 @@ public class SyncEngine : IDisposable
         var cts = FindPinnedAncestorCts(info.DirectoryPath);
         if (cts != null)
         {
-            _ = Task.Run(() =>
-            {
-                try
-                {
-                    var (count, allHydrated) = HydrateDehydratedFiles(info.DirectoryPath, cts.Token);
-                    if (count > 0)
-                        Log.Info($"{_logPrefix} Hydrated {count} files after directory populated: {info.DirectoryPath}{(allHydrated ? "" : " (some files still dehydrated)")}");
-                }
-                catch (OperationCanceledException)
-                {
-                    Log.Info($"{_logPrefix} Hydration cancelled for populated directory: {info.DirectoryPath}");
-                }
-                catch (Exception ex)
-                {
-                    Log.Error($"{_logPrefix} Hydration error for {info.DirectoryPath}: {ex.Message}");
-                }
-            });
+            Log.FireAndForget(HydratePopulatedDirectoryAsync(info.DirectoryPath, cts.Token),
+                $"{_logPrefix}.HydratePopulated");
+        }
+    }
+
+    private async Task HydratePopulatedDirectoryAsync(string directoryPath, CancellationToken ct)
+    {
+        try
+        {
+            var (count, allHydrated) = await HydrateDehydratedFilesAsync(directoryPath, ct);
+            if (count > 0)
+                Log.Info($"{_logPrefix} Hydrated {count} files after directory populated: {directoryPath}{(allHydrated ? "" : " (some files still dehydrated)")}");
+        }
+        catch (OperationCanceledException)
+        {
+            Log.Info($"{_logPrefix} Hydration cancelled for populated directory: {directoryPath}");
+        }
+        catch (Exception ex)
+        {
+            Log.Error($"{_logPrefix} Hydration error for {directoryPath}: {ex.Message}");
         }
     }
 
@@ -1536,31 +1541,33 @@ public class SyncEngine : IDisposable
         if (_pinnedDirectories.TryAdd(directoryPath, cts))
         {
             Log.Info($"{_logPrefix} Directory pinned: {directoryPath}");
-            _ = Task.Run(() =>
-            {
-                try
-                {
-                    // Don't acquire _hydrationGate here — HydrateDehydratedFiles
-                    // acquires it per-file internally. Holding a slot here while
-                    // waiting on inner tasks causes deadlock when multiple
-                    // directories are pinned simultaneously.
-                    var (count, allHydrated) = HydrateDehydratedFiles(directoryPath, cts.Token);
-                    if (count > 0)
-                        Log.Info($"{_logPrefix} Hydrated {count} files in {directoryPath}{(allHydrated ? "" : " (some files still dehydrated)")}");
-                }
-                catch (OperationCanceledException)
-                {
-                    Log.Info($"{_logPrefix} Hydration cancelled for {directoryPath}");
-                }
-                catch (Exception ex)
-                {
-                    Log.Error($"{_logPrefix} Pin hydration error for {directoryPath}: {ex.Message}");
-                }
-            });
+            // Don't acquire _hydrationGate at this level — HydrateDehydratedFilesAsync
+            // acquires it per-file internally. Holding a slot here would deadlock
+            // when multiple directories are pinned simultaneously.
+            Log.FireAndForget(HydratePinnedDirectoryAsync(directoryPath, cts.Token),
+                $"{_logPrefix}.HydratePinned");
         }
         else
         {
             cts.Dispose();
+        }
+    }
+
+    private async Task HydratePinnedDirectoryAsync(string directoryPath, CancellationToken ct)
+    {
+        try
+        {
+            var (count, allHydrated) = await HydrateDehydratedFilesAsync(directoryPath, ct);
+            if (count > 0)
+                Log.Info($"{_logPrefix} Hydrated {count} files in {directoryPath}{(allHydrated ? "" : " (some files still dehydrated)")}");
+        }
+        catch (OperationCanceledException)
+        {
+            Log.Info($"{_logPrefix} Hydration cancelled for {directoryPath}");
+        }
+        catch (Exception ex)
+        {
+            Log.Error($"{_logPrefix} Pin hydration error for {directoryPath}: {ex.Message}");
         }
     }
 
@@ -1862,8 +1869,11 @@ public class SyncEngine : IDisposable
     /// Hydrate all dehydrated files in a directory (recursively).
     /// Returns (count of files hydrated, true if ALL files are now hydrated).
     /// Throws OperationCanceledException if the cancellation token fires.
+    /// Concurrency across the whole process is bounded by <see cref="_hydrationGate"/>;
+    /// this method awaits a slot before launching each per-file task so at most
+    /// gateCapacity tasks are materialized at a time.
     /// </summary>
-    private (int Count, bool AllHydrated) HydrateDehydratedFiles(string directoryPath, CancellationToken ct)
+    private async Task<(int Count, bool AllHydrated)> HydrateDehydratedFilesAsync(string directoryPath, CancellationToken ct)
     {
         if (!Directory.Exists(directoryPath))
             return (0, true);
@@ -1901,33 +1911,29 @@ public class SyncEngine : IDisposable
                 Log.SafeInvoke(() => ActivityChanged?.Invoke(), "SyncEngine.HydrateQueued.ActivityChanged");
             }
 
-            // Hydrate files in parallel, limited by _hydrationGate (semaphore).
-            // CfHydratePlaceholder blocks the calling thread until the file is
-            // fully downloaded, so parallelism gives us concurrent downloads.
-            var tasks = new List<Task>();
+            // Throttle task launch: acquire a hydration slot before Task.Run so
+            // we only materialize gateCapacity tasks at a time (previously we
+            // spawned one task per file and let them queue on the semaphore).
+            var inFlight = new List<Task>();
             foreach (var filePath in dehydratedFiles)
             {
                 ct.ThrowIfCancellationRequested();
-                tasks.Add(Task.Run(() =>
+                await _hydrationGate.WaitAsync(ct);
+                inFlight.Add(Task.Run(() =>
                 {
                     try
                     {
-                        _hydrationGate.Wait(ct);
-                        try
+                        // Re-check in case another path hydrated it
+                        var attrs = File.GetAttributes(filePath);
+                        if ((attrs & dehydratedFlag) == 0)
                         {
-                            // Re-check in case another path hydrated it
-                            var attrs = File.GetAttributes(filePath);
-                            if ((attrs & dehydratedFlag) == 0)
-                            {
-                                _pendingHydrations.TryRemove(filePath, out _);
-                                return;
-                            }
-
-                            Log.Info($"{_logPrefix} Hydrating pinned file: {Path.GetFileName(filePath)}");
-                            HydratePlaceholder(filePath);
-                            Interlocked.Increment(ref count);
+                            _pendingHydrations.TryRemove(filePath, out _);
+                            return;
                         }
-                        finally { _hydrationGate.Release(); }
+
+                        Log.Info($"{_logPrefix} Hydrating pinned file: {Path.GetFileName(filePath)}");
+                        HydratePlaceholder(filePath);
+                        Interlocked.Increment(ref count);
                     }
                     catch (Exception ex) when (ex is not OperationCanceledException)
                     {
@@ -1936,16 +1942,18 @@ public class SyncEngine : IDisposable
                         Log.SafeInvoke(() => ActivityChanged?.Invoke(), "SyncEngine.HydrateFailed.ActivityChanged");
                         lock (failed) { failed.Add(filePath); }
                     }
+                    finally { _hydrationGate.Release(); }
                 }, ct));
             }
-            Task.WhenAll(tasks).Wait(ct);
+            await Task.WhenAll(inFlight);
 
-            // Retry failed hydrations (e.g. transient network errors)
+            // Retry failed hydrations (e.g. transient network errors) with
+            // exponential backoff. Await Task.Delay so we don't block a thread.
             for (int retry = 1; retry <= 3 && failed.Count > 0; retry++)
             {
                 ct.ThrowIfCancellationRequested();
                 Log.Info($"{_logPrefix} Retrying {failed.Count} failed hydrations (attempt {retry})...");
-                Thread.Sleep(2000 * retry);
+                await Task.Delay(TimeSpan.FromSeconds(2 * retry), ct);
 
                 var stillFailed = new List<string>();
                 foreach (var filePath in failed)
@@ -1958,7 +1966,9 @@ public class SyncEngine : IDisposable
                             continue; // Hydrated by another path
 
                         Log.Info($"{_logPrefix} Hydrating pinned file (retry {retry}): {Path.GetFileName(filePath)}");
-                        HydratePlaceholder(filePath);
+                        await _hydrationGate.WaitAsync(ct);
+                        try { HydratePlaceholder(filePath); }
+                        finally { _hydrationGate.Release(); }
                         count++;
                     }
                     catch (Exception ex) when (ex is not OperationCanceledException)
@@ -1993,7 +2003,7 @@ public class SyncEngine : IDisposable
                     }
                     SetInSync(filePath);
                     if (++inSyncCount % 50 == 0)
-                        Thread.Sleep(50);
+                        await Task.Delay(50, ct);
                 }
                 catch { /* not a placeholder or file gone — ignore */ }
             }
@@ -2006,7 +2016,7 @@ public class SyncEngine : IDisposable
                 ct.ThrowIfCancellationRequested();
                 if (_pinnedDirectories.TryGetValue(directoryPath, out var parentCts))
                     _pinnedDirectories.TryAdd(subDir, parentCts);
-                var (subCount, subAllHydrated) = HydrateDehydratedFiles(subDir, ct);
+                var (subCount, subAllHydrated) = await HydrateDehydratedFilesAsync(subDir, ct);
                 count += subCount;
                 if (!subAllHydrated)
                     allHydrated = false;
