@@ -38,7 +38,7 @@ WINSRC="$SRCDIR/windows"
 
 echo "=== Rsync to build dir ==="
 rm -rf "$BUILDDIR"
-rsync -a --exclude='.git' --exclude='.claude' --exclude='bin' --exclude='obj' "$WINSRC/" "$BUILDDIR/"
+rsync -a --exclude='.git' --exclude='.claude' --exclude='bin' --exclude='obj' --exclude='FileNodeClient.Package/publish' "$WINSRC/" "$BUILDDIR/"
 
 WINBUILD=$(wslpath -w "$BUILDDIR")
 PUBLISHDIR="$BUILDDIR/FileNodeClient.Package/publish"

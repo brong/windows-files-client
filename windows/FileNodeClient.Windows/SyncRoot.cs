@@ -140,7 +140,6 @@ internal class SyncRoot : IDisposable
         _callbackRegistrations = callbacks;
         _callbackDelegates = delegates;
 
-        CF_CONNECTION_KEY key;
         PInvoke.CfConnectSyncRoot(
             _syncRootPath,
             callbacks,
@@ -150,7 +149,7 @@ internal class SyncRoot : IDisposable
                 | (CfApiCapabilities.HasBlockSelfHydration
                     ? CF_CONNECT_FLAGS.CF_CONNECT_FLAG_BLOCK_SELF_IMPLICIT_HYDRATION
                     : 0),
-            &key).ThrowOnFailure();
+            out CF_CONNECTION_KEY key).ThrowOnFailure();
 
         _connectionKey = key;
         _connected = true;
