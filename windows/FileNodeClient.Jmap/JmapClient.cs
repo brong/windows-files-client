@@ -45,6 +45,10 @@ public class JmapClient : IJmapClient
     private bool _webUrlTemplateResolved;
     private string? _webWriteUrlTemplate;
     private bool _webWriteUrlTemplateResolved;
+    // Some accounts advertise the Quota capability at session level but reject
+    // Quota/get at HTTP level (403 Forbidden). Once we hit that, stop including
+    // Quota/get in batched calls for this session.
+    private volatile bool _quotaForbidden;
 
     public JmapSession Session => _session
         ?? throw new InvalidOperationException("Session not initialised — call ConnectAsync first");
@@ -372,6 +376,30 @@ public class JmapClient : IJmapClient
     public async Task<(ChangesResponse Changes, FileNode[] Created, FileNode[] Updated, Quota[]? Quotas)>
         GetChangesAndNodesAsync(string sinceState, CancellationToken ct = default)
     {
+        // Try batching Quota/get when the server advertises the capability.
+        // Some accounts have the capability at session level but the server
+        // still rejects Quota/get at HTTP 403 — handled via one-shot fallback
+        // below, after which _quotaForbidden suppresses future attempts for
+        // this session.
+        bool includeQuota = Session.HasCapability(QuotaCapability) && !_quotaForbidden;
+
+        try
+        {
+            return await ExecuteChangesAndNodesAsync(sinceState, includeQuota, ct);
+        }
+        catch (HttpRequestException ex) when (includeQuota && ex.StatusCode == System.Net.HttpStatusCode.Forbidden)
+        {
+            // Server forbids the Quota capability for this account — retry
+            // without it and remember so we don't repeat the wasted call.
+            Log.Info($"[JMAP] Quota/get forbidden for {AccountId}; disabling Quota batching for this session");
+            _quotaForbidden = true;
+            return await ExecuteChangesAndNodesAsync(sinceState, includeQuota: false, ct);
+        }
+    }
+
+    private async Task<(ChangesResponse Changes, FileNode[] Created, FileNode[] Updated, Quota[]? Quotas)>
+        ExecuteChangesAndNodesAsync(string sinceState, bool includeQuota, CancellationToken ct)
+    {
         var changesCallId = "c" + Interlocked.Increment(ref _nextCallId);
         var createdCallId = "c" + Interlocked.Increment(ref _nextCallId);
         var updatedCallId = "c" + Interlocked.Increment(ref _nextCallId);
@@ -393,15 +421,20 @@ public class JmapClient : IJmapClient
             }, updatedCallId),
         };
 
-        // Note: Quota/get is deliberately NOT batched into this call. Even when
-        // the server advertises the Quota capability in the session, individual
-        // accounts/tokens may lack permission for Quota/get, in which case the
-        // server rejects the ENTIRE batched POST with HTTP 403 — breaking the
-        // critical warm-start /changes path. Quota is fetched separately at
-        // populate time where a 403 can be ignored without aborting sync.
-        Quota[]? quotas = null;
+        string? quotaCallId = null;
+        string[] capabilities = FileNodeUsing;
+        if (includeQuota)
+        {
+            quotaCallId = "c" + Interlocked.Increment(ref _nextCallId);
+            capabilities = [CoreCapability, FileNodeCapability, QuotaCapability];
+            calls.Add(("Quota/get", new Dictionary<string, JsonElement>
+            {
+                ["accountId"] = JsonSerializer.SerializeToElement(AccountId),
+                ["ids"] = JsonSerializer.SerializeToElement<string[]?>(null),
+            }, quotaCallId));
+        }
 
-        var request = JmapRequest.Create(FileNodeUsing, calls.ToArray());
+        var request = JmapRequest.Create(capabilities, calls.ToArray());
         var json = JsonSerializer.Serialize(request, JmapSerializerOptions.Default);
         var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
         var httpResponse = await _http.PostAsync(Session.ApiUrl, content, ct);
@@ -418,9 +451,30 @@ public class JmapClient : IJmapClient
             responseMap[respCallId] = (respMethod, entry[1]);
         }
 
+        // Critical methods: these feed each other via result references, so a
+        // failure in any one makes the rest meaningless. Let the exception bubble.
         var changes = GetValidatedResult<ChangesResponse>(responseMap, changesCallId, "FileNode/changes");
         var created = GetValidatedResult<GetResponse<FileNode>>(responseMap, createdCallId, "FileNode/get");
         var updated = GetValidatedResult<GetResponse<FileNode>>(responseMap, updatedCallId, "FileNode/get");
+
+        // Optional method: tolerate per-method errors without failing the call.
+        // Also flip _quotaForbidden if we see a method-level Quota failure so we
+        // stop asking in future batches.
+        Quota[]? quotas = null;
+        if (quotaCallId != null && responseMap.TryGetValue(quotaCallId, out var quotaResp))
+        {
+            if (quotaResp.method == "Quota/get")
+            {
+                var quotaResult = quotaResp.args.Deserialize<GetResponse<Quota>>(JmapSerializerOptions.Default);
+                if (quotaResult != null)
+                    quotas = quotaResult.List;
+            }
+            else
+            {
+                Log.Info($"[JMAP] Quota/get returned {quotaResp.method} for {AccountId}; disabling Quota batching for this session");
+                _quotaForbidden = true;
+            }
+        }
 
         return (changes, created.List, updated.List, quotas);
     }
