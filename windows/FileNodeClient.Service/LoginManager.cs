@@ -1107,16 +1107,19 @@ sealed class LoginManager : IDisposable
         lock (_lock)
             _sessions.Add(session);
 
-        // Create a supervisor for each enabled account.
-        // Wire up status events AFTER all supervisors start so that
-        // intermediate status changes don't cause premature UI updates.
-        var startedSupervisors = new List<AccountSupervisor>();
-        foreach (var (accountId, accountName, isPrimary) in accounts)
-        {
-            // Skip accounts not in the enabled set (null = all enabled)
-            if (enabledAccountIds != null && !enabledAccountIds.Contains(accountId))
-                continue;
+        // Create and start supervisors for each enabled account concurrently.
+        // Each account has its own JmapClient/JmapQueue/SyncEngine, so populates
+        // don't contend; only the shared HttpClient + OAuthTokenHandler are reused,
+        // both of which are internally thread-safe. Wire status events BEFORE
+        // StartAsync so the UI sees each account's Discovering → Idle transition
+        // as it happens, not gated on its siblings completing.
+        var accountsToStart = accounts
+            .Where(a => enabledAccountIds == null || enabledAccountIds.Contains(a.AccountId))
+            .ToList();
 
+        var startTasks = accountsToStart.Select(async acct =>
+        {
+            var (accountId, accountName, isPrimary) = acct;
             IJmapClient client = isPrimary
                 ? jmapClient
                 : jmapClient.ForAccount(accountId);
@@ -1127,6 +1130,8 @@ sealed class LoginManager : IDisposable
                 SanitizeFolderName(displayName));
 
             var supervisor = new AccountSupervisor(client, syncRootPath, displayName, _debug);
+            supervisor.StatusChanged += _ => RaiseAggregateStatus();
+            supervisor.PendingCountChanged += _ => RaiseAggregateStatus();
 
             lock (_lock)
                 _supervisors.Add(supervisor);
@@ -1135,7 +1140,7 @@ sealed class LoginManager : IDisposable
             {
                 await supervisor.StartAsync(iconPath, clean, ct);
                 ApplyInitialPauseState(supervisor);
-                startedSupervisors.Add(supervisor);
+                return supervisor;
             }
             catch (Exception ex)
             {
@@ -1143,15 +1148,14 @@ sealed class LoginManager : IDisposable
                 lock (_lock)
                     _supervisors.Remove(supervisor);
                 supervisor.Dispose();
+                return null;
             }
-        }
+        }).ToList();
 
-        // Now wire up status events — all accounts are visible at once
-        foreach (var supervisor in startedSupervisors)
-        {
-            supervisor.StatusChanged += _ => RaiseAggregateStatus();
-            supervisor.PendingCountChanged += _ => RaiseAggregateStatus();
-        }
+        var startedSupervisors = (await Task.WhenAll(startTasks))
+            .Where(s => s != null)
+            .Select(s => s!)
+            .ToList();
 
         // Start shared push watcher for this session
         StartPushWatcher(session, ct);

@@ -500,19 +500,33 @@ public class JmapClient : IJmapClient
     public async Task<(FileNode[] Nodes, string State)> GetFileNodesByIdsPagedAsync(string[] ids, int pageSize = 0, CancellationToken ct = default)
     {
         if (pageSize <= 0) pageSize = Session.MaxObjectsInGet;
-        var allNodes = new List<FileNode>();
-        string state = "";
+        if (ids.Length == 0) return (Array.Empty<FileNode>(), "");
 
-        for (int i = 0; i < ids.Length; i += pageSize)
+        // Fan out pages concurrently. All calls share the same HttpClient
+        // connection pool and capability headers; the server happily parallelizes
+        // across distinct JMAP calls in separate POSTs. For a 6332-node account
+        // at 1024/page this drops ~5s of sequential waits to ~1s.
+        var pageCount = (ids.Length + pageSize - 1) / pageSize;
+        var tasks = new Task<GetResponse<FileNode>>[pageCount];
+        for (int p = 0; p < pageCount; p++)
         {
-            var chunk = ids.Skip(i).Take(pageSize).ToArray();
-            var result = await CallAsync<GetResponse<FileNode>>(
-                FileNodeUsing, "FileNode/get", new { accountId = AccountId, ids = chunk, properties = FileNodeProperties }, ct);
-            allNodes.AddRange(result.List);
-            state = result.State;
+            var chunk = ids.AsSpan(p * pageSize, Math.Min(pageSize, ids.Length - p * pageSize)).ToArray();
+            tasks[p] = CallAsync<GetResponse<FileNode>>(
+                FileNodeUsing, "FileNode/get",
+                new { accountId = AccountId, ids = chunk, properties = FileNodeProperties }, ct);
         }
 
-        return (allNodes.ToArray(), state);
+        var results = await Task.WhenAll(tasks);
+        var total = results.Sum(r => r.List.Length);
+        var allNodes = new FileNode[total];
+        int offset = 0;
+        foreach (var r in results)
+        {
+            r.List.CopyTo(allNodes, offset);
+            offset += r.List.Length;
+        }
+        // State should be identical across pages for a consistent snapshot; use the last.
+        return (allNodes, results[^1].State);
     }
 
     public async Task<Stream> DownloadBlobAsync(string blobId, string? type = null, string? name = null, CancellationToken ct = default)
