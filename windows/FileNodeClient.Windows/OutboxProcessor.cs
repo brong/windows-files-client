@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using Microsoft.Win32.SafeHandles;
 using FileNodeClient.Logging;
 using FileNodeClient.Jmap;
+using FileNodeClient.Jmap.Models;
 using Windows.Win32;
 using Windows.Win32.Storage.CloudFilters;
 
@@ -307,8 +308,38 @@ public class OutboxProcessor : IDisposable
         }
 
         Log.Info($"{_logPrefix} Outbox: creating folder {folderName}");
-        var node = await _queue.EnqueueAsync(QueuePriority.Background,
-            () => _jmapClient.CreateFileNodeAsync(parentId, null, folderName, ct: ct), ct);
+        FileNode node;
+        try
+        {
+            node = await _queue.EnqueueAsync(QueuePriority.Background,
+                () => _jmapClient.CreateFileNodeAsync(parentId, null, folderName, ct: ct), ct);
+        }
+        catch (Exception ex) when (ex.Message.Contains("alreadyExists"))
+        {
+            // Server already has an entry with this name under this parent. Look up
+            // what it is: if it's a folder, adopt it (self-heal stale outbox). If it's
+            // a file, we have a type-mismatch conflict that the client can't silently
+            // resolve — mark the outbox entry rejected and surface to the user.
+            Log.Info($"{_logPrefix} Outbox: name {folderName} already exists on server, resolving");
+            var children = await _queue.EnqueueAsync(QueuePriority.Background,
+                () => _jmapClient.GetChildrenAsync(parentId, ct), ct);
+            var existing = children.FirstOrDefault(c =>
+                string.Equals(c.Name, folderName, StringComparison.Ordinal));
+            if (existing == null)
+            {
+                Log.Error($"{_logPrefix} Outbox: server rejected create as alreadyExists but no matching child found for {folderName} under {parentId}");
+                throw;
+            }
+            if (existing.BlobId != null)
+            {
+                // Server has a FILE where we want to create a FOLDER — genuine conflict.
+                Log.Error($"{_logPrefix} Outbox: cannot create folder {folderName}: server has a file with the same name (node {existing.Id})");
+                MarkRejectedAndNotInSync(change, $"Server already has a file named '{folderName}' in this folder");
+                return true;
+            }
+            Log.Info($"{_logPrefix} Outbox: adopting existing folder {folderName} → node {existing.Id}");
+            node = existing;
+        }
 
         SyncEngine.EnsurePlaceholder(change.LocalPath, node.Id, isDirectory: true);
         _engine.UpdateMappings(change.LocalPath, null, node.Id);
@@ -478,8 +509,28 @@ public class OutboxProcessor : IDisposable
             var localMtime = File.GetLastWriteTimeUtc(change.LocalPath);
             using var fileStream = OpenFileForUpload(change.LocalPath);
             var blobId = await UploadFileContentAsync(change, fileStream, contentType, ct);
-            var node = await _queue.EnqueueAsync(QueuePriority.Background,
-                () => _jmapClient.CreateFileNodeAsync(parentId, blobId, fileName, contentType, "replace", localCtime, localMtime, ct), ct);
+            FileNode node;
+            try
+            {
+                node = await _queue.EnqueueAsync(QueuePriority.Background,
+                    () => _jmapClient.CreateFileNodeAsync(parentId, blobId, fileName, contentType, "replace", localCtime, localMtime, ct), ct);
+            }
+            catch (Exception ex) when (ex.Message.Contains("alreadyExists"))
+            {
+                // onExists:"replace" should handle file-over-file, so this typically means
+                // server has a FOLDER with the same name — a type-mismatch conflict.
+                var children = await _queue.EnqueueAsync(QueuePriority.Background,
+                    () => _jmapClient.GetChildrenAsync(parentId, ct), ct);
+                var existing = children.FirstOrDefault(c =>
+                    string.Equals(c.Name, fileName, StringComparison.Ordinal));
+                if (existing != null && existing.BlobId == null)
+                {
+                    Log.Error($"{_logPrefix} Outbox: cannot upload file {fileName}: server has a folder with the same name (node {existing.Id})");
+                    MarkRejectedAndNotInSync(change, $"Server already has a folder named '{fileName}' in this folder");
+                    return true;
+                }
+                throw;
+            }
 
             Log.Info($"{_logPrefix} Outbox: EnsurePlaceholder {change.LocalPath} nodeId={node.Id}");
             try
