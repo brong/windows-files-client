@@ -1107,19 +1107,18 @@ sealed class LoginManager : IDisposable
         lock (_lock)
             _sessions.Add(session);
 
-        // Create and start supervisors for each enabled account concurrently.
-        // Each account has its own JmapClient/JmapQueue/SyncEngine, so populates
-        // don't contend; only the shared HttpClient + OAuthTokenHandler are reused,
-        // both of which are internally thread-safe. Wire status events BEFORE
+        // Create and start supervisors sequentially. Wire status events BEFORE
         // StartAsync so the UI sees each account's Discovering → Idle transition
         // as it happens, not gated on its siblings completing.
-        var accountsToStart = accounts
-            .Where(a => enabledAccountIds == null || enabledAccountIds.Contains(a.AccountId))
-            .ToList();
-
-        var startTasks = accountsToStart.Select(async acct =>
+        // (Parallel per-account StartAsync was tried in 1.0.68.0 but caused
+        // socket errors when multiple accounts hit the shared HttpClient at
+        // once during cold start — needs more investigation before re-enabling.)
+        var startedSupervisors = new List<AccountSupervisor>();
+        foreach (var (accountId, accountName, isPrimary) in accounts)
         {
-            var (accountId, accountName, isPrimary) = acct;
+            if (enabledAccountIds != null && !enabledAccountIds.Contains(accountId))
+                continue;
+
             IJmapClient client = isPrimary
                 ? jmapClient
                 : jmapClient.ForAccount(accountId);
@@ -1140,7 +1139,7 @@ sealed class LoginManager : IDisposable
             {
                 await supervisor.StartAsync(iconPath, clean, ct);
                 ApplyInitialPauseState(supervisor);
-                return supervisor;
+                startedSupervisors.Add(supervisor);
             }
             catch (Exception ex)
             {
@@ -1148,14 +1147,8 @@ sealed class LoginManager : IDisposable
                 lock (_lock)
                     _supervisors.Remove(supervisor);
                 supervisor.Dispose();
-                return null;
             }
-        }).ToList();
-
-        var startedSupervisors = (await Task.WhenAll(startTasks))
-            .Where(s => s != null)
-            .Select(s => s!)
-            .ToList();
+        }
 
         // Start shared push watcher for this session
         StartPushWatcher(session, ct);

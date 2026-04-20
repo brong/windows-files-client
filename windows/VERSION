@@ -2,6 +2,7 @@
 #   1. This file (VERSION)
 #   2. windows/FileNodeClient.Package/AppxManifest.xml  (<Identity Version="...">)
 
+1.0.69.0 2026-04-20  Revert parallel account startup (socket errors on shared HttpClient); keep paginated parallel + per-account status
 1.0.68.0 2026-04-20  Parallel account startup + concurrent FileNode/get pages, per-account UI status
 1.0.67.0 2026-04-20  Fix cache load: Save wrote Version=4 but Load required 5, full fetch every startup
 1.0.66.0 2026-04-19  Outbox self-heal: adopt existing folder on alreadyExists, reject file/folder conflicts
