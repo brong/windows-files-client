@@ -140,7 +140,7 @@ public static class NodeCache
 
         var snapshot = new CacheSnapshot
         {
-            Version = 4,
+            Version = 5,
             HomeNodeId = homeNodeId,
             TrashNodeId = trashNodeId,
             State = state,
