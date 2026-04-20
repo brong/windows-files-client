@@ -393,21 +393,15 @@ public class JmapClient : IJmapClient
             }, updatedCallId),
         };
 
-        // Batch Quota/get into the same request when the capability is available
-        string? quotaCallId = null;
-        string[] capabilities = FileNodeUsing;
-        if (Session.HasCapability(QuotaCapability))
-        {
-            quotaCallId = "c" + Interlocked.Increment(ref _nextCallId);
-            capabilities = [CoreCapability, FileNodeCapability, QuotaCapability];
-            calls.Add(("Quota/get", new Dictionary<string, JsonElement>
-            {
-                ["accountId"] = JsonSerializer.SerializeToElement(AccountId),
-                ["ids"] = JsonSerializer.SerializeToElement<string[]?>(null),
-            }, quotaCallId));
-        }
+        // Note: Quota/get is deliberately NOT batched into this call. Even when
+        // the server advertises the Quota capability in the session, individual
+        // accounts/tokens may lack permission for Quota/get, in which case the
+        // server rejects the ENTIRE batched POST with HTTP 403 — breaking the
+        // critical warm-start /changes path. Quota is fetched separately at
+        // populate time where a 403 can be ignored without aborting sync.
+        Quota[]? quotas = null;
 
-        var request = JmapRequest.Create(capabilities, calls.ToArray());
+        var request = JmapRequest.Create(FileNodeUsing, calls.ToArray());
         var json = JsonSerializer.Serialize(request, JmapSerializerOptions.Default);
         var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
         var httpResponse = await _http.PostAsync(Session.ApiUrl, content, ct);
@@ -427,15 +421,6 @@ public class JmapClient : IJmapClient
         var changes = GetValidatedResult<ChangesResponse>(responseMap, changesCallId, "FileNode/changes");
         var created = GetValidatedResult<GetResponse<FileNode>>(responseMap, createdCallId, "FileNode/get");
         var updated = GetValidatedResult<GetResponse<FileNode>>(responseMap, updatedCallId, "FileNode/get");
-
-        Quota[]? quotas = null;
-        if (quotaCallId != null && responseMap.TryGetValue(quotaCallId, out var quotaResp)
-            && quotaResp.method == "Quota/get")
-        {
-            var quotaResult = quotaResp.args.Deserialize<GetResponse<Quota>>(JmapSerializerOptions.Default);
-            if (quotaResult != null)
-                quotas = quotaResult.List;
-        }
 
         return (changes, created.List, updated.List, quotas);
     }
