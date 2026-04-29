@@ -391,8 +391,8 @@ Unlike Windows (where a `FileChangeWatcher` detects changes), on Apple platforms
 
 | Method | When Called | JMAP Action |
 |--------|-----------|-------------|
-| `createItem` | User creates a new file/folder | `Blob/upload` + `FileNode/set create` |
-| `modifyItem` | User edits, renames, or moves a file | `Blob/upload` + `FileNode/set create` (content change) or `FileNode/set update` (rename/move) |
+| `createItem` | User creates a new file/folder | `Blob/set` + `FileNode/set create` |
+| `modifyItem` | User edits, renames, or moves a file | `Blob/set` + `FileNode/set create` (content change) or `FileNode/set update` (rename/move) |
 | `deleteItem` | User deletes a file | `FileNode/set update` (→ trash) or `FileNode/set destroy` |
 
 ### No Outbox Needed
@@ -481,7 +481,7 @@ Same strategy as Windows (see DESIGN.md §5), adapted for URLSession:
 1. Gate on `HasBlob` capability
 2. Calculate effective chunk size (double from base until within `maxDataSources`)
 3. Upload chunks as separate blob POSTs
-4. `Blob/upload` combine with all chunk blobIds → final blobId
+4. `Blob/set` combine with all chunk blobIds → final blobId
 5. Create FileNode with combined blobId
 
 For resumability, persist chunk blobIds in the database keyed by the item identifier. On retry, verify stored blobIds via `Blob/get`, then resume.
@@ -621,11 +621,11 @@ func fetchThumbnails(
 Called in batches. For each item:
 
 1. Look up `blobId` from the database (no hydration!)
-2. If `BlobExt` capability available:
+2. If `blob2` capability available:
    - `Blob/convert { create: { "t0": { imageConvert: { blobId, width, height, type: "image/png", autoOrient: true } } } }`
    - Download the resulting thumbnail blob
    - Call `perThumbnailCompletionHandler(identifier, pngData, nil)`
-3. If `BlobExt` not available:
+3. If `blob2` not available:
    - Call `perThumbnailCompletionHandler(identifier, nil, nil)` — system shows generic icon
 4. After all items: call `completionHandler(nil)`
 

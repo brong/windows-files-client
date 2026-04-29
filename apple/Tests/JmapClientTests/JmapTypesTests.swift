@@ -98,5 +98,6 @@ import Testing
 @Test func testCapabilityURIs() {
     #expect(JmapCapability.core == "urn:ietf:params:jmap:core")
     #expect(JmapCapability.blob == "urn:ietf:params:jmap:blob")
+    #expect(JmapCapability.blob2 == "https://www.fastmail.com/dev/blob2")
     #expect(JmapCapability.allFileNodeURIs.count == 2)
 }

@@ -2,6 +2,7 @@
 #   1. This file (VERSION)
 #   2. windows/FileNodeClient.Package/AppxManifest.xml  (<Identity Version="...">)
 
+1.0.72.0 2026-04-29  Migrate to JMAP blob2 capability: Blob/set replaces Blob/upload, drop deprecated :blob from `using`
 1.0.71.0 2026-04-20  Re-batch Quota/get with one-shot HTTP-403 fallback + per-method error tolerance
 1.0.70.0 2026-04-20  Fix warm-start 403: don't batch Quota/get into FileNode/changes call
 1.0.69.0 2026-04-20  Revert parallel account startup (socket errors on shared HttpClient); keep paginated parallel + per-account status

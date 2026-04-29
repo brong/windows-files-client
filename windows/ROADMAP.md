@@ -92,7 +92,7 @@ Implemented: switched from `Full` to `Progressive` hydration policy with HTTP Ra
 
 ### ~~19. Blob/get for small files + digest verification~~ ✓ Done
 
-Implemented: files ≤16KB are fetched inline via RFC 9404 `Blob/get` (base64 data + digest in a single JMAP call), avoiding a separate HTTP round-trip. All download paths (Blob/get, HTTP Range, full HTTP) now verify content integrity using the server's preferred digest algorithm (`sha` or `sha-256`) fetched concurrently via `Blob/get`. Digest mismatches log warnings but don't block downloads. Gracefully degrades when the server lacks the `urn:ietf:params:jmap:blob` capability.
+Implemented: files ≤16KB are fetched inline via `Blob/get` (base64 data + digest in a single JMAP call), avoiding a separate HTTP round-trip. All download paths (Blob/get, HTTP Range, full HTTP) now verify content integrity using the server's preferred digest algorithm (`sha` or `sha-256`) fetched concurrently via `Blob/get`. Digest mismatches log warnings but don't block downloads. Gracefully degrades when the server lacks the `blob2` capability.
 
 ## Tier 4 — Future/Niche
 
@@ -110,7 +110,7 @@ Several cfapi features require capabilities beyond what the current JMAP FileNod
 
 ### ~~Thumbnail downloads~~ ✓ Resolved (Blob/convert implemented)
 
-~~The `IThumbnailProvider` COM handler needs to return image data for dehydrated files without hydrating them.~~ Implemented via `Blob/convert` with `imageConvert` recipe from the blobext capability (draft-gondwana-jmap-blobext). The client calls `ConvertImageAsync(blobId, width, height)` to get a server-generated thumbnail at the requested size, then downloads the resulting blob as PNG.
+~~The `IThumbnailProvider` COM handler needs to return image data for dehydrated files without hydrating them.~~ Implemented via `Blob/convert` with `imageConvert` recipe from the `blob2` capability (draft-ietf-jmap-blobext-01). The client calls `ConvertImageAsync(blobId, width, height)` to get a server-generated thumbnail at the requested size, then downloads the resulting blob as PNG.
 
 ### ~~Web URL per node~~ ✓ Resolved (URI Source implemented)
 

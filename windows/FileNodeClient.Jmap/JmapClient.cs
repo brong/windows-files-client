@@ -20,12 +20,15 @@ public class JmapClient : IJmapClient
 
     public const string CoreCapability = "urn:ietf:params:jmap:core";
     public const string FileNodeCapability = "https://www.fastmail.com/dev/filenode";
+    // The legacy `urn:ietf:params:jmap:blob` capability is deprecated and must
+    // not be sent in `using` arrays. We only reference its URI to read advertised
+    // limits (maxDataSources, maxSizeBlobSet, supportedDigestAlgorithms) from the
+    // session's capability metadata.
     public const string BlobCapability = "urn:ietf:params:jmap:blob";
-    public const string BlobExtCapability = "urn:ietf:params:jmap:blobext";
+    public const string Blob2Capability = "https://www.fastmail.com/dev/blob2";
     public const string QuotaCapability = "urn:ietf:params:jmap:quota";
     private static readonly string[] FileNodeUsing = [CoreCapability, FileNodeCapability];
-    private static readonly string[] BlobUsing = [CoreCapability, BlobCapability];
-    private static readonly string[] BlobExtUsing = [CoreCapability, BlobCapability, BlobExtCapability];
+    private static readonly string[] Blob2Using = [CoreCapability, Blob2Capability];
     private static readonly string[] QuotaUsing = [CoreCapability, QuotaCapability];
     /// <summary>Properties to request in FileNode/get calls — includes myRights for permission enforcement.</summary>
     internal static readonly string[] FileNodeProperties =
@@ -112,9 +115,8 @@ public class JmapClient : IJmapClient
         }
     }
 
-    public bool HasBlob => Session.HasAccountCapability(AccountId, BlobCapability);
-    public bool HasBlobExt => Session.HasAccountCapability(AccountId, BlobExtCapability);
-    public bool HasBlobConvert => HasBlobExt;
+    public bool HasBlob2 => Session.HasAccountCapability(AccountId, Blob2Capability);
+    public bool HasBlobConvert => HasBlob2;
 
     public string? TrashUrl
     {
@@ -641,16 +643,14 @@ public class JmapClient : IJmapClient
         if (effectiveChunkSize > MaxChunkSize)
             effectiveChunkSize = MaxChunkSize;
 
-        var hasBlobExt = HasBlobExt;
         return UploadBlobChunkedInternalAsync(_http, Session.GetUploadUrl(AccountId), AccountId,
-            effectiveChunkSize, hasBlobExt,
+            effectiveChunkSize,
             (caps, method, args) => CallAsync(caps, method, args, ct),
             data, contentType, totalSize, onProgress, onChunkUploaded, previousChunks, ct);
     }
 
     internal static async Task<string> UploadBlobChunkedInternalAsync(
         HttpClient http, string uploadUrl, string accountId, long chunkSize,
-        bool includeShaDigest,
         Func<string[], string, object, Task<JsonElement>> callAsync,
         Stream data, string contentType, long totalSize,
         Action<long>? onProgress, Action<UploadedChunkInfo>? onChunkUploaded,
@@ -675,7 +675,7 @@ public class JmapClient : IJmapClient
             int validCount = previousChunks.Count;
             try
             {
-                var blobCheck = await callAsync(BlobUsing, "Blob/get", new
+                var blobCheck = await callAsync(Blob2Using, "Blob/get", new
                 {
                     accountId,
                     ids = blobIds,
@@ -709,7 +709,7 @@ public class JmapClient : IJmapClient
                 // All chunks expired — start from scratch
                 data.Position = 0;
                 return await UploadBlobChunkedInternalAsync(http, uploadUrl, accountId,
-                    chunkSize, includeShaDigest, callAsync, data, contentType, totalSize,
+                    chunkSize, callAsync, data, contentType, totalSize,
                     onProgress, onChunkUploaded, null, ct);
             }
 
@@ -740,7 +740,7 @@ public class JmapClient : IJmapClient
                         data.Position = 0;
                         ArrayPool<byte>.Shared.Return(hashBuf);
                         return await UploadBlobChunkedInternalAsync(http, uploadUrl, accountId,
-                            chunkSize, includeShaDigest, callAsync, data, contentType, totalSize,
+                            chunkSize, callAsync, data, contentType, totalSize,
                             onProgress, onChunkUploaded, null, ct);
                     }
 
@@ -803,7 +803,7 @@ public class JmapClient : IJmapClient
             var verifyIds = chunkBlobIds.Select(c => c.BlobId).ToArray();
             try
             {
-                var verifyResult = await callAsync(BlobUsing, "Blob/get", new
+                var verifyResult = await callAsync(Blob2Using, "Blob/get", new
                 {
                     accountId,
                     ids = verifyIds,
@@ -824,14 +824,12 @@ public class JmapClient : IJmapClient
                 Log.Info($"[ChunkedUpload] Blob/get verify failed: {ex.Message}");
             }
 
-            // Combine chunks via Blob/upload
-            Log.Info($"[ChunkedUpload] Combining {chunkBlobIds.Count} chunks for account {accountId}, includeShaDigest={includeShaDigest}, blobIds=[{string.Join(", ", chunkBlobIds.Select(c => c.BlobId))}]");
-            var dataArray = chunkBlobIds.Select(c =>
+            // Combine chunks via Blob/set (blob2)
+            Log.Info($"[ChunkedUpload] Combining {chunkBlobIds.Count} chunks for account {accountId}, blobIds=[{string.Join(", ", chunkBlobIds.Select(c => c.BlobId))}]");
+            var dataArray = chunkBlobIds.Select(c => new Dictionary<string, object?>
             {
-                var item = new Dictionary<string, object?> { ["blobId"] = c.BlobId };
-                if (includeShaDigest)
-                    item["digest:sha"] = c.Sha1Base64;
-                return item;
+                ["blobId"] = c.BlobId,
+                ["digest:sha"] = c.Sha1Base64,
             }).ToArray();
 
             var createId = Guid.NewGuid().ToString("N")[..12];
@@ -839,26 +837,23 @@ public class JmapClient : IJmapClient
             {
                 ["data"] = dataArray,
                 ["type"] = contentType,
+                ["digest:sha"] = overallSha1Base64,
             };
-            if (includeShaDigest)
-                createItem["digest:sha"] = overallSha1Base64;
 
-            var combineCapabilities = includeShaDigest ? BlobExtUsing : BlobUsing;
-            Log.Info($"[ChunkedUpload] Using capabilities: [{string.Join(", ", combineCapabilities)}]");
-            var result = await callAsync(combineCapabilities, "Blob/upload", new
+            var result = await callAsync(Blob2Using, "Blob/set", new
             {
                 accountId,
                 create = new Dictionary<string, object> { [createId] = createItem },
             });
 
             var blobUpload = result.Deserialize<BlobUploadResponse>(JmapSerializerOptions.Default)
-                ?? throw new InvalidOperationException("Failed to parse Blob/upload response");
+                ?? throw new InvalidOperationException("Failed to parse Blob/set response");
 
             if (blobUpload.NotCreated != null && blobUpload.NotCreated.TryGetValue(createId, out var err))
-                throw new InvalidOperationException($"Blob/upload failed: {err.Type} — {err.Description}");
+                throw new InvalidOperationException($"Blob/set failed: {err.Type} — {err.Description}");
 
             if (blobUpload.Created == null || !blobUpload.Created.TryGetValue(createId, out var created))
-                throw new InvalidOperationException("Blob/upload returned no result");
+                throw new InvalidOperationException("Blob/set returned no result");
 
             return created.Id;
     }
@@ -867,15 +862,15 @@ public class JmapClient : IJmapClient
         string? oldBlobId,
         Action<long>? onProgress = null, CancellationToken ct = default)
     {
-        // No old blob or no BlobExt → fall back to full chunked upload
-        if (oldBlobId == null || !HasBlobExt)
+        // No old blob or no blob2 → fall back to full chunked upload
+        if (oldBlobId == null || !HasBlob2)
             return await UploadBlobChunkedAsync(data, contentType, totalSize, onProgress, ct: ct);
 
         // Query server for old blob's chunk structure
         List<(string blobId, long size, string? digestSha)>? serverChunks = null;
         try
         {
-            var blobResult = await CallAsync(BlobUsing, "Blob/get", new
+            var blobResult = await CallAsync(Blob2Using, "Blob/get", new
             {
                 accountId = AccountId,
                 ids = new[] { oldBlobId },
@@ -902,7 +897,6 @@ public class JmapClient : IJmapClient
 
         // Delta upload: compare local chunks against server chunks
         var uploadUrl = Session.GetUploadUrl(AccountId);
-        var hasBlobExt = HasBlobExt;
         var chunkBlobIds = new List<(string BlobId, string Sha1Base64)>();
         using var overallHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA1);
         long totalUploaded = 0;
@@ -1002,14 +996,12 @@ public class JmapClient : IJmapClient
         if (chunkBlobIds.Count == 1)
             return chunkBlobIds[0].BlobId;
 
-        // Combine chunks via Blob/upload (same as existing code)
+        // Combine chunks via Blob/set (blob2)
         var overallSha1Base64 = Convert.ToBase64String(overallHash.GetHashAndReset());
-        var dataArray = chunkBlobIds.Select(c =>
+        var dataArray = chunkBlobIds.Select(c => new Dictionary<string, object?>
         {
-            var item = new Dictionary<string, object?> { ["blobId"] = c.BlobId };
-            if (hasBlobExt)
-                item["digest:sha"] = c.Sha1Base64;
-            return item;
+            ["blobId"] = c.BlobId,
+            ["digest:sha"] = c.Sha1Base64,
         }).ToArray();
 
         var createId = "delta0";
@@ -1017,23 +1009,21 @@ public class JmapClient : IJmapClient
         {
             ["data"] = dataArray,
             ["type"] = contentType,
+            ["digest:sha"] = overallSha1Base64,
         };
-        if (hasBlobExt)
-            createItem["digest:sha"] = overallSha1Base64;
 
-        var combineCapabilities = hasBlobExt ? BlobExtUsing : BlobUsing;
-        var result = await CallAsync(combineCapabilities, "Blob/upload", new
+        var result = await CallAsync(Blob2Using, "Blob/set", new
         {
             accountId = AccountId,
             create = new Dictionary<string, object> { [createId] = createItem },
         }, ct);
 
         var blobUpload = result.Deserialize<BlobUploadResponse>(JmapSerializerOptions.Default)
-            ?? throw new InvalidOperationException("Failed to parse Blob/upload response");
+            ?? throw new InvalidOperationException("Failed to parse Blob/set response");
         if (blobUpload.NotCreated != null && blobUpload.NotCreated.TryGetValue(createId, out var err))
-            throw new InvalidOperationException($"Blob/upload failed: {err.Type} — {err.Description}");
+            throw new InvalidOperationException($"Blob/set failed: {err.Type} — {err.Description}");
         if (blobUpload.Created == null || !blobUpload.Created.TryGetValue(createId, out var created))
-            throw new InvalidOperationException("Blob/upload returned no result");
+            throw new InvalidOperationException("Blob/set returned no result");
 
         return created.Id;
     }
@@ -1315,7 +1305,7 @@ public class JmapClient : IJmapClient
         if (length.HasValue)
             blobArgs["length"] = length.Value;
 
-        var blobResponse = await CallAsync<BlobGetResponse>(BlobUsing, "Blob/get", blobArgs, ct);
+        var blobResponse = await CallAsync<BlobGetResponse>(Blob2Using, "Blob/get", blobArgs, ct);
         if (blobResponse.NotFound.Length > 0)
             throw new FileNotFoundException($"Blob not found: {blobId}");
         if (blobResponse.List.Length == 0)
@@ -1342,7 +1332,7 @@ public class JmapClient : IJmapClient
         string mimeType = "image/png", CancellationToken ct = default)
     {
         var createId = "t0";
-        var result = await CallAsync(BlobExtUsing, "Blob/convert", new
+        var result = await CallAsync(Blob2Using, "Blob/convert", new
         {
             accountId = AccountId,
             create = new Dictionary<string, object>
@@ -1393,7 +1383,7 @@ public class JmapClient : IJmapClient
                 idToBlobId[createId] = blobId;
             }
 
-            var result = await CallAsync(BlobExtUsing, "Blob/convert", new
+            var result = await CallAsync(Blob2Using, "Blob/convert", new
             {
                 accountId = AccountId,
                 create,

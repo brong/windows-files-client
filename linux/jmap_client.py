@@ -14,7 +14,10 @@ log = logging.getLogger("jmap")
 CAP_CORE = "urn:ietf:params:jmap:core"
 CAP_FILENODE_DEV = "https://www.fastmail.com/dev/filenode"
 CAP_FILENODE = "urn:ietf:params:jmap:filenode"
-CAP_BLOB = "urn:ietf:params:jmap:blob"
+# Legacy `urn:ietf:params:jmap:blob` is deprecated and must not be sent in
+# `using` arrays. blob2 covers Blob/set (chunked combine), Blob/convert, and
+# the `chunks` property on Blob/get.
+CAP_BLOB2 = "https://www.fastmail.com/dev/blob2"
 
 
 class FileNode:
@@ -140,8 +143,8 @@ class JmapClient:
         Piggybacks any pending accessed timestamps onto the request.
         """
         body = {"using": [CAP_CORE, self.filenode_using], "methodCalls": list(method_calls)}
-        if CAP_BLOB in self.capabilities:
-            body["using"].append(CAP_BLOB)
+        if CAP_BLOB2 in self.capabilities:
+            body["using"].append(CAP_BLOB2)
 
         # Piggyback pending accessed timestamps
         piggybacked = False
@@ -333,11 +336,15 @@ class JmapClient:
         if old_blob_id is None or len(data) < 5_000_000:
             return await self.upload_blob(data, content_type)
 
+        # No blob2 → can't query chunks or combine; fall back to single upload.
+        if CAP_BLOB2 not in self.capabilities:
+            return await self.upload_blob(data, content_type)
+
         # Query server for old blob's chunk structure
         server_chunks = None
         try:
             body = {
-                "using": [CAP_CORE, CAP_BLOB],
+                "using": [CAP_CORE, CAP_BLOB2],
                 "methodCalls": [
                     ["Blob/get", {
                         "accountId": self.account_id,
@@ -419,13 +426,13 @@ class JmapClient:
         if len(chunk_blob_ids) == 1:
             return chunk_blob_ids[0][0]
 
-        # Combine chunks via Blob/upload
+        # Combine chunks via Blob/set (blob2)
         overall_sha1_b64 = base64.b64encode(overall_hash.digest()).decode()
 
-        data_sources = []
-        for blob_id, sha1_b64 in chunk_blob_ids:
-            obj = {"blobId": blob_id, "digest:sha": sha1_b64}
-            data_sources.append(obj)
+        data_sources = [
+            {"blobId": blob_id, "digest:sha": sha1_b64}
+            for blob_id, sha1_b64 in chunk_blob_ids
+        ]
 
         create_obj = {
             "data": data_sources,
@@ -434,9 +441,9 @@ class JmapClient:
         }
 
         body = {
-            "using": [CAP_CORE, CAP_BLOB],
+            "using": [CAP_CORE, CAP_BLOB2],
             "methodCalls": [
-                ["Blob/upload", {
+                ["Blob/set", {
                     "accountId": self.account_id,
                     "create": {"combined": create_obj},
                 }, "b0"],
@@ -449,7 +456,7 @@ class JmapClient:
         created = result.get("created", {}).get("combined")
         if not created:
             err = result.get("notCreated", {}).get("combined", {})
-            raise RuntimeError(f"Blob/upload combine failed: {err}")
+            raise RuntimeError(f"Blob/set combine failed: {err}")
         return created.get("id") or created["blobId"]
 
     async def create_file(self, parent_id: str, name: str, data: bytes,

@@ -581,10 +581,10 @@ public class OutboxProcessor : IDisposable
             ResetStall();
         }
 
-        // Use chunked upload whenever Blob capability is available. Blob/upload
-        // with data array (combining blobId references) is part of urn:ietf:params:jmap:blob
-        // per RFC 9404. BlobExt adds chunkSize hint and digest:sha verification.
-        if (_jmapClient.HasBlob)
+        // Use chunked upload whenever blob2 capability is available. Blob/set
+        // with data array (combining blobId references) is part of the blob2
+        // capability (https://www.fastmail.com/dev/blob2).
+        if (_jmapClient.HasBlob2)
         {
             // Convert persisted chunks to JmapClient format for resume
             List<JmapClient.UploadedChunkInfo>? previousChunks = null;

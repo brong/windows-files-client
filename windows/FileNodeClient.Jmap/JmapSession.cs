@@ -105,9 +105,9 @@ public class JmapSession
         if (!Accounts.TryGetValue(accountId, out var account))
             return null;
         if (!account.AccountCapabilities.TryGetValue(
-            JmapClient.BlobExtCapability, out var blobExtCap))
+            JmapClient.Blob2Capability, out var blob2Cap))
             return null;
-        if (blobExtCap.TryGetProperty("chunkSize", out var chunkSize)
+        if (blob2Cap.TryGetProperty("chunkSize", out var chunkSize)
             && chunkSize.ValueKind == JsonValueKind.Number)
             return chunkSize.GetInt64();
         return null;

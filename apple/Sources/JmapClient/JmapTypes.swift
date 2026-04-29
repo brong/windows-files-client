@@ -4,8 +4,11 @@ import Foundation
 
 public enum JmapCapability {
     public static let core = "urn:ietf:params:jmap:core"
+    // Legacy `urn:ietf:params:jmap:blob` capability is deprecated and must
+    // not be sent in `using` arrays. Its URI is referenced only to read
+    // advertised limits (maxDataSources, maxSizeBlobSet) from session metadata.
     public static let blob = "urn:ietf:params:jmap:blob"
-    public static let blobExt = "urn:ietf:params:jmap:blobext"
+    public static let blob2 = "https://www.fastmail.com/dev/blob2"
     public static let quota = "urn:ietf:params:jmap:quota"
 
     // FileNode capability — check both dev and IETF URIs
@@ -72,14 +75,11 @@ public struct JmapSession: Codable, Sendable {
         JmapCapability.allFileNodeURIs.contains(where: hasCapability)
     }
 
-    /// Check if Blob (RFC 9404) capability is present for an account.
-    public func hasBlob(accountId: String) -> Bool {
-        accountHasCapability(accountId, JmapCapability.blob)
-    }
-
-    /// Check if BlobExt capability is present for an account.
-    public func hasBlobExt(accountId: String) -> Bool {
-        accountHasCapability(accountId, JmapCapability.blobExt)
+    /// Check if blob2 capability is present for an account.
+    /// Required for Blob/set (chunked combine), Blob/convert (thumbnails), and
+    /// the `chunks` property on Blob/get.
+    public func hasBlob2(accountId: String) -> Bool {
+        accountHasCapability(accountId, JmapCapability.blob2)
     }
 
     /// Get the FileNode capability URI that the server actually uses.

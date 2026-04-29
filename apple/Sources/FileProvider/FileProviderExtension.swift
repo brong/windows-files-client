@@ -602,10 +602,10 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                     continue
                 }
 
-                // Check if server supports Blob/convert
+                // Check if server supports Blob/convert (blob2)
                 let session = try? await sessionManager.session()
                 guard let session = session,
-                      session.hasBlobExt(accountId: accountId)
+                      session.hasBlob2(accountId: accountId)
                 else {
                     perThumbnailCompletionHandler(identifier, nil, nil)
                     continue

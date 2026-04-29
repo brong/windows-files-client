@@ -38,7 +38,7 @@ All platforms implement the same JMAP protocol. Key invariants:
 - **Direct HTTP Write**: If `webWriteUrlTemplate` available, PUT to replace content directly (< 16 MB)
 - **Echo suppression**: Compare mtime, never suppress on key presence alone
 - **State tokens**: Use `FileNode/changes` for incremental sync, handle `cannotCalculateChanges`
-- **Capability checks**: Verify server capabilities before using optional features (Blob, BlobExt, Quota)
+- **Capability checks**: Verify server capabilities before using optional features (Blob2, Quota). The legacy `urn:ietf:params:jmap:blob` capability is deprecated — never send it in `using` arrays; use `https://www.fastmail.com/dev/blob2` (and `Blob/set` instead of `Blob/upload`)
 
 ### Platform Clients
 

@@ -491,8 +491,8 @@ public actor JmapClient {
     private static let defaultChunkSize = 67_108_864    // 64 MB
     private static let chunkThreshold = 5_000_000       // 5 MB — files smaller than this skip chunking
 
-    /// Upload a large file in chunks using Blob/upload (RFC 9404) to combine.
-    /// Falls back to single upload if Blob capability is not available or file is small.
+    /// Upload a large file in chunks using Blob/set (blob2) to combine.
+    /// Falls back to single upload if blob2 capability is not available or file is small.
     public func uploadBlobChunked(
         accountId: String,
         fileURL: URL,
@@ -504,15 +504,16 @@ public actor JmapClient {
         let fileSize = try FileManager.default.attributesOfItem(
             atPath: fileURL.path)[.size] as? Int64 ?? 0
 
-        // Small files or no Blob capability — use simple upload
+        // Small files or no blob2 capability — use simple upload
         guard fileSize > Self.chunkThreshold,
-              session.hasBlob(accountId: accountId) else {
+              session.hasBlob2(accountId: accountId) else {
             return try await uploadBlob(
                 accountId: accountId, fileURL: fileURL,
                 contentType: contentType, progress: progress)
         }
 
-        // Determine chunk size
+        // Determine chunk size — maxDataSources is advertised on the legacy
+        // blob capability metadata; we read it without sending the URI.
         let blobCap = session.accounts[accountId]?.accountCapabilities[JmapCapability.blob]
         let maxDataSources = blobCap?.dictValue?["maxDataSources"]?.intValue ?? 100
         var chunkSize = Self.defaultChunkSize
@@ -526,8 +527,6 @@ public actor JmapClient {
         guard let uploadURL = session.uploadURL(accountId: accountId) else {
             throw JmapError.invalidResponse
         }
-
-        let hasBlobExt = session.hasBlobExt(accountId: accountId)
 
         // Read file and upload chunks
         let fileHandle = try FileHandle(forReadingFrom: fileURL)
@@ -590,34 +589,27 @@ public actor JmapClient {
                 size: Int(fileSize), type: contentType)
         }
 
-        // Combine chunks via Blob/upload
+        // Combine chunks via Blob/set (blob2)
         let overallSha1 = overallHashContext.finalize()
 
-        var dataSourceObjects: [[String: AnyCodable]] = []
-        for chunk in chunkBlobIds {
-            var obj: [String: AnyCodable] = ["blobId": AnyCodable(chunk.blobId)]
-            if hasBlobExt {
-                obj["digest:sha"] = AnyCodable(chunk.sha1)
-            }
-            dataSourceObjects.append(obj)
+        let dataSourceObjects: [[String: AnyCodable]] = chunkBlobIds.map { chunk in
+            [
+                "blobId": AnyCodable(chunk.blobId),
+                "digest:sha": AnyCodable(chunk.sha1),
+            ]
         }
 
-        var createObj: [String: AnyCodable] = [
+        let createObj: [String: AnyCodable] = [
             "data": AnyCodable(dataSourceObjects.map { AnyCodable($0) }),
             "type": AnyCodable(contentType),
+            "digest:sha": AnyCodable(overallSha1),
         ]
-        if hasBlobExt {
-            createObj["digest:sha"] = AnyCodable(overallSha1)
-        }
 
-        var capabilities = [JmapCapability.core, JmapCapability.blob]
-        if hasBlobExt {
-            capabilities.append(JmapCapability.blobExt)
-        }
+        let capabilities = [JmapCapability.core, JmapCapability.blob2]
 
         let responses = try await call([
             JmapMethodCall(
-                name: "Blob/upload",
+                name: "Blob/set",
                 args: [
                     "accountId": AnyCodable(accountId),
                     "create": ["combined": AnyCodable(createObj)],
@@ -653,9 +645,9 @@ public actor JmapClient {
     ) async throws -> BlobUploadResponse {
         let session = try await sessionManager.session()
 
-        // No old blob or no BlobExt → fall back to full chunked upload
+        // No old blob or no blob2 → fall back to full chunked upload
         guard let oldBlobId = oldBlobId,
-              session.hasBlobExt(accountId: accountId) else {
+              session.hasBlob2(accountId: accountId) else {
             return try await uploadBlobChunked(
                 accountId: accountId, fileURL: fileURL,
                 contentType: contentType, progress: progress)
@@ -674,7 +666,7 @@ public actor JmapClient {
         // Query server for old blob's chunk structure
         var serverChunks: [(blobId: String, size: Int, digestSha: String?)]?
         do {
-            let capabilities = [JmapCapability.core, JmapCapability.blob]
+            let capabilities = [JmapCapability.core, JmapCapability.blob2]
             let responses = try await call([
                 JmapMethodCall(
                     name: "Blob/get",
@@ -716,7 +708,6 @@ public actor JmapClient {
             throw JmapError.invalidResponse
         }
 
-        let hasBlobExt = session.hasBlobExt(accountId: accountId)
         let fileHandle = try FileHandle(forReadingFrom: fileURL)
         defer { try? fileHandle.close() }
 
@@ -804,34 +795,27 @@ public actor JmapClient {
                 size: Int(fileSize), type: contentType)
         }
 
-        // Combine chunks via Blob/upload
+        // Combine chunks via Blob/set (blob2)
         let overallSha1 = overallHashContext.finalize()
 
-        var dataSourceObjects: [[String: AnyCodable]] = []
-        for chunk in chunkBlobIds {
-            var obj: [String: AnyCodable] = ["blobId": AnyCodable(chunk.blobId)]
-            if hasBlobExt {
-                obj["digest:sha"] = AnyCodable(chunk.sha1)
-            }
-            dataSourceObjects.append(obj)
+        let dataSourceObjects: [[String: AnyCodable]] = chunkBlobIds.map { chunk in
+            [
+                "blobId": AnyCodable(chunk.blobId),
+                "digest:sha": AnyCodable(chunk.sha1),
+            ]
         }
 
-        var createObj: [String: AnyCodable] = [
+        let createObj: [String: AnyCodable] = [
             "data": AnyCodable(dataSourceObjects.map { AnyCodable($0) }),
             "type": AnyCodable(contentType),
+            "digest:sha": AnyCodable(overallSha1),
         ]
-        if hasBlobExt {
-            createObj["digest:sha"] = AnyCodable(overallSha1)
-        }
 
-        var capabilities = [JmapCapability.core, JmapCapability.blob]
-        if hasBlobExt {
-            capabilities.append(JmapCapability.blobExt)
-        }
+        let capabilities = [JmapCapability.core, JmapCapability.blob2]
 
         let combineResponses = try await call([
             JmapMethodCall(
-                name: "Blob/upload",
+                name: "Blob/set",
                 args: [
                     "accountId": AnyCodable(accountId),
                     "create": ["combined": AnyCodable(createObj)],
@@ -925,7 +909,7 @@ public actor JmapClient {
         height: Int,
         mimeType: String = "image/jpeg"
     ) async throws -> String {
-        let capabilities = [JmapCapability.core, JmapCapability.blob, JmapCapability.blobExt]
+        let capabilities = [JmapCapability.core, JmapCapability.blob2]
         let responses = try await call([
             JmapMethodCall(
                 name: "Blob/convert",

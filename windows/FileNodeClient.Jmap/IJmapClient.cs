@@ -9,30 +9,31 @@ public interface IJmapClient : IDisposable
     string Username { get; }
     /// <summary>
     /// The first digest algorithm from the server's supportedDigestAlgorithms
-    /// that we support locally (sha or sha-256), or null if blob capability not present.
+    /// that we support locally (sha or sha-256), or null if not advertised.
     /// </summary>
     string? PreferredDigestAlgorithm { get; }
     /// <summary>
-    /// The chunk size from the blobext capability, or null if not supported.
+    /// The chunk size from the blob2 capability, or null if not supported.
     /// Files larger than this should be uploaded in chunks.
     /// </summary>
     long? ChunkSize { get; }
     /// <summary>
-    /// Max number of data sources in a single Blob/upload combine request,
-    /// from urn:ietf:params:jmap:blob capability. Null if not reported.
+    /// Max number of data sources in a single Blob/set combine request.
+    /// Null if not reported by the server.
     /// </summary>
     int? MaxDataSources { get; }
     /// <summary>
-    /// Max total size of a Blob/upload combine request, from urn:ietf:params:jmap:blob.
+    /// Max total size of a Blob/set combine request.
     /// Files larger than this cannot be uploaded via chunked combine.
     /// </summary>
     long? MaxSizeBlobSet { get; }
     /// <summary>
-    /// Whether the server supports urn:ietf:params:jmap:blob (Blob/upload, Blob/get).
+    /// Whether the server supports the blob2 capability (Blob/set, Blob/convert,
+    /// Blob/get with chunks).
     /// </summary>
-    bool HasBlob { get; }
+    bool HasBlob2 { get; }
     /// <summary>
-    /// Whether the server supports Blob/convert (blobext capability).
+    /// Whether the server supports Blob/convert (currently equivalent to HasBlob2).
     /// </summary>
     bool HasBlobConvert { get; }
     /// <summary>
