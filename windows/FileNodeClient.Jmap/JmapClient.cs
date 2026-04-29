@@ -50,8 +50,11 @@ public class JmapClient : IJmapClient
     private bool _webWriteUrlTemplateResolved;
     // Some accounts advertise the Quota capability at session level but reject
     // Quota/get at HTTP level (403 Forbidden). Once we hit that, stop including
-    // Quota/get in batched calls for this session.
+    // Quota/get in batched calls for this session. Shared with AccountScopedJmapClient
+    // wrappers so a 403 on any sibling account suppresses retries on all of them.
     private volatile bool _quotaForbidden;
+    internal bool IsQuotaForbidden => _quotaForbidden;
+    internal void MarkQuotaForbidden() => _quotaForbidden = true;
 
     public JmapSession Session => _session
         ?? throw new InvalidOperationException("Session not initialised — call ConnectAsync first");

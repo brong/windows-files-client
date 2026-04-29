@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
+using FileNodeClient.Logging;
 using FileNodeClient.Jmap.Models;
 
 namespace FileNodeClient.Jmap;
@@ -359,6 +360,26 @@ public class AccountScopedJmapClient : IJmapClient
     public async Task<(ChangesResponse Changes, FileNode[] Created, FileNode[] Updated, Quota[]? Quotas)>
         GetChangesAndNodesAsync(string sinceState, CancellationToken ct = default)
     {
+        // Mirrors JmapClient.GetChangesAndNodesAsync: try with Quota batched in,
+        // fall back to a no-quota retry on HTTP 403 (some accounts advertise the
+        // capability but the OAuth token can't access Quota/get).
+        bool includeQuota = Session.HasCapability(JmapClient.QuotaCapability) && !_parent.IsQuotaForbidden;
+
+        try
+        {
+            return await ExecuteChangesAndNodesAsync(sinceState, includeQuota, ct);
+        }
+        catch (HttpRequestException ex) when (includeQuota && ex.StatusCode == System.Net.HttpStatusCode.Forbidden)
+        {
+            Log.Info($"[JMAP] Quota/get forbidden for {_accountId}; disabling Quota batching for this session");
+            _parent.MarkQuotaForbidden();
+            return await ExecuteChangesAndNodesAsync(sinceState, includeQuota: false, ct);
+        }
+    }
+
+    private async Task<(ChangesResponse Changes, FileNode[] Created, FileNode[] Updated, Quota[]? Quotas)>
+        ExecuteChangesAndNodesAsync(string sinceState, bool includeQuota, CancellationToken ct)
+    {
         var changesCallId = NextCallId();
         var createdCallId = NextCallId();
         var updatedCallId = NextCallId();
@@ -382,7 +403,7 @@ public class AccountScopedJmapClient : IJmapClient
 
         string? quotaCallId = null;
         string[] capabilities = FileNodeUsing;
-        if (Session.HasCapability(JmapClient.QuotaCapability))
+        if (includeQuota)
         {
             quotaCallId = NextCallId();
             capabilities = [JmapClient.CoreCapability, JmapClient.FileNodeCapability, JmapClient.QuotaCapability];
@@ -425,13 +446,21 @@ public class AccountScopedJmapClient : IJmapClient
         var created = GetValidatedResult<GetResponse<FileNode>>(responseMap, createdCallId, "FileNode/get");
         var updated = GetValidatedResult<GetResponse<FileNode>>(responseMap, updatedCallId, "FileNode/get");
 
+        // Optional method: tolerate per-method errors without failing the call.
         Quota[]? quotas = null;
-        if (quotaCallId != null && responseMap.TryGetValue(quotaCallId, out var quotaResp)
-            && quotaResp.method == "Quota/get")
+        if (quotaCallId != null && responseMap.TryGetValue(quotaCallId, out var quotaResp))
         {
-            var quotaResult = quotaResp.args.Deserialize<GetResponse<Quota>>(JmapSerializerOptions.Default);
-            if (quotaResult != null)
-                quotas = quotaResult.List;
+            if (quotaResp.method == "Quota/get")
+            {
+                var quotaResult = quotaResp.args.Deserialize<GetResponse<Quota>>(JmapSerializerOptions.Default);
+                if (quotaResult != null)
+                    quotas = quotaResult.List;
+            }
+            else
+            {
+                Log.Info($"[JMAP] Quota/get returned {quotaResp.method} for {_accountId}; disabling Quota batching for this session");
+                _parent.MarkQuotaForbidden();
+            }
         }
 
         return (changes, created.List, updated.List, quotas);
