@@ -1,3 +1,4 @@
+import FileProvider
 import SwiftUI
 
 #if os(macOS)
