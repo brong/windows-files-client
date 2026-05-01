@@ -106,6 +106,9 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
     }
 
     /// Enumerate the working set — all items the system needs to know about.
+    ///
+    /// Uses BFS from the home node so parents are always reported before their children,
+    /// matching the Windows placeholder-creation order.
     private func enumerateWorkingSet(
         for observer: NSFileProviderEnumerationObserver,
         startingAt page: NSFileProviderPage
@@ -116,36 +119,53 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
             id: activityId, accountId: accountId,
             fileName: "Downloading node list", action: .sync)
 
-        // Fetch all nodes from the server
-        let allIds = try await client.queryAllNodeIds(accountId: accountId)
-        await activityTracker?.updateProgress(id: activityId, progress: 0.3)
-        let allNodes = try await client.getNodes(accountId: accountId, ids: allIds)
+        // Fetch all nodes — query + get in one batched request per page, state from get response.
+        let (allNodes, stateToken) = try await client.queryAndGetAllNodes(accountId: accountId)
         await activityTracker?.updateProgress(id: activityId, progress: 0.8)
 
-        // Update database
+        // Discover home and trash IDs from node roles — more reliable than the
+        // value passed at init time, which may be empty due to async init ordering.
+        let effectiveHomeId: String = allNodes.first(where: { $0.isHome })?.id ?? homeNodeId
+        let effectiveTrashId: String? = allNodes.first(where: { $0.isTrash })?.id ?? trashNodeId
+
+        // Persist all nodes and update discovered IDs
         for node in allNodes {
             await database.upsertFromServer(node)
         }
-
-        // Get the state token from the last get response
-        // For now, do another changes call to get the current state
-        let stateToken = try await fetchCurrentState()
+        await database.setHomeNodeId(effectiveHomeId)
+        await database.setTrashNodeId(effectiveTrashId)
         await database.setStateToken(stateToken)
         try await database.save()
 
-        // Convert to FileProviderItems and report
-        let items = allNodes.compactMap { node -> FileProviderItem? in
-            // Skip home/root/trash nodes — they map to .rootContainer / .trashContainer
-            if node.isHome || node.isRoot { return nil }
-            if let trashId = trashNodeId, node.id == trashId { return nil }
-            return FileProviderItem(node: node, homeNodeId: homeNodeId, trashNodeId: trashNodeId)
+        // Build parent → children map for BFS
+        var childrenByParent: [String: [FileNode]] = [:]
+        for node in allNodes {
+            guard let parentId = node.parentId else { continue }
+            childrenByParent[parentId, default: []].append(node)
         }
 
-        // Report in batches
+        // BFS from home node — home itself maps to .rootContainer, never reported as an item.
+        // Parents are visited before their children so the system can build the tree correctly.
+        var queue: [String] = [effectiveHomeId]
+        var batch: [FileProviderItem] = []
         let batchSize = 100
-        for startIndex in stride(from: 0, to: items.count, by: batchSize) {
-            let endIndex = min(startIndex + batchSize, items.count)
-            let batch = Array(items[startIndex..<endIndex])
+
+        while !queue.isEmpty {
+            let parentId = queue.removeFirst()
+            for node in childrenByParent[parentId] ?? [] {
+                if node.isHome || node.isRoot { continue }
+                batch.append(FileProviderItem(
+                    node: node, homeNodeId: effectiveHomeId, trashNodeId: effectiveTrashId))
+                if node.isFolder {
+                    queue.append(node.id)
+                }
+                if batch.count >= batchSize {
+                    observer.didEnumerate(batch)
+                    batch.removeAll()
+                }
+            }
+        }
+        if !batch.isEmpty {
             observer.didEnumerate(batch)
         }
 

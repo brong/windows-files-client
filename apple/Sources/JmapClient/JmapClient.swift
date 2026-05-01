@@ -232,6 +232,57 @@ public actor JmapClient {
         return allNodes
     }
 
+    /// Fetch all FileNodes in a single batched request using JMAP result references.
+    /// Sends FileNode/query and FileNode/get together so the server can resolve the
+    /// ID list server-side — one round trip instead of two. Returns nodes and the
+    /// current state token from the get response (no separate state fetch needed).
+    /// Falls back to paginated pairs for large accounts.
+    public func queryAndGetAllNodes(accountId: String, pageSize: Int = 4096) async throws -> (nodes: [FileNode], state: String) {
+        var allNodes: [FileNode] = []
+        var position = 0
+        var state: String = ""
+        var total = Int.max
+
+        while allNodes.count < total {
+            let responses = try await call([
+                JmapMethodCall(
+                    name: "FileNode/query",
+                    args: [
+                        "accountId": AnyCodable(accountId),
+                        "position": AnyCodable(position),
+                        "limit": AnyCodable(pageSize),
+                    ],
+                    callId: "q0"
+                ),
+                JmapMethodCall(
+                    name: "FileNode/get",
+                    args: [
+                        "accountId": AnyCodable(accountId),
+                        "#ids": [
+                            "resultOf": "q0",
+                            "name": "FileNode/query",
+                            "path": "/ids",
+                        ],
+                        "properties": AnyCodable(FileNode.standardProperties),
+                    ],
+                    callId: "g0"
+                ),
+            ])
+
+            let queryResponse = try extractResponse(FileNodeQueryResponse.self, from: responses, callId: "q0")
+            let getResponse = try extractResponse(FileNodeGetResponse.self, from: responses, callId: "g0")
+
+            allNodes.append(contentsOf: getResponse.list)
+            state = getResponse.state
+            total = queryResponse.total ?? allNodes.count
+
+            if queryResponse.ids.isEmpty { break }
+            position += queryResponse.ids.count
+        }
+
+        return (allNodes, state)
+    }
+
     /// Fetch incremental changes since a state token.
     /// Returns changes and the full FileNode objects for created/updated items.
     public func getChanges(
