@@ -72,11 +72,14 @@ public static class OAuthClient
 
     /// <summary>
     /// Build the authorization URL for the browser redirect.
+    /// `resource` (RFC 8707) is required by the Fastmail OAuth server for
+    /// dynamically-registered clients; pass the JMAP session URL here.
     /// </summary>
     public static string BuildAuthorizationUrl(
         string authorizationEndpoint, string clientId,
         string redirectUri, string scope,
-        string codeChallenge, string state)
+        string codeChallenge, string state,
+        string resource)
     {
         var query = string.Join("&",
             $"response_type=code",
@@ -85,7 +88,8 @@ public static class OAuthClient
             $"scope={Uri.EscapeDataString(scope)}",
             $"code_challenge={Uri.EscapeDataString(codeChallenge)}",
             $"code_challenge_method=S256",
-            $"state={Uri.EscapeDataString(state)}");
+            $"state={Uri.EscapeDataString(state)}",
+            $"resource={Uri.EscapeDataString(resource)}");
 
         return $"{authorizationEndpoint}?{query}";
     }

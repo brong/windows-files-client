@@ -68,7 +68,8 @@ func performOAuthLogin() async throws -> (sessionUrl: String, credential: OAuthC
         clientId: registration.clientId,
         redirectURI: redirectURI,
         codeChallenge: pkce.codeChallenge,
-        state: state
+        state: state,
+        resource: sessionUrl
     ) else {
         throw JmapError.serverError("oauth", "Failed to build authorization URL")
     }

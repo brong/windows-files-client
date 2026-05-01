@@ -225,12 +225,15 @@ public func oauthRegisterClient(
 // MARK: - Authorization URL
 
 /// Build the authorization URL to open in the browser.
+/// `resource` (RFC 8707) is required by the Fastmail OAuth server for
+/// dynamically-registered clients; pass the JMAP session URL here.
 public func oauthAuthorizationURL(
     authorizationEndpoint: String,
     clientId: String,
     redirectURI: String,
     codeChallenge: String,
-    state: String
+    state: String,
+    resource: String
 ) -> URL? {
     var components = URLComponents(string: authorizationEndpoint)
     components?.queryItems = [
@@ -241,6 +244,7 @@ public func oauthAuthorizationURL(
         URLQueryItem(name: "code_challenge", value: codeChallenge),
         URLQueryItem(name: "code_challenge_method", value: "S256"),
         URLQueryItem(name: "state", value: state),
+        URLQueryItem(name: "resource", value: resource),
     ]
     return components?.url
 }

@@ -55,7 +55,8 @@ sealed class OAuthLoginFlow : IDisposable
                 redirectUri,
                 OAuthClient.FilesScope,
                 codeChallenge,
-                state);
+                state,
+                resource: sessionUrl);
 
             progress?.Report("Opening browser...");
             Process.Start(new ProcessStartInfo(authUrl) { UseShellExecute = true });

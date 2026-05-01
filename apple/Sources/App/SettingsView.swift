@@ -191,7 +191,8 @@ struct SettingsView: View {
                 clientId: registration.clientId,
                 redirectURI: redirectURI,
                 codeChallenge: pkce.codeChallenge,
-                state: state
+                state: state,
+                resource: sessionUrl
             ) else { return }
 
             let code = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
@@ -508,7 +509,8 @@ struct AddAccountView: View {
                 clientId: registration.clientId,
                 redirectURI: redirectURI,
                 codeChallenge: pkce.codeChallenge,
-                state: state
+                state: state,
+                resource: sessionUrl
             ) else {
                 throw JmapError.serverError("oauth", "Failed to build authorization URL")
             }
