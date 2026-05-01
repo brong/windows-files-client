@@ -531,13 +531,16 @@ Each platform has its own thumbnail provider mechanism:
 
 The simplest auth: a long-lived app password or OAuth2 access token passed as `Authorization: Bearer <token>`.
 
-### OAuth2 (Future)
+### OAuth2
 
-Discovery via `draft-ietf-mailmaint-oauth-public-01`:
-1. `GET .well-known/oauth-public` on the mail domain
-2. Returns authorization and token endpoints
-3. Standard OAuth2 PKCE flow for public clients
-4. Refresh tokens for long-lived sessions
+Discovery via `draft-ietf-mailmaint-pacc-01` (PACC — automatic configuration of mail/calendar/contact server settings):
+1. `GET https://ua-auto-config.{domain}/.well-known/user-agent-configuration.json` — returns the JMAP session URL under `protocols.jmap.url` and the OAuth issuer under `authentication.oauth-public.issuer`
+2. `GET {issuer}/.well-known/oauth-authorization-server` — standard OAuth 2.0 server metadata (RFC 8414): authorization, token, registration, and revocation endpoints
+3. Dynamic client registration (RFC 7591) at `registration_endpoint` to obtain a `client_id` keyed by `software_id`
+4. Standard OAuth 2.0 authorization-code flow with PKCE (S256) for public clients
+5. Refresh tokens for long-lived sessions
+
+The PACC spec also defines a DNS TXT record at `_ua-auto-config.{domain}` carrying the SHA-256 digest of the JSON document, and an MX-hostname fallback if the primary URL is unreachable. We don't validate the TXT record (TLS handles transport integrity for our hardcoded discovery target) and don't do MX fallback (we always discover against `fastmail.com`).
 
 ### Session Lifecycle
 

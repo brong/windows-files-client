@@ -3,8 +3,8 @@ using System.Text.Json.Serialization;
 namespace FileNodeClient.Jmap.Auth;
 
 /// <summary>
-/// Response from {domain}/.well-known/user-agent-configuration
-/// (draft-ietf-mailmaint-pacc)
+/// Response from ua-auto-config.{domain}/.well-known/user-agent-configuration.json
+/// (draft-ietf-mailmaint-pacc-01)
 /// </summary>
 public record UserAgentConfiguration(
     [property: JsonPropertyName("protocols")]

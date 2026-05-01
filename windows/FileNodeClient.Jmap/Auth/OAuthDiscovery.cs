@@ -3,8 +3,9 @@ using System.Text.Json;
 namespace FileNodeClient.Jmap.Auth;
 
 /// <summary>
-/// Implements the OAuth discovery chain:
-/// 1. {domain}/.well-known/user-agent-configuration → session URL + OAuth issuer
+/// Implements the OAuth discovery chain (draft-ietf-mailmaint-pacc-01):
+/// 1. ua-auto-config.{domain}/.well-known/user-agent-configuration.json
+///    → session URL + OAuth issuer
 /// 2. {issuer}/.well-known/oauth-authorization-server → full metadata
 /// </summary>
 public static class OAuthDiscovery
@@ -23,9 +24,8 @@ public static class OAuthDiscovery
     {
         using var http = new HttpClient();
 
-        // Step 1: .well-known/user-agent-configuration → session URL + OAuth issuer
-        // Always discover against fastmail.com for now
-        var configUrl = "https://fastmail.com/.well-known/user-agent-configuration";
+        // Step 1: PACC user-agent-configuration → session URL + OAuth issuer
+        var configUrl = "https://ua-auto-config.fastmail.com/.well-known/user-agent-configuration.json";
 
         HttpResponseMessage configResponse;
         try

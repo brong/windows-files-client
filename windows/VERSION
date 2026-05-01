@@ -2,6 +2,7 @@
 #   1. This file (VERSION)
 #   2. windows/FileNodeClient.Package/AppxManifest.xml  (<Identity Version="...">)
 
+1.0.74.0 2026-05-01  Update PACC discovery URL to ua-auto-config.fastmail.com/.well-known/user-agent-configuration.json (draft-ietf-mailmaint-pacc-01)
 1.0.73.0 2026-04-29  Quota fallback for sibling accounts: AccountScopedJmapClient now retries warm-start without Quota/get on HTTP 403
 1.0.72.0 2026-04-29  Migrate to JMAP blob2 capability: Blob/set replaces Blob/upload, drop deprecated :blob from `using`
 1.0.71.0 2026-04-20  Re-batch Quota/get with one-shot HTTP-403 fallback + per-method error tolerance

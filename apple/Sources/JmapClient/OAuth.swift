@@ -5,7 +5,8 @@ import CryptoKit
 
 // MARK: - Discovery Models
 
-/// Response from `{domain}/.well-known/user-agent-configuration`
+/// Response from `ua-auto-config.{domain}/.well-known/user-agent-configuration.json`
+/// (draft-ietf-mailmaint-pacc-01)
 struct UserAgentConfiguration: Codable {
     let protocols: UAProtocols?
     let authentication: UAAuthentication?
@@ -103,7 +104,7 @@ public enum OAuthConstants {
     public static let filesScope = "urn:ietf:params:jmap:core urn:ietf:params:oauth:scope:files"
     public static let clientName = "FastmailFiles"
     public static let softwareId = "4a1c3d2e-8f7b-4e6a-9d5c-1b0a2e3f4d5c"
-    public static let discoveryURL = "https://fastmail.com/.well-known/user-agent-configuration"
+    public static let discoveryURL = "https://ua-auto-config.fastmail.com/.well-known/user-agent-configuration.json"
 }
 
 // MARK: - OAuth Discovery
