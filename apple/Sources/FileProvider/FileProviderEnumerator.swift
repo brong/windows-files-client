@@ -135,8 +135,9 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
 
         // Convert to FileProviderItems and report
         let items = allNodes.compactMap { node -> FileProviderItem? in
-            // Skip the root node itself (it maps to .rootContainer)
-            if node.isRoot { return nil }
+            // Skip home/root/trash nodes — they map to .rootContainer / .trashContainer
+            if node.isHome || node.isRoot { return nil }
+            if let trashId = trashNodeId, node.id == trashId { return nil }
             return FileProviderItem(node: node, homeNodeId: homeNodeId, trashNodeId: trashNodeId)
         }
 
@@ -198,7 +199,7 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
 
             for node in createdNodes {
                 await database.upsertFromServer(node)
-                if !node.isRoot {
+                if !node.isHome && !node.isRoot {
                     updatedItems.append(
                         FileProviderItem(node: node, homeNodeId: homeNodeId, trashNodeId: trashNodeId))
                 }
@@ -206,7 +207,7 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
 
             for node in updatedNodes {
                 await database.upsertFromServer(node)
-                if !node.isRoot {
+                if !node.isHome && !node.isRoot {
                     updatedItems.append(
                         FileProviderItem(node: node, homeNodeId: homeNodeId, trashNodeId: trashNodeId))
                 }
