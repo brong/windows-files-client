@@ -232,6 +232,54 @@ public actor JmapClient {
         return allNodes
     }
 
+    /// Fetch children of multiple parent folders in a single HTTP request.
+    /// Sends one FileNode/query+get pair per parentId (up to 16 at a time = 32 method calls).
+    /// Returns children grouped by parentId, and the state from the last get response.
+    public func getChildrenBatched(
+        accountId: String,
+        parentIds: [String]
+    ) async throws -> (childrenByParent: [String: [FileNode]], state: String) {
+        guard !parentIds.isEmpty else { return ([:], "") }
+
+        var methodCalls: [JmapMethodCall] = []
+        for (i, parentId) in parentIds.enumerated() {
+            let qId = "q\(i)"
+            let gId = "g\(i)"
+            methodCalls.append(JmapMethodCall(
+                name: "FileNode/query",
+                args: [
+                    "accountId": AnyCodable(accountId),
+                    "filter": ["parentId": AnyCodable(parentId)],
+                ],
+                callId: qId
+            ))
+            methodCalls.append(JmapMethodCall(
+                name: "FileNode/get",
+                args: [
+                    "accountId": AnyCodable(accountId),
+                    "#ids": [
+                        "resultOf": AnyCodable(qId),
+                        "name": "FileNode/query",
+                        "path": "/ids",
+                    ],
+                    "properties": AnyCodable(FileNode.standardProperties),
+                ],
+                callId: gId
+            ))
+        }
+
+        let responses = try await call(methodCalls)
+
+        var childrenByParent: [String: [FileNode]] = [:]
+        var state: String = ""
+        for (i, parentId) in parentIds.enumerated() {
+            let getResponse = try extractResponse(FileNodeGetResponse.self, from: responses, callId: "g\(i)")
+            childrenByParent[parentId] = getResponse.list
+            state = getResponse.state
+        }
+        return (childrenByParent, state)
+    }
+
     /// Fetch all FileNodes and the current state token.
     /// Queries all IDs first, then fetches nodes in batches of 1024 with explicit IDs —
     /// matching the Windows approach (GetFileNodesByIdsPagedAsync). State is extracted

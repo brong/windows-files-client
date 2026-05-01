@@ -99,14 +99,6 @@ struct SettingsView: View {
         .task {
             await refreshOrphanedDomains()
             appState.reloadExtensionStatuses()
-            // Observe extension status changes
-            let center = CFNotificationCenterGetDarwinNotifyCenter()
-            let observer = Unmanaged.passUnretained(appState).toOpaque()
-            CFNotificationCenterAddObserver(center, observer, { _, observer, _, _, _ in
-                guard let observer = observer else { return }
-                let state = Unmanaged<AppState>.fromOpaque(observer).takeUnretainedValue()
-                DispatchQueue.main.async { state.reloadExtensionStatuses() }
-            }, ExtensionStatusReader.notificationName, nil, .deliverImmediately)
         }
     }
 
@@ -740,9 +732,6 @@ private func startOAuthCallbackServer(
 
 struct ActivityView: View {
     @ObservedObject var appState: AppState
-    @State private var activeItems: [ActivityTracker.Activity] = []
-    @State private var recentItems: [ActivityTracker.Activity] = []
-    @State private var observer: ActivityObserver?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -750,14 +739,14 @@ struct ActivityView: View {
                 Text("Activity")
                     .font(.headline)
                 Spacer()
-                if !activeItems.isEmpty {
-                    Text("\(activeItems.count) in flight")
+                if !appState.activeActivities.isEmpty {
+                    Text("\(appState.activeActivities.count) in flight")
                         .font(.caption)
                         .foregroundColor(.blue)
                 }
             }
 
-            if activeItems.isEmpty && recentItems.isEmpty {
+            if appState.activeActivities.isEmpty && appState.recentActivities.isEmpty {
                 Text("No recent activity")
                     .font(.caption)
                     .foregroundColor(.secondary)
@@ -766,27 +755,27 @@ struct ActivityView: View {
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 4) {
-                        if !activeItems.isEmpty {
+                        if !appState.activeActivities.isEmpty {
                             Text("In Flight")
                                 .font(.caption2)
                                 .foregroundColor(.secondary)
                                 .textCase(.uppercase)
-                            ForEach(activeItems.prefix(10)) { activity in
+                            ForEach(appState.activeActivities.prefix(10)) { activity in
                                 activityRow(activity)
                             }
-                            if activeItems.count > 10 {
-                                Text("+ \(activeItems.count - 10) more...")
+                            if appState.activeActivities.count > 10 {
+                                Text("+ \(appState.activeActivities.count - 10) more...")
                                     .font(.caption)
                                     .foregroundColor(.secondary)
                             }
                         }
-                        if !recentItems.isEmpty {
+                        if !appState.recentActivities.isEmpty {
                             Text("Recent")
                                 .font(.caption2)
                                 .foregroundColor(.secondary)
                                 .textCase(.uppercase)
-                                .padding(.top, activeItems.isEmpty ? 0 : 4)
-                            ForEach(recentItems.prefix(5)) { activity in
+                                .padding(.top, appState.activeActivities.isEmpty ? 0 : 4)
+                            ForEach(appState.recentActivities.prefix(5)) { activity in
                                 activityRow(activity)
                             }
                         }
@@ -796,8 +785,6 @@ struct ActivityView: View {
                 .frame(height: 150)
             }
         }
-        .onAppear { startObserving() }
-        .onDisappear { stopObserving() }
     }
 
     private func activityRow(_ activity: ActivityTracker.Activity) -> some View {
@@ -866,63 +853,6 @@ struct ActivityView: View {
         return String(format: "%.1f MB", Double(bytes) / (1024 * 1024))
     }
 
-    private func startObserving() {
-        loadActivities()
-        // Listen for Darwin notifications from the extension — instant push updates
-        let obs = ActivityObserver(onChange: {
-            DispatchQueue.main.async { [self] in
-                loadActivities()
-                updateSyncStatus()
-            }
-        })
-        obs.start()
-        observer = obs
-    }
-
-    private func updateSyncStatus() {
-        // Status is now derived from ExtensionStatus — nothing to do here.
-        // The SettingsView observes the status Darwin notification directly.
-    }
-
-    private func stopObserving() {
-        observer?.stop()
-        observer = nil
-    }
-
-    private func loadActivities() {
-        guard let containerURL = FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier: AppState.appGroupId)
-        else {
-            print("[Activity] No container URL for app group")
-            return
-        }
-
-        guard let snapshot = ActivityTracker.loadShared(containerURL: containerURL) else { return }
-
-        // Split into active and recent, maintaining stable order
-        let newActive = snapshot.activities.filter { $0.status == .active }
-        let newRecent = snapshot.activities.filter { $0.status != .active }
-
-        // Only update if actually changed (prevents unnecessary SwiftUI diffs)
-        let activeIds = newActive.map { $0.id }
-        let currentActiveIds = activeItems.map { $0.id }
-        if activeIds != currentActiveIds || newActive.count != activeItems.count {
-            activeItems = newActive
-        } else {
-            // Update progress on existing items in-place
-            for i in activeItems.indices {
-                if i < newActive.count {
-                    activeItems[i] = newActive[i]
-                }
-            }
-        }
-
-        let recentIds = newRecent.map { $0.id }
-        let currentRecentIds = recentItems.map { $0.id }
-        if recentIds != currentRecentIds {
-            recentItems = newRecent
-        }
-    }
 }
 
 // Shared content view for iOS

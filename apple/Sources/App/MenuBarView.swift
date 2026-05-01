@@ -24,10 +24,16 @@ struct MenuBarView: View {
                     .foregroundColor(.secondary)
 
                 ForEach(login.accounts.filter { $0.isSynced }) { account in
-                    HStack {
-                        Image(systemName: statusIcon(for: account.status))
-                            .foregroundColor(statusColor(for: account.status))
-                        Text(account.displayName.isEmpty ? account.accountId : account.displayName)
+                    Button {
+                        openInFinder(accountId: account.accountId)
+                    } label: {
+                        let status = appState.liveStatus(for: account.accountId)
+                        Label {
+                            Text(account.displayName.isEmpty ? account.accountId : account.displayName)
+                        } icon: {
+                            Image(systemName: statusIcon(for: status))
+                                .foregroundColor(statusColor(for: status))
+                        }
                     }
                 }
             }
@@ -51,6 +57,21 @@ struct MenuBarView: View {
     private func openSettings() {
         NSApp.activate(ignoringOtherApps: true)
         openWindow(id: "settings")
+    }
+
+    private func openInFinder(accountId: String) {
+        let domain = NSFileProviderDomain(
+            identifier: NSFileProviderDomainIdentifier(rawValue: accountId),
+            displayName: "")
+        if let manager = NSFileProviderManager(for: domain) {
+            manager.getUserVisibleURL(for: .rootContainer) { url, _ in
+                if let url = url {
+                    DispatchQueue.main.async {
+                        NSWorkspace.shared.activateFileViewerSelecting([url])
+                    }
+                }
+            }
+        }
     }
 
     private func statusIcon(for status: SyncStatus) -> String {

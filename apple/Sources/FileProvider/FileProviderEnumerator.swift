@@ -110,8 +110,9 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
 
     /// Enumerate the working set — all items the system needs to know about.
     ///
-    /// Uses BFS from the home node so parents are always reported before their children,
-    /// matching the Windows placeholder-creation order.
+    /// BFS from home using per-folder parentId queries, batching up to 16 folders per
+    /// HTTP request. Only fetches nodes reachable from home (excludes orphaned nodes).
+    /// Reports items progressively so Finder populates as data arrives.
     private func enumerateWorkingSet(
         for observer: NSFileProviderEnumerationObserver,
         startingAt page: NSFileProviderPage
@@ -123,60 +124,66 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
             id: activityId, accountId: accountId,
             fileName: label, action: .sync)
 
-        // Fetch all nodes — query + get in one batched request per page, state from get response.
-        await activityTracker?.updateProgress(id: activityId, progress: 0.1)
-        let (allNodes, stateToken) = try await client.queryAndGetAllNodes(accountId: accountId)
-        await activityTracker?.updateProgress(id: activityId, progress: 0.8)
+        var effectiveTrashId: String? = trashNodeId
+        var allNodes: [FileNode] = []
+        var finalState: String = ""
 
-        // Discover home and trash IDs from node roles — more reliable than the
-        // value passed at init time, which may be empty due to async init ordering.
-        let effectiveHomeId: String = allNodes.first(where: { $0.isHome })?.id ?? homeNodeId
-        let effectiveTrashId: String? = allNodes.first(where: { $0.isTrash })?.id ?? trashNodeId
+        // BFS queue of folder IDs whose children need to be fetched.
+        var folderQueue: [String] = [homeNodeId]
+        var itemBatch: [FileProviderItem] = []
+        let itemBatchSize = 100
+        let folderBatchSize = 16  // 16 folders → 32 method calls per HTTP request
 
-        // Persist all nodes and update discovered IDs
-        for node in allNodes {
-            await database.upsertFromServer(node)
-        }
-        await database.setHomeNodeId(effectiveHomeId)
-        await database.setTrashNodeId(effectiveTrashId)
-        await database.setStateToken(stateToken)
-        try await database.save()
+        do {
+            while !folderQueue.isEmpty {
+                let batchParents = Array(folderQueue.prefix(folderBatchSize))
+                folderQueue.removeFirst(min(folderBatchSize, folderQueue.count))
 
-        // Build parent → children map for BFS
-        var childrenByParent: [String: [FileNode]] = [:]
-        for node in allNodes {
-            guard let parentId = node.parentId else { continue }
-            childrenByParent[parentId, default: []].append(node)
-        }
+                let (childrenByParent, state) = try await client.getChildrenBatched(
+                    accountId: accountId, parentIds: batchParents)
+                if !state.isEmpty { finalState = state }
 
-        // BFS from home node — home itself maps to .rootContainer, never reported as an item.
-        // Parents are visited before their children so the system can build the tree correctly.
-        var queue: [String] = [effectiveHomeId]
-        var batch: [FileProviderItem] = []
-        let batchSize = 100
+                for parentId in batchParents {
+                    for node in childrenByParent[parentId] ?? [] {
+                        allNodes.append(node)
+                        if node.isTrash { effectiveTrashId = node.id }
 
-        while !queue.isEmpty {
-            let parentId = queue.removeFirst()
-            for node in childrenByParent[parentId] ?? [] {
-                if node.isHome || node.isRoot { continue }
-                batch.append(FileProviderItem(
-                    node: node, homeNodeId: effectiveHomeId, trashNodeId: effectiveTrashId))
-                if node.isFolder {
-                    queue.append(node.id)
-                }
-                if batch.count >= batchSize {
-                    observer.didEnumerate(batch)
-                    batch.removeAll()
+                        if !node.isHome && !node.isRoot {
+                            itemBatch.append(FileProviderItem(
+                                node: node, homeNodeId: homeNodeId, trashNodeId: effectiveTrashId))
+                            if itemBatch.count >= itemBatchSize {
+                                observer.didEnumerate(itemBatch)
+                                itemBatch.removeAll()
+                            }
+                        }
+
+                        if node.isFolder {
+                            folderQueue.append(node.id)
+                        }
+                    }
                 }
             }
-        }
-        if !batch.isEmpty {
-            observer.didEnumerate(batch)
-        }
 
-        await activityTracker?.complete(id: activityId)
-        statusWriter?.setIdle(nodeCount: allNodes.count)
-        observer.finishEnumerating(upTo: nil)
+            if !itemBatch.isEmpty {
+                observer.didEnumerate(itemBatch)
+            }
+
+            for node in allNodes {
+                await database.upsertFromServer(node)
+            }
+            await database.setHomeNodeId(homeNodeId)
+            await database.setTrashNodeId(effectiveTrashId)
+            await database.setStateToken(finalState)
+            try await database.save()
+
+            await activityTracker?.complete(id: activityId)
+            statusWriter?.setIdle(nodeCount: allNodes.count)
+            observer.finishEnumerating(upTo: nil)
+        } catch {
+            await activityTracker?.remove(id: activityId)
+            statusWriter?.setIdle()
+            throw error
+        }
     }
 
     /// Enumerate children of a specific folder.
@@ -267,6 +274,7 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
 
         } catch JmapError.cannotCalculateChanges {
             await activityTracker?.remove(id: activityId)
+            statusWriter?.setIdle()
             // State token too old — clear it immediately so a crash won't loop
             await database.setStateToken("")
             try? await database.save()
@@ -274,6 +282,10 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
             logger.info("State token expired, requesting full re-enumeration")
             #endif
             observer.finishEnumeratingWithError(NSFileProviderError(.syncAnchorExpired))
+        } catch {
+            await activityTracker?.remove(id: activityId)
+            statusWriter?.setIdle()
+            throw error
         }
     }
 

@@ -132,6 +132,12 @@ class AppState: ObservableObject {
     @Published var showingAddAccount = false
     /// Extension-reported statuses, keyed by accountId. Single source of truth.
     @Published var extensionStatuses: [String: ExtensionStatus] = [:]
+    /// Active activities from the activity tracker — single source of truth for "currently syncing".
+    @Published var activeActivities: [ActivityTracker.Activity] = []
+    /// Recently completed/failed activities for display in the activity log.
+    @Published var recentActivities: [ActivityTracker.Activity] = []
+
+    private var activityObserver: ActivityObserver?
 
     private let defaults: UserDefaults?
 
@@ -147,16 +153,21 @@ class AppState: ObservableObject {
         logins.flatMap { $0.accounts.filter { $0.isSynced } }
     }
 
-    /// Get the live status for an account from the extension's reported state.
+    /// Get the live status for an account.
+    /// Active activities are the single source of truth for "currently syncing".
+    /// The status file provides the persistent idle/error/offline state.
     func liveStatus(for accountId: String) -> SyncStatus {
         for login in logins {
             guard let acct = login.accounts.first(where: { $0.accountId == accountId }) else { continue }
             if !acct.isSynced { return .notSynced }
 
-            // Use extension-reported status as source of truth
+            // Active activity → syncing, regardless of status file
+            if activeActivities.contains(where: { $0.accountId == accountId }) { return .syncing }
+
+            // Fall back to extension-reported status for idle/error/offline
             if let extStatus = extensionStatuses[accountId] {
                 switch extStatus.state {
-                case .initializing, .syncing: return .syncing
+                case .initializing, .syncing: return .idle  // no active activity = stale syncing, treat as idle
                 case .idle: return .idle
                 case .error: return .error
                 case .offline: return .offline
@@ -167,8 +178,7 @@ class AppState: ObservableObject {
             switch login.connectionStatus {
             case .authFailed: return .error
             case .networkError: return .offline
-            case .connecting, .unknown: return .syncing  // no status = still starting
-            case .connected: return .syncing  // connected but no extension report = waiting
+            case .connecting, .unknown, .connected: return .syncing
             }
         }
         return .notSynced
@@ -198,6 +208,36 @@ class AppState: ObservableObject {
         self.defaults = UserDefaults(suiteName: Self.appGroupId)
         loadState()
         Task { await checkAllConnections() }
+        startObservers()
+    }
+
+    private func startObservers() {
+        // Reload extension statuses on Darwin notification (replaces the per-view registration
+        // that previously leaked observers when the settings window reopened).
+        let center = CFNotificationCenterGetDarwinNotifyCenter()
+        let statusObserver = Unmanaged.passUnretained(self).toOpaque()
+        CFNotificationCenterAddObserver(center, statusObserver, { _, observer, _, _, _ in
+            guard let observer = observer else { return }
+            let state = Unmanaged<AppState>.fromOpaque(observer).takeUnretainedValue()
+            DispatchQueue.main.async { state.reloadExtensionStatuses() }
+        }, ExtensionStatusReader.notificationName, nil, .deliverImmediately)
+        reloadExtensionStatuses()
+
+        // Observe activity changes — always active so menu bar status stays current.
+        let obs = ActivityObserver(onChange: { [weak self] in
+            DispatchQueue.main.async { self?.reloadActivities() }
+        })
+        obs.start()
+        activityObserver = obs
+        reloadActivities()
+    }
+
+    func reloadActivities() {
+        guard let containerURL = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: Self.appGroupId) else { return }
+        guard let snapshot = ActivityTracker.loadShared(containerURL: containerURL) else { return }
+        activeActivities = snapshot.activities.filter { $0.status == .active }
+        recentActivities = snapshot.activities.filter { $0.status != .active }
     }
 
     // MARK: - Connection Check
