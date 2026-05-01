@@ -82,6 +82,17 @@ public struct JmapSession: Codable, Sendable {
         accountHasCapability(accountId, JmapCapability.blob2)
     }
 
+    /// Server-suggested chunk size from the blob2 capability, if advertised.
+    public func blob2ChunkSize(accountId: String) -> Int? {
+        accounts[accountId]?.accountCapabilities[JmapCapability.blob2]?.dictValue?["chunkSize"]?.intValue
+    }
+
+    /// Maximum total upload size from the legacy blob capability metadata.
+    /// Files exceeding this limit cannot be uploaded via Blob/set.
+    public func maxSizeBlobSet(accountId: String) -> Int? {
+        accounts[accountId]?.accountCapabilities[JmapCapability.blob]?.dictValue?["maxSizeBlobSet"]?.intValue
+    }
+
     /// Get the FileNode capability URI that the server actually uses.
     public var fileNodeCapabilityURI: String? {
         JmapCapability.allFileNodeURIs.first(where: hasCapability)

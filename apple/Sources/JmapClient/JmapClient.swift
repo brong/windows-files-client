@@ -512,11 +512,18 @@ public actor JmapClient {
                 contentType: contentType, progress: progress)
         }
 
-        // Determine chunk size — maxDataSources is advertised on the legacy
-        // blob capability metadata; we read it without sending the URI.
+        // Reject immediately if file exceeds the server's Blob/set size limit.
+        if let maxSize = session.maxSizeBlobSet(accountId: accountId), Int(fileSize) > maxSize {
+            throw JmapError.serverError("uploadBlobChunked",
+                "File size \(fileSize) exceeds server maxSizeBlobSet \(maxSize)")
+        }
+
+        // Determine chunk size. Start from the server-suggested blob2 chunkSize
+        // hint (or 64 MB default). maxDataSources comes from the legacy blob
+        // capability metadata — readable without sending that URI.
         let blobCap = session.accounts[accountId]?.accountCapabilities[JmapCapability.blob]
         let maxDataSources = blobCap?.dictValue?["maxDataSources"]?.intValue ?? 100
-        var chunkSize = Self.defaultChunkSize
+        var chunkSize = session.blob2ChunkSize(accountId: accountId) ?? Self.defaultChunkSize
 
         // Adjust chunk size up if file would exceed maxDataSources chunks
         while Int(fileSize) / chunkSize + 1 > maxDataSources && chunkSize < Int(fileSize) {
