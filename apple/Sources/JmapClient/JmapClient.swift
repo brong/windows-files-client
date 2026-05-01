@@ -232,52 +232,36 @@ public actor JmapClient {
         return allNodes
     }
 
-    /// Fetch all FileNodes in a single batched request using JMAP result references.
-    /// Sends FileNode/query and FileNode/get together so the server can resolve the
-    /// ID list server-side — one round trip instead of two. Returns nodes and the
-    /// current state token from the get response (no separate state fetch needed).
-    /// Falls back to paginated pairs for large accounts.
-    public func queryAndGetAllNodes(accountId: String, pageSize: Int = 4096) async throws -> (nodes: [FileNode], state: String) {
-        var allNodes: [FileNode] = []
-        var position = 0
-        var state: String = ""
-        var total = Int.max
+    /// Fetch all FileNodes and the current state token.
+    /// Queries all IDs first, then fetches nodes in batches of 1024 with explicit IDs —
+    /// matching the Windows approach (GetFileNodesByIdsPagedAsync). State is extracted
+    /// from the last get response so no separate state fetch is needed.
+    public func queryAndGetAllNodes(accountId: String, batchSize: Int = 1024) async throws -> (nodes: [FileNode], state: String) {
+        let allIds = try await queryAllNodeIds(accountId: accountId)
+        guard !allIds.isEmpty else { return ([], "") }
 
-        while allNodes.count < total {
+        var allNodes: [FileNode] = []
+        var state: String = ""
+
+        for startIndex in stride(from: 0, to: allIds.count, by: batchSize) {
+            let endIndex = min(startIndex + batchSize, allIds.count)
+            let batchIds = Array(allIds[startIndex..<endIndex])
+
             let responses = try await call([
-                JmapMethodCall(
-                    name: "FileNode/query",
-                    args: [
-                        "accountId": AnyCodable(accountId),
-                        "position": AnyCodable(position),
-                        "limit": AnyCodable(pageSize),
-                    ],
-                    callId: "q0"
-                ),
                 JmapMethodCall(
                     name: "FileNode/get",
                     args: [
                         "accountId": AnyCodable(accountId),
-                        "#ids": [
-                            "resultOf": "q0",
-                            "name": "FileNode/query",
-                            "path": "/ids",
-                        ],
+                        "ids": AnyCodable(batchIds.map { AnyCodable($0) }),
                         "properties": AnyCodable(FileNode.standardProperties),
                     ],
                     callId: "g0"
                 ),
             ])
 
-            let queryResponse = try extractResponse(FileNodeQueryResponse.self, from: responses, callId: "q0")
             let getResponse = try extractResponse(FileNodeGetResponse.self, from: responses, callId: "g0")
-
             allNodes.append(contentsOf: getResponse.list)
             state = getResponse.state
-            total = queryResponse.total ?? allNodes.count
-
-            if queryResponse.ids.isEmpty { break }
-            position += queryResponse.ids.count
         }
 
         return (allNodes, state)
