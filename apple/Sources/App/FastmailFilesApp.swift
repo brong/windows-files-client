@@ -450,6 +450,15 @@ class AppState: ObservableObject {
 
         await removeDomain(accountId: accountId)
 
+        // Delete the local node cache so the re-registered domain starts fresh
+        if let containerURL = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: Self.appGroupId) {
+            let cacheDir = containerURL
+                .appendingPathComponent("NodeCache", isDirectory: true)
+                .appendingPathComponent(accountId, isDirectory: true)
+            try? FileManager.default.removeItem(at: cacheDir)
+        }
+
         // Re-register
         do {
             try await registerDomain(

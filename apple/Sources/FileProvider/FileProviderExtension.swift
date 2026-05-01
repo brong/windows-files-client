@@ -175,7 +175,6 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
         isDomainBeingRemoved = true
         Task {
             await pushWatcher.stop()
-            try? await database.delete()
         }
     }
 
