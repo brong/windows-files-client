@@ -14,6 +14,7 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
     private let database: NodeDatabase
     private let client: JmapClient
     private let accountId: String
+    private let accountName: String
     private let homeNodeId: String
     private let trashNodeId: String?
     private let activityTracker: ActivityTracker?
@@ -28,6 +29,7 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
         database: NodeDatabase,
         client: JmapClient,
         accountId: String,
+        accountName: String = "",
         homeNodeId: String,
         trashNodeId: String?,
         activityTracker: ActivityTracker? = nil,
@@ -37,6 +39,7 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
         self.database = database
         self.client = client
         self.accountId = accountId
+        self.accountName = accountName
         self.homeNodeId = homeNodeId
         self.trashNodeId = trashNodeId
         self.activityTracker = activityTracker
@@ -114,12 +117,14 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
         startingAt page: NSFileProviderPage
     ) async throws {
         let activityId = "enum:\(accountId):working-set"
+        let label = accountName.isEmpty ? "Downloading node list" : "Downloading node list (\(accountName))"
         statusWriter?.setSyncing()
         await activityTracker?.start(
             id: activityId, accountId: accountId,
-            fileName: "Downloading node list", action: .sync)
+            fileName: label, action: .sync)
 
         // Fetch all nodes — query + get in one batched request per page, state from get response.
+        await activityTracker?.updateProgress(id: activityId, progress: 0.1)
         let (allNodes, stateToken) = try await client.queryAndGetAllNodes(accountId: accountId)
         await activityTracker?.updateProgress(id: activityId, progress: 0.8)
 
@@ -203,10 +208,11 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
         }
 
         let activityId = "sync:\(accountId):changes"
+        let label = accountName.isEmpty ? "Checking for changes" : "Checking for changes (\(accountName))"
         statusWriter?.setSyncing()
         await activityTracker?.start(
             id: activityId, accountId: accountId,
-            fileName: "Checking for changes", action: .sync)
+            fileName: label, action: .sync)
 
         do {
             let (changes, createdNodes, updatedNodes) = try await client.getChanges(

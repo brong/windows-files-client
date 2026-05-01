@@ -21,6 +21,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
     private var sessionManager: SessionManager!
     private var pushWatcher: PushWatcher!
     private var accountId: String!
+    private var accountName: String = ""
     private var homeNodeId: String!
     private var trashNodeId: String?
     private var activityTracker: ActivityTracker!
@@ -69,6 +70,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
 
         // The domain identifier is the JMAP accountId
         self.accountId = domain.identifier.rawValue
+        self.accountName = domain.displayName
         logger.info("Extension init for account: \(domain.identifier.rawValue, privacy: .public)")
 
         // Initialize from shared container
@@ -573,6 +575,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
             database: database,
             client: client,
             accountId: accountId,
+            accountName: accountName,
             homeNodeId: homeNodeId ?? "",
             trashNodeId: trashNodeId,
             activityTracker: activityTracker,
