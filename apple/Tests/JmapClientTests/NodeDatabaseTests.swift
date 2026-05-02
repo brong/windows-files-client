@@ -181,27 +181,24 @@ import Testing
     #expect(entry?.size == 42)
 }
 
-@Test func testVersionMismatchForcesCleanStart() async throws {
+@Test func testWarmStartReadsPersistedData() async throws {
     let tempDir = FileManager.default.temporaryDirectory
         .appendingPathComponent(UUID().uuidString, isDirectory: true)
     try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: tempDir) }
 
-    // Write a cache with wrong version
-    let cacheDir = tempDir
-        .appendingPathComponent("NodeCache", isDirectory: true)
-        .appendingPathComponent("test-account", isDirectory: true)
-    try FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
-    let badCache = """
-    {"version":999,"homeNodeId":"H1","stateToken":"old","entries":{"M1":{"parentId":"H1","name":"old.txt","size":10,"isFolder":false}}}
-    """.data(using: .utf8)!
-    try badCache.write(to: cacheDir.appendingPathComponent("nodecache.json"))
+    // Write data via first instance
+    let db1 = NodeDatabase(containerURL: tempDir, accountId: "test-account")
+    await db1.setHomeNodeId("H1")
+    await db1.setStateToken("warm-token")
+    await db1.upsert(nodeId: "M1", entry: NodeCacheEntry(parentId: "H1", name: "warm.txt", isFolder: false))
 
-    // Load — should discard due to version mismatch
-    let db = NodeDatabase(containerURL: tempDir, accountId: "test-account")
-    #expect(await db.homeNodeId == nil)
-    #expect(await db.stateToken == nil)
-    #expect(await db.count == 0)
+    // Second instance opening the same SQLite file must see the persisted data
+    let db2 = NodeDatabase(containerURL: tempDir, accountId: "test-account")
+    #expect(await db2.homeNodeId == "H1")
+    #expect(await db2.stateToken == "warm-token")
+    #expect(await db2.count == 1)
+    #expect(await db2.entry(for: "M1")?.name == "warm.txt")
 }
 
 @Test func testDelete() async throws {
@@ -211,17 +208,15 @@ import Testing
     defer { try? FileManager.default.removeItem(at: tempDir) }
 
     let db = NodeDatabase(containerURL: tempDir, accountId: "test-account")
+    await db.setStateToken("tok")
+    await db.setHomeNodeId("H1")
     await db.upsert(nodeId: "M1", entry: NodeCacheEntry(parentId: "M0", name: "a.txt", isFolder: false))
-    try await db.save()
     try await db.delete()
-    #expect(await db.count == 0)
 
-    // File should be gone
-    let cacheFile = tempDir
-        .appendingPathComponent("NodeCache")
-        .appendingPathComponent("test-account")
-        .appendingPathComponent("nodecache.json")
-    #expect(!FileManager.default.fileExists(atPath: cacheFile.path))
+    // Both nodes and sync_state must be cleared
+    #expect(await db.count == 0)
+    #expect(await db.stateToken == nil)
+    #expect(await db.homeNodeId == nil)
 }
 
 // MARK: - Helpers
