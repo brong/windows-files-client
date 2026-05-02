@@ -135,3 +135,35 @@ private func makeStatus(_ accountId: String, state: ExtensionStatus.State, error
     )
     #expect(state == .idle)
 }
+
+@Test func testDeriveErrorOverridesOffline() {
+    // An auth error while offline must surface as .error, not .offline — it's actionable
+    let state = MenuBarState.derive(
+        pendingCount: 0, activeCount: 0,
+        extensionStatuses: [makeStatus("a1", state: .error, error: "Auth failed")],
+        isOnline: false
+    )
+    if case .error(let msg) = state {
+        #expect(msg == "Auth failed")
+    } else {
+        Issue.record("Expected .error to override offline, got \(state)")
+    }
+}
+
+// MARK: - Paused state
+
+@Test func testPausedCellularSymbol() {
+    #expect(MenuBarState.paused(reason: .cellular).symbolName == "pause.icloud")
+}
+
+@Test func testPausedCellularStatusText() {
+    #expect(MenuBarState.paused(reason: .cellular).statusText == "On cellular — background sync paused")
+}
+
+@Test func testPausedLowDataStatusText() {
+    #expect(MenuBarState.paused(reason: .lowDataMode).statusText == "Low Data Mode — sync paused")
+}
+
+@Test func testPausedUserRequestedStatusText() {
+    #expect(MenuBarState.paused(reason: .userRequested).statusText == "Sync paused")
+}

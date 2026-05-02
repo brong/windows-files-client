@@ -64,18 +64,20 @@ public enum MenuBarState: Equatable {
     }
 
     /// Derives MenuBarState from raw activity and status data.
-    /// Priority order: error > pending > syncing > paused > offline > idle
+    /// Priority order: error > pending > syncing > offline > idle
     public static func derive(
         pendingCount: Int,
         activeCount: Int,
         extensionStatuses: [ExtensionStatus],
         isOnline: Bool
     ) -> MenuBarState {
-        if !isOnline { return .offline }
-
+        // Error is checked before offline: an auth error while offline is still
+        // actionable by the user and must not be silently hidden.
         if let errorStatus = extensionStatuses.first(where: { $0.state == .error }) {
             return .error(message: errorStatus.error ?? "Sync error")
         }
+
+        if !isOnline { return .offline }
 
         if pendingCount > 0 { return .pending(count: pendingCount) }
 
