@@ -172,6 +172,7 @@ public actor ActivityTracker {
 /// Call `start()` to begin listening; the `onChange` callback fires on each update.
 public final class ActivityObserver: @unchecked Sendable {
     private let onChange: @Sendable () -> Void
+    private let lock = NSLock()
     private var isObserving = false
 
     public init(onChange: @escaping @Sendable () -> Void) {
@@ -183,8 +184,10 @@ public final class ActivityObserver: @unchecked Sendable {
     }
 
     public func start() {
-        guard !isObserving else { return }
+        lock.lock()
+        guard !isObserving else { lock.unlock(); return }
         isObserving = true
+        lock.unlock()
 
         let center = CFNotificationCenterGetDarwinNotifyCenter()
         let observer = Unmanaged.passUnretained(self).toOpaque()
@@ -204,8 +207,10 @@ public final class ActivityObserver: @unchecked Sendable {
     }
 
     public func stop() {
-        guard isObserving else { return }
+        lock.lock()
+        guard isObserving else { lock.unlock(); return }
         isObserving = false
+        lock.unlock()
 
         let center = CFNotificationCenterGetDarwinNotifyCenter()
         let observer = Unmanaged.passUnretained(self).toOpaque()

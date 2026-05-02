@@ -34,8 +34,14 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
     private let bandwidthPolicy = BandwidthPolicy()
     /// Resolved once on first use; all sync methods await this before touching the server.
     private let specialNodes: Task<SpecialNodes, Error>
-    /// Set to true when the domain is being removed — prevents server-side deletes.
-    private var isDomainBeingRemoved = false
+    /// Guards `_isDomainBeingRemoved` against concurrent reads from deleteItem tasks
+    /// and writes from invalidate() which can be called on any thread.
+    private let domainRemovalLock = NSLock()
+    private var _isDomainBeingRemoved = false
+    private var isDomainBeingRemoved: Bool {
+        get { domainRemovalLock.lock(); defer { domainRemovalLock.unlock() }; return _isDomainBeingRemoved }
+        set { domainRemovalLock.lock(); _isDomainBeingRemoved = newValue; domainRemovalLock.unlock() }
+    }
 
     // App Group identifier — must match entitlements
     #if os(macOS)
@@ -816,7 +822,7 @@ final class TrafficLog: Sendable {
         if let handle = try? FileHandle(forWritingTo: url) {
             handle.seekToEndOfFile()
             handle.write(Data(line.utf8))
-            try? handle.close()
+            handle.closeFile()
         } else {
             try? line.write(to: url, atomically: false, encoding: .utf8)
         }
