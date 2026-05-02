@@ -26,6 +26,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
     private var trashNodeId: String?
     private var activityTracker: ActivityTracker!
     private var statusWriter: ExtensionStatusWriter!
+    private let bandwidthPolicy = BandwidthPolicy()
     /// Set to true when the domain is being removed — prevents server-side deletes.
     private var isDomainBeingRemoved = false
 
@@ -162,6 +163,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
 
         statusWriter.setState(.initializing)
         Task {
+            await bandwidthPolicy.start()
             await initializeFromDatabase()
             statusWriter.setIdle()
             await startPushWatcher()
@@ -174,6 +176,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
         #endif
         isDomainBeingRemoved = true
         Task {
+            await bandwidthPolicy.stop()
             await pushWatcher.stop()
         }
     }
@@ -215,6 +218,18 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
 
                 guard let blobId = entry.blobId else {
                     throw JmapError.serverError("isFolder", "Cannot fetch contents of a folder")
+                }
+
+                // Interactive file-open always proceeds; background hydration respects bandwidth policy.
+                let isInteractive: Bool
+                if #available(macOS 13.0, iOS 16.0, *) {
+                    isInteractive = request.isFileViewerRequest
+                } else {
+                    isInteractive = false  // conservative: treat as background on older OS
+                }
+                let backgroundAllowed = await bandwidthPolicy.allowsBackgroundDownload
+                if !isInteractive && !backgroundAllowed {
+                    throw JmapError.rateLimited  // retry when connection improves
                 }
 
                 // Download to temp directory in the App Group container
@@ -317,6 +332,11 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                     let fileName = desanitizeFilename(itemTemplate.filename)
                     let fileSize = (try? FileManager.default.attributesOfItem(
                         atPath: contentURL.path)[.size] as? Int) ?? 0
+
+                    guard await bandwidthPolicy.allowsUpload(bytes: fileSize) else {
+                        throw JmapError.rateLimited  // defer until better connection
+                    }
+
                     let activityId = "ul:\(accountId!):\(fileName)"
                     await activityTracker.start(
                         id: activityId, accountId: accountId, fileName: fileName,
@@ -408,6 +428,11 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                     let fileName = desanitizeFilename(item.filename)
                     let fileSize = (try? FileManager.default.attributesOfItem(
                         atPath: contentURL.path)[.size] as? Int) ?? 0
+
+                    guard await bandwidthPolicy.allowsUpload(bytes: fileSize) else {
+                        throw JmapError.rateLimited  // defer until better connection
+                    }
+
                     let activityId = "ul:\(accountId!):\(fileName)"
                     await activityTracker.start(
                         id: activityId, accountId: accountId, fileName: fileName,
