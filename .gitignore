@@ -9,4 +9,7 @@ __pycache__/
 # Claude
 .claude/
 
+# Git worktrees
+.worktrees/
+
 # Platform-specific ignores are in each subdirectory
