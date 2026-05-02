@@ -89,16 +89,13 @@ struct DiagnosticsView: View {
         }
         lines.append("")
 
-        lines.append("=== Recent Activity (last 20) ===")
-        for activity in appState.recentActivities.prefix(20) {
-            lines.append("[\(activity.status.rawValue)] \(activity.action.rawValue) — \(activity.accountId)")
-        }
-
-        if !appState.pendingActivities.isEmpty {
-            lines.append("")
-            lines.append("=== Pending Uploads (\(appState.pendingActivities.count)) ===")
-            for activity in appState.pendingActivities.prefix(20) {
-                lines.append("  \(activity.action.rawValue) — \(activity.accountId)")
+        lines.append("=== Active Operations ===")
+        let hints = appState.activeOperationHints
+        if hints.isEmpty {
+            lines.append("  (none)")
+        } else {
+            for hint in hints.prefix(20) {
+                lines.append("  \(hint.actionVerb) — \(hint.fileName)")
             }
         }
 
