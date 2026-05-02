@@ -826,20 +826,21 @@ struct ActivityView: View {
     @ObservedObject var appState: AppState
 
     var body: some View {
+        let hints = appState.activeOperationHints
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("Activity")
                     .font(.headline)
                 Spacer()
-                if !appState.activeActivities.isEmpty {
-                    Text("\(appState.activeActivities.count) in flight")
+                if !hints.isEmpty {
+                    Text("\(hints.count) in flight")
                         .font(.caption)
                         .foregroundColor(.blue)
                 }
             }
 
-            if appState.activeActivities.isEmpty && appState.recentActivities.isEmpty {
-                Text("No recent activity")
+            if hints.isEmpty {
+                Text("No active operations")
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .frame(maxWidth: .infinity, alignment: .center)
@@ -847,29 +848,13 @@ struct ActivityView: View {
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 4) {
-                        if !appState.activeActivities.isEmpty {
-                            Text("In Flight")
-                                .font(.caption2)
-                                .foregroundColor(.secondary)
-                                .textCase(.uppercase)
-                            ForEach(appState.activeActivities.prefix(10)) { activity in
-                                activityRow(activity)
-                            }
-                            if appState.activeActivities.count > 10 {
-                                Text("+ \(appState.activeActivities.count - 10) more...")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
+                        ForEach(hints.prefix(10)) { hint in
+                            hintRow(hint)
                         }
-                        if !appState.recentActivities.isEmpty {
-                            Text("Recent")
-                                .font(.caption2)
+                        if hints.count > 10 {
+                            Text("+ \(hints.count - 10) more…")
+                                .font(.caption)
                                 .foregroundColor(.secondary)
-                                .textCase(.uppercase)
-                                .padding(.top, appState.activeActivities.isEmpty ? 0 : 4)
-                            ForEach(appState.recentActivities.prefix(5)) { activity in
-                                activityRow(activity)
-                            }
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -879,72 +864,32 @@ struct ActivityView: View {
         }
     }
 
-    private func activityRow(_ activity: ActivityTracker.Activity) -> some View {
+    private func hintRow(_ hint: ExtensionStatus.OperationHint) -> some View {
         HStack(spacing: 8) {
-            Image(systemName: actionIcon(activity.action))
-                .foregroundColor(statusColor(activity.status))
+            Image(systemName: iconForVerb(hint.actionVerb))
+                .foregroundColor(.blue)
                 .frame(width: 16)
-
             VStack(alignment: .leading, spacing: 2) {
-                HStack {
-                    Text(activity.fileName)
-                        .font(.caption)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Spacer()
-                    if let size = activity.fileSize, size > 0 {
-                        Text(formatSize(size))
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                    }
-                    Text(activity.action.rawValue)
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                        .frame(width: 60, alignment: .trailing)
-                }
-
-                if let progress = activity.progress, activity.status == .active {
-                    ProgressView(value: progress)
-                        .progressViewStyle(.linear)
-                } else if activity.status == .completed {
-                    Text("Done")
-                        .font(.caption2)
-                        .foregroundColor(.green)
-                } else if let error = activity.error {
-                    Text(error)
-                        .font(.caption2)
-                        .foregroundColor(.red)
-                        .lineLimit(1)
-                }
+                Text(hint.fileName)
+                    .font(.caption)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(hint.actionVerb)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
             }
         }
-        .id(activity.id) // Stable identity prevents jumping
+        .id(hint.id)
     }
 
-    private func actionIcon(_ action: ActivityTracker.Activity.Action) -> String {
-        switch action {
-        case .download: return "arrow.down.circle"
-        case .upload: return "arrow.up.circle"
-        case .sync: return "arrow.triangle.2.circlepath"
-        case .delete: return "trash"
+    private func iconForVerb(_ verb: String) -> String {
+        switch verb {
+        case "Uploading":   return "arrow.up.circle"
+        case "Downloading": return "arrow.down.circle"
+        case "Deleting":    return "trash"
+        default:            return "arrow.triangle.2.circlepath"
         }
     }
-
-    private func statusColor(_ status: ActivityTracker.Activity.Status) -> Color {
-        switch status {
-        case .active: return .blue
-        case .pending: return .gray
-        case .completed: return .green
-        case .error: return .red
-        }
-    }
-
-    private func formatSize(_ bytes: Int) -> String {
-        if bytes < 1024 { return "\(bytes) B" }
-        if bytes < 1024 * 1024 { return "\(bytes / 1024) KB" }
-        return String(format: "%.1f MB", Double(bytes) / (1024 * 1024))
-    }
-
 }
 
 // Shared content view for iOS
