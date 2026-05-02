@@ -13,6 +13,7 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
     private let containerIdentifier: NSFileProviderItemIdentifier
     private let database: NodeDatabase
     private let client: JmapClient
+    private let syncEngine: SyncEngine
     private let accountId: String
     private let accountName: String
     private let homeNodeId: String
@@ -28,6 +29,7 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
         container: NSFileProviderItemIdentifier,
         database: NodeDatabase,
         client: JmapClient,
+        syncEngine: SyncEngine,
         accountId: String,
         accountName: String = "",
         homeNodeId: String,
@@ -38,6 +40,7 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
         self.containerIdentifier = container
         self.database = database
         self.client = client
+        self.syncEngine = syncEngine
         self.accountId = accountId
         self.accountName = accountName
         self.homeNodeId = homeNodeId
@@ -222,55 +225,28 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
             fileName: label, action: .sync)
 
         do {
-            let (changes, createdNodes, updatedNodes) = try await client.getChanges(
-                accountId: accountId,
-                sinceState: stateToken
-            )
+            // SyncEngine.fetchChanges handles the JMAP protocol + database update.
+            // The enumerator is responsible for the FileProvider observer callbacks only.
+            let (updatedNodes, deletedIds) = try await syncEngine.fetchChanges()
 
-            // Process updates — report to system and update database
-            var updatedItems: [FileProviderItem] = []
-
-            for node in createdNodes {
-                await database.upsertFromServer(node)
-                if !node.isHome && !node.isRoot {
-                    updatedItems.append(
-                        FileProviderItem(node: node, homeNodeId: homeNodeId, trashNodeId: trashNodeId))
-                }
+            let updatedItems = updatedNodes.filter { !$0.isHome && !$0.isRoot }.map {
+                FileProviderItem(node: $0, homeNodeId: homeNodeId, trashNodeId: trashNodeId)
             }
+            if !updatedItems.isEmpty { observer.didUpdate(updatedItems) }
 
-            for node in updatedNodes {
-                await database.upsertFromServer(node)
-                if !node.isHome && !node.isRoot {
-                    updatedItems.append(
-                        FileProviderItem(node: node, homeNodeId: homeNodeId, trashNodeId: trashNodeId))
-                }
-            }
+            let deletedIdentifiers = deletedIds.map { NSFileProviderItemIdentifier($0) }
+            if !deletedIdentifiers.isEmpty { observer.didDeleteItems(withIdentifiers: deletedIdentifiers) }
 
-            if !updatedItems.isEmpty {
-                observer.didUpdate(updatedItems)
-            }
-
-            // Process deletes
-            let destroyedIds = changes.destroyed.map { NSFileProviderItemIdentifier($0) }
-            if !destroyedIds.isEmpty {
-                observer.didDeleteItems(withIdentifiers: destroyedIds)
-                await database.remove(nodeIds: changes.destroyed)
-            }
-
-            // Save new state
-            await database.setStateToken(changes.newState)
-            try await database.save()
-
-            // Finish with new anchor
-            let newAnchor = NSFileProviderSyncAnchor(changes.newState.data(using: .utf8)!)
-            let totalChanges = createdNodes.count + updatedNodes.count + changes.destroyed.count
+            let newToken = await database.stateToken ?? stateToken
+            let newAnchor = NSFileProviderSyncAnchor(newToken.data(using: .utf8)!)
+            let totalChanges = updatedNodes.count + deletedIds.count
             if totalChanges > 0 {
                 await activityTracker?.complete(id: activityId)
             } else {
                 await activityTracker?.remove(id: activityId)
             }
             statusWriter?.setIdle()
-            observer.finishEnumeratingChanges(upTo: newAnchor, moreComing: changes.hasMoreChanges ?? false)
+            observer.finishEnumeratingChanges(upTo: newAnchor, moreComing: false)
 
         } catch JmapError.cannotCalculateChanges {
             await activityTracker?.remove(id: activityId)

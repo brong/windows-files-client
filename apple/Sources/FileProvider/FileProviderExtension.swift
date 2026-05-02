@@ -20,6 +20,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
     private var client: JmapClient!
     private var sessionManager: SessionManager!
     private var pushWatcher: PushWatcher!
+    private var syncEngine: SyncEngine!
     private var accountId: String!
     private var accountName: String = ""
     private var homeNodeId: String!
@@ -157,6 +158,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
         self.database = NodeDatabase(containerURL: containerURL, accountId: accountId)
         self.activityTracker = ActivityTracker(containerURL: containerURL)
         self.statusWriter = ExtensionStatusWriter(containerURL: containerURL, accountId: accountId)
+        self.syncEngine = SyncEngine(client: client, database: database, accountId: accountId)
 
         // Set up push watcher
         self.pushWatcher = PushWatcher(sessionManager: sessionManager, tokenProvider: tokenProvider, accountId: accountId)
@@ -599,6 +601,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
             container: containerItemIdentifier,
             database: database,
             client: client,
+            syncEngine: syncEngine,
             accountId: accountId,
             accountName: accountName,
             homeNodeId: homeNodeId ?? "",
@@ -685,42 +688,35 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
         homeNodeId = await database.homeNodeId
         trashNodeId = await database.trashNodeId
 
-        // If no cached home node, we need a full fetch on first enumeration
-        if homeNodeId == nil {
-            statusWriter.setSyncing()
-            let sessionActivityId = "init:\(accountId!):session"
-            await activityTracker.start(
-                id: sessionActivityId, accountId: accountId,
-                fileName: "Reading session data", action: .sync)
-            do {
-                let home = try await client.findHomeNode(accountId: accountId)
-                homeNodeId = home.id
-                await database.setHomeNodeId(home.id)
+        guard homeNodeId == nil else { return }
 
-                let trash = try await client.findTrashNode(accountId: accountId)
-                trashNodeId = trash?.id
-                await database.setTrashNodeId(trash?.id)
-
-                try await database.save()
-                await activityTracker.complete(id: sessionActivityId)
-            } catch let error as JmapError {
-                await activityTracker.fail(id: sessionActivityId, error: error.localizedDescription)
-                switch error {
-                case .unauthorized, .forbidden:
-                    statusWriter.setError("Authentication failed")
-                default:
-                    statusWriter.setError(error.localizedDescription ?? "Unknown error")
-                }
-                #if canImport(os)
-                logger.error("Failed to discover home/trash nodes: \(error.localizedDescription)")
-                #endif
-            } catch {
-                await activityTracker.fail(id: sessionActivityId, error: error.localizedDescription)
-                statusWriter.setState(.offline)
-                #if canImport(os)
-                logger.error("Failed to discover home/trash nodes: \(error.localizedDescription)")
-                #endif
+        statusWriter.setSyncing()
+        let activityId = "init:\(accountId!):session"
+        await activityTracker.start(
+            id: activityId, accountId: accountId,
+            fileName: "Reading session data", action: .sync)
+        do {
+            let (homeId, trashId) = try await syncEngine.resolveSpecialNodes()
+            homeNodeId = homeId
+            trashNodeId = trashId
+            await activityTracker.complete(id: activityId)
+        } catch let error as JmapError {
+            await activityTracker.fail(id: activityId, error: error.localizedDescription)
+            switch error {
+            case .unauthorized, .forbidden:
+                statusWriter.setError("Authentication failed")
+            default:
+                statusWriter.setError(error.localizedDescription ?? "Unknown error")
             }
+            #if canImport(os)
+            logger.error("Failed to discover home/trash nodes: \(error.localizedDescription)")
+            #endif
+        } catch {
+            await activityTracker.fail(id: activityId, error: error.localizedDescription)
+            statusWriter.setState(.offline)
+            #if canImport(os)
+            logger.error("Failed to discover home/trash nodes: \(error.localizedDescription)")
+            #endif
         }
     }
 
