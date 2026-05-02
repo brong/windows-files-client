@@ -1206,6 +1206,20 @@ public actor JmapClient {
         guard let httpResponse = response as? HTTPURLResponse else {
             throw JmapError.invalidResponse
         }
+
+        if httpResponse.statusCode == 401 {
+            try? FileManager.default.removeItem(at: tempURL)
+            await tokenInvalidator?()
+            await sessionManager.invalidate()
+            let newToken = try await getToken()
+            request.setValue("Bearer \(newToken)", forHTTPHeaderField: "Authorization")
+            let (retryURL, retryResponse) = try await urlSession.download(for: request)
+            guard let retryHTTP = retryResponse as? HTTPURLResponse else {
+                throw JmapError.invalidResponse
+            }
+            return (retryURL, retryHTTP)
+        }
+
         return (tempURL, httpResponse)
     }
 
