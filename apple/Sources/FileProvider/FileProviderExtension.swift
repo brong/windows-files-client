@@ -695,6 +695,12 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
         homeNodeId = await database.homeNodeId
         trashNodeId = await database.trashNodeId
 
+        // Always signal: enumerator() throws .serverUnreachable while homeNodeId is nil,
+        // so whether we got it from cache or the network, the system needs to retry.
+        defer {
+            NSFileProviderManager(for: domain)?.signalEnumerator(for: .workingSet) { _ in }
+        }
+
         guard homeNodeId == nil else { return }
 
         statusWriter.setSyncing()
@@ -707,8 +713,6 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
             homeNodeId = homeId
             trashNodeId = trashId
             await activityTracker.complete(id: activityId)
-            // Signal the system to retry enumeration now that homeNodeId is known.
-            NSFileProviderManager(for: domain)?.signalEnumerator(for: .workingSet) { _ in }
         } catch let error as JmapError {
             await activityTracker.fail(id: activityId, error: error.localizedDescription)
             switch error {
