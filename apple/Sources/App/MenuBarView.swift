@@ -70,6 +70,9 @@ struct MenuBarView: View {
         Button("Settings...") {
             openSettings()
         }
+        Button("Diagnostics...") {
+            openDiagnostics()
+        }
         Divider()
         Button("Quit") {
             NSApplication.shared.terminate(nil)
@@ -122,6 +125,11 @@ struct MenuBarView: View {
     private func openSettings() {
         NSApp.activate(ignoringOtherApps: true)
         openWindow(id: "settings")
+    }
+
+    private func openDiagnostics() {
+        NSApp.activate(ignoringOtherApps: true)
+        openWindow(id: "diagnostics")
     }
 
     private func openInFinder(accountId: String) {

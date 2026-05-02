@@ -24,6 +24,11 @@ struct FastmailFilesApp: App {
                     openWindow(id: "settings")
                 }
         }
+
+        Window("Diagnostics", id: "diagnostics") {
+            DiagnosticsView(appState: appState)
+        }
+        .defaultSize(width: 420, height: 280)
         #else
         WindowGroup {
             ContentView(appState: appState)
