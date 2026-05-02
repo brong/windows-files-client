@@ -455,7 +455,7 @@ struct AddAccountView: View {
             VStack(alignment: .leading, spacing: 8) {
                 TextField("Email address", text: $email)
                     .textFieldStyle(.roundedBorder)
-                    .textContentType(.emailAddress)
+                    .modifier(EmailContentTypeModifier())
                     #if os(macOS)
                     .onSubmit { Task { await oauthLogin() } }
                     #endif
@@ -948,6 +948,17 @@ struct ActivityView: View {
 }
 
 // Shared content view for iOS
+// textContentType(.emailAddress) requires macOS 14+; no-op on 13.
+private struct EmailContentTypeModifier: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 14.0, *) {
+            content.textContentType(.emailAddress)
+        } else {
+            content
+        }
+    }
+}
+
 struct ContentView: View {
     @ObservedObject var appState: AppState
 
