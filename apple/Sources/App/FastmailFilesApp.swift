@@ -185,10 +185,11 @@ class AppState: ObservableObject {
             if !acct.isSynced { return .notSynced }
 
             if let extStatus = extensionStatuses[accountId] {
+                let hasActive = extStatus.activeOperationCount > 0
                 switch extStatus.state {
-                case .initializing: return .syncing
+                case .initializing: return hasActive ? .syncing : .idle
                 case .syncing:      return .syncing
-                case .idle:         return extStatus.activeOperationCount > 0 ? .syncing : .idle
+                case .idle:         return hasActive ? .syncing : .idle
                 case .error:        return .error
                 case .offline:      return .offline
                 }

@@ -83,7 +83,7 @@ public enum MenuBarState: Equatable {
 
         if activeCount > 0 { return .syncing(count: activeCount) }
 
-        if extensionStatuses.contains(where: { $0.state == .syncing || $0.state == .initializing }) {
+        if extensionStatuses.contains(where: { $0.state == .syncing }) {
             return .syncing(count: 1)
         }
 
