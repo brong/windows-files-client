@@ -155,6 +155,8 @@ class AppState: ObservableObject {
     @Published var showingAddAccount = false
     /// Extension-reported statuses, keyed by accountId. Single source of truth.
     @Published var extensionStatuses: [String: ExtensionStatus] = [:]
+    /// Quota info per accountId, fetched on demand.
+    @Published var quotaInfo: [String: QuotaInfo] = [:]
     /// Active activities from the activity tracker — single source of truth for "currently syncing".
     @Published var activeActivities: [ActivityTracker.Activity] = []
     /// Pending activities (queued but not yet started) — "local changes not yet uploaded".
@@ -528,6 +530,42 @@ class AppState: ObservableObject {
         let domain = NSFileProviderDomain(
             identifier: NSFileProviderDomainIdentifier(rawValue: accountId), displayName: "")
         NSFileProviderManager(for: domain)?.signalEnumerator(for: .workingSet) { _ in }
+    }
+
+    func refreshQuota(for accountId: String) {
+        guard let login = logins.first(where: { $0.accounts.contains { $0.accountId == accountId } }),
+              let url = URL(string: login.sessionURL) else { return }
+
+        let tokenProvider = makeTokenProvider(for: login)
+        guard let tokenProvider else { return }
+
+        Task {
+            let sessionManager = SessionManager(sessionURL: url, tokenProvider: tokenProvider)
+            let client = JmapClient(sessionManager: sessionManager)
+            if let info = try? await client.fetchQuota(accountId: accountId) {
+                await MainActor.run { self.quotaInfo[accountId] = info }
+            }
+        }
+    }
+
+    private func makeTokenProvider(for login: LoginInfo) -> TokenProvider? {
+        let kcService = Self.loginKeychainService
+        let appGroup = Self.appGroupId
+        let lid = login.loginId
+        if login.authType == .oauth, let credential = loadLoginCredential(loginId: lid) {
+            return OAuthTokenProvider(credential: credential, onTokenRefreshed: { updated in
+                let encoder = JSONEncoder()
+                encoder.dateEncodingStrategy = .iso8601
+                if let data = try? encoder.encode(updated),
+                   let str = String(data: data, encoding: .utf8) {
+                    try? KeychainTokenProvider.storeToken(
+                        str, service: kcService, account: lid, accessGroup: appGroup)
+                }
+            })
+        } else if let token = loadLoginToken(loginId: lid) {
+            return StaticTokenProvider(token: token)
+        }
+        return nil
     }
 
     func removeAll() async {

@@ -230,11 +230,14 @@ struct SettingsView: View {
             Image(systemName: account.isSynced ? "checkmark.circle.fill" : "circle")
                 .foregroundColor(account.isSynced ? statusColor(status) : .gray)
 
-            VStack(alignment: .leading) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(account.displayName.isEmpty ? account.accountId : account.displayName)
                 Text(account.isSynced ? statusText(status) : "Not synced")
                     .font(.caption)
                     .foregroundColor(.secondary)
+                if let quota = appState.quotaInfo[account.accountId] {
+                    quotaBar(quota)
+                }
             }
 
             Spacer()
@@ -269,6 +272,9 @@ struct SettingsView: View {
                 .foregroundColor(.blue)
             }
         }
+        .onAppear {
+            if account.isSynced { appState.refreshQuota(for: account.accountId) }
+        }
     }
 
     // MARK: - Helpers
@@ -289,6 +295,26 @@ struct SettingsView: View {
         }
     }
     #endif
+
+    @ViewBuilder
+    private func quotaBar(_ quota: QuotaInfo) -> some View {
+        let usedStr = ByteCountFormatter.string(fromByteCount: quota.used, countStyle: .file)
+        if let limit = quota.limit, let fraction = quota.usedFraction {
+            let limitStr = ByteCountFormatter.string(fromByteCount: limit, countStyle: .file)
+            VStack(alignment: .leading, spacing: 1) {
+                ProgressView(value: min(fraction, 1.0))
+                    .progressViewStyle(.linear)
+                    .tint(fraction > 0.9 ? .red : fraction > 0.75 ? .orange : .accentColor)
+                Text("\(usedStr) of \(limitStr)")
+                    .font(.caption2)
+                    .foregroundColor(fraction > 0.9 ? .red : .secondary)
+            }
+        } else {
+            Text("\(usedStr) used")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        }
+    }
 
     private func statusColor(_ status: SyncStatus) -> Color {
         switch status {
