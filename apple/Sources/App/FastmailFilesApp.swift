@@ -567,7 +567,7 @@ class AppState: ObservableObject {
 
         Task {
             let sessionManager = SessionManager(sessionURL: url, tokenProvider: tokenProvider)
-            let client = JmapClient(sessionManager: sessionManager)
+            let client = JmapClient(sessionManager: sessionManager, tokenProvider: tokenProvider)
             if let info = try? await client.fetchQuota(accountId: accountId) {
                 await MainActor.run { self.quotaInfo[accountId] = info }
             }
