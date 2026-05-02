@@ -773,20 +773,14 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                 homeNodeId: nodes.homeId, trashNodeId: nodes.trashId)
         }
 
-        // The home/trash node itself is never inserted into the nodes table
-        // (it's only stored in sync_state). Synthesize a folder entry so that
-        // item(for: .rootContainer) never returns .noSuchItem.
-        if nodeId == nodes.homeId || nodeId == nodes.trashId {
-            let name = nodeId == nodes.homeId ? accountName : "Trash"
-            let synthetic = NodeCacheEntry(
-                parentId: nil, name: name.isEmpty ? "Files" : name,
-                isFolder: true)
-            return FileProviderItem(
-                nodeId: nodeId, entry: synthetic,
-                homeNodeId: nodes.homeId, trashNodeId: nodes.trashId)
+        // Node not in cache — fetch from server and cache it for future calls.
+        let fetched = try await client.getNodes(accountId: accountId, ids: [nodeId])
+        guard let node = fetched.first else {
+            throw JmapError.notFound(nodeId)
         }
-
-        throw JmapError.notFound(nodeId)
+        await database.upsertFromServer(node)
+        return FileProviderItem(
+            node: node, homeNodeId: nodes.homeId, trashNodeId: nodes.trashId)
     }
 
     /// Reverse filename sanitization (restore original characters for server).
