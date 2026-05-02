@@ -20,12 +20,14 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
     private var client: JmapClient!
     private var sessionManager: SessionManager!
     private var pushWatcher: PushWatcher!
+    private var syncEngine: SyncEngine!
     private var accountId: String!
     private var accountName: String = ""
     private var homeNodeId: String!
     private var trashNodeId: String?
     private var activityTracker: ActivityTracker!
     private var statusWriter: ExtensionStatusWriter!
+    private let bandwidthPolicy = BandwidthPolicy()
     /// Set to true when the domain is being removed — prevents server-side deletes.
     private var isDomainBeingRemoved = false
 
@@ -156,12 +158,14 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
         self.database = NodeDatabase(containerURL: containerURL, accountId: accountId)
         self.activityTracker = ActivityTracker(containerURL: containerURL)
         self.statusWriter = ExtensionStatusWriter(containerURL: containerURL, accountId: accountId)
+        self.syncEngine = SyncEngine(client: client, database: database, accountId: accountId)
 
         // Set up push watcher
         self.pushWatcher = PushWatcher(sessionManager: sessionManager, tokenProvider: tokenProvider, accountId: accountId)
 
         statusWriter.setState(.initializing)
         Task {
+            await bandwidthPolicy.start()
             await initializeFromDatabase()
             statusWriter.setIdle()
             await startPushWatcher()
@@ -174,6 +178,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
         #endif
         isDomainBeingRemoved = true
         Task {
+            await bandwidthPolicy.stop()
             await pushWatcher.stop()
         }
     }
@@ -215,6 +220,18 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
 
                 guard let blobId = entry.blobId else {
                     throw JmapError.serverError("isFolder", "Cannot fetch contents of a folder")
+                }
+
+                // Interactive file-open always proceeds; background hydration respects bandwidth policy.
+                let isInteractive: Bool
+                if #available(macOS 13.0, iOS 16.0, *) {
+                    isInteractive = request.isFileViewerRequest
+                } else {
+                    isInteractive = false  // conservative: treat as background on older OS
+                }
+                let backgroundAllowed = await bandwidthPolicy.allowsBackgroundDownload
+                if !isInteractive && !backgroundAllowed {
+                    throw JmapError.rateLimited  // retry when connection improves
                 }
 
                 // Download to temp directory in the App Group container
@@ -317,6 +334,11 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                     let fileName = desanitizeFilename(itemTemplate.filename)
                     let fileSize = (try? FileManager.default.attributesOfItem(
                         atPath: contentURL.path)[.size] as? Int) ?? 0
+
+                    guard await bandwidthPolicy.allowsUpload(bytes: fileSize) else {
+                        throw JmapError.rateLimited  // defer until better connection
+                    }
+
                     let activityId = "ul:\(accountId!):\(fileName)"
                     await activityTracker.start(
                         id: activityId, accountId: accountId, fileName: fileName,
@@ -408,6 +430,11 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                     let fileName = desanitizeFilename(item.filename)
                     let fileSize = (try? FileManager.default.attributesOfItem(
                         atPath: contentURL.path)[.size] as? Int) ?? 0
+
+                    guard await bandwidthPolicy.allowsUpload(bytes: fileSize) else {
+                        throw JmapError.rateLimited  // defer until better connection
+                    }
+
                     let activityId = "ul:\(accountId!):\(fileName)"
                     await activityTracker.start(
                         id: activityId, accountId: accountId, fileName: fileName,
@@ -574,6 +601,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
             container: containerItemIdentifier,
             database: database,
             client: client,
+            syncEngine: syncEngine,
             accountId: accountId,
             accountName: accountName,
             homeNodeId: homeNodeId ?? "",
@@ -660,42 +688,35 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
         homeNodeId = await database.homeNodeId
         trashNodeId = await database.trashNodeId
 
-        // If no cached home node, we need a full fetch on first enumeration
-        if homeNodeId == nil {
-            statusWriter.setSyncing()
-            let sessionActivityId = "init:\(accountId!):session"
-            await activityTracker.start(
-                id: sessionActivityId, accountId: accountId,
-                fileName: "Reading session data", action: .sync)
-            do {
-                let home = try await client.findHomeNode(accountId: accountId)
-                homeNodeId = home.id
-                await database.setHomeNodeId(home.id)
+        guard homeNodeId == nil else { return }
 
-                let trash = try await client.findTrashNode(accountId: accountId)
-                trashNodeId = trash?.id
-                await database.setTrashNodeId(trash?.id)
-
-                try await database.save()
-                await activityTracker.complete(id: sessionActivityId)
-            } catch let error as JmapError {
-                await activityTracker.fail(id: sessionActivityId, error: error.localizedDescription)
-                switch error {
-                case .unauthorized, .forbidden:
-                    statusWriter.setError("Authentication failed")
-                default:
-                    statusWriter.setError(error.localizedDescription ?? "Unknown error")
-                }
-                #if canImport(os)
-                logger.error("Failed to discover home/trash nodes: \(error.localizedDescription)")
-                #endif
-            } catch {
-                await activityTracker.fail(id: sessionActivityId, error: error.localizedDescription)
-                statusWriter.setState(.offline)
-                #if canImport(os)
-                logger.error("Failed to discover home/trash nodes: \(error.localizedDescription)")
-                #endif
+        statusWriter.setSyncing()
+        let activityId = "init:\(accountId!):session"
+        await activityTracker.start(
+            id: activityId, accountId: accountId,
+            fileName: "Reading session data", action: .sync)
+        do {
+            let (homeId, trashId) = try await syncEngine.resolveSpecialNodes()
+            homeNodeId = homeId
+            trashNodeId = trashId
+            await activityTracker.complete(id: activityId)
+        } catch let error as JmapError {
+            await activityTracker.fail(id: activityId, error: error.localizedDescription)
+            switch error {
+            case .unauthorized, .forbidden:
+                statusWriter.setError("Authentication failed")
+            default:
+                statusWriter.setError(error.localizedDescription ?? "Unknown error")
             }
+            #if canImport(os)
+            logger.error("Failed to discover home/trash nodes: \(error.localizedDescription)")
+            #endif
+        } catch {
+            await activityTracker.fail(id: activityId, error: error.localizedDescription)
+            statusWriter.setState(.offline)
+            #if canImport(os)
+            logger.error("Failed to discover home/trash nodes: \(error.localizedDescription)")
+            #endif
         }
     }
 
@@ -746,22 +767,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
     /// Map errors to NSFileProviderError.
     private func mapError(_ error: Error) -> Error {
         if let jmapError = error as? JmapError {
-            switch jmapError {
-            case .unauthorized, .forbidden:
-                return NSFileProviderError(.notAuthenticated)
-            case .cannotCalculateChanges:
-                return NSFileProviderError(.syncAnchorExpired)
-            case .notFound:
-                return NSFileProviderError(.noSuchItem)
-            case .httpError(let code, _) where code >= 500:
-                return NSFileProviderError(.serverUnreachable)
-            case .rateLimited:
-                return NSFileProviderError(.serverUnreachable)
-            case .payloadTooLarge:
-                return NSFileProviderError(.insufficientQuota)
-            default:
-                return NSFileProviderError(.cannotSynchronize)
-            }
+            return jmapError.fileProviderError
         }
         if (error as NSError).domain == NSURLErrorDomain {
             return NSFileProviderError(.serverUnreachable)

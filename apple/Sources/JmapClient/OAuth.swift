@@ -109,53 +109,11 @@ public enum OAuthConstants {
 
 // MARK: - OAuth Discovery
 
-/// Discover JMAP session URL and OAuth metadata from Fastmail.
+/// Discover JMAP session URL and OAuth metadata.
+/// Delegates to PaccDiscovery.discover(email:) using a fixed Fastmail domain.
+/// Callers that accept arbitrary email addresses should call PaccDiscovery.discover directly.
 public func oauthDiscover() async throws -> (sessionUrl: String, metadata: OAuthServerMetadata) {
-    guard let configURL = URL(string: OAuthConstants.discoveryURL) else {
-        throw JmapError.invalidResponse
-    }
-
-    let (configData, _) = try await URLSession.shared.data(from: configURL)
-    let config = try JSONDecoder().decode(UserAgentConfiguration.self, from: configData)
-
-    guard let sessionUrl = config.protocols?.jmap?.url else {
-        throw JmapError.serverError("discovery", "No JMAP session URL in user-agent configuration")
-    }
-    guard var issuer = config.authentication?.oauthPublic?.issuer else {
-        throw JmapError.serverError("discovery", "No OAuth issuer in user-agent configuration")
-    }
-
-    // Ensure issuer has a scheme
-    if !issuer.contains("://") {
-        issuer = "https://\(issuer)"
-    }
-
-    // Fetch OAuth authorization server metadata
-    guard let issuerURL = URL(string: issuer) else {
-        throw JmapError.invalidResponse
-    }
-    let metadataPath = issuerURL.path == "/" || issuerURL.path.isEmpty
-        ? "/.well-known/oauth-authorization-server"
-        : "/.well-known/oauth-authorization-server\(issuerURL.path)"
-
-    guard var metadataComponents = URLComponents(url: issuerURL, resolvingAgainstBaseURL: false) else {
-        throw JmapError.invalidResponse
-    }
-    metadataComponents.path = metadataPath
-    guard let metadataURL = metadataComponents.url else {
-        throw JmapError.invalidResponse
-    }
-
-    let (metaData, _) = try await URLSession.shared.data(from: metadataURL)
-    let metadata = try JSONDecoder().decode(OAuthServerMetadata.self, from: metaData)
-
-    // Validate issuer matches
-    guard metadata.issuer == issuer else {
-        throw JmapError.serverError("discovery",
-            "Issuer mismatch: expected \(issuer), got \(metadata.issuer)")
-    }
-
-    return (sessionUrl, metadata)
+    return try await PaccDiscovery.discover(email: "discover@fastmail.com")
 }
 
 // MARK: - PKCE

@@ -1,97 +1,148 @@
 import Foundation
+import GRDB
 
-/// Persistent node cache stored as JSON in the App Group shared container.
-/// Equivalent to Windows nodecache.json — stores node metadata and JMAP state token
-/// so the extension can resume incrementally after being terminated.
+/// Persistent node cache backed by SQLite (GRDB DatabasePool).
 ///
-/// Thread-safe via actor isolation.
+/// DatabasePool enables WAL mode by default, which allows safe concurrent
+/// access from both the containing app and the FileProvider extension.
+/// This replaces the previous JSON approach that was vulnerable to corruption
+/// when the extension was killed mid-write.
+///
+/// Thread-safe via actor isolation + GRDB's WAL mode.
 public actor NodeDatabase {
-    private let fileURL: URL
-    private var cache: NodeCache
-    private let encoder: JSONEncoder
-    private let decoder: JSONDecoder
-
-    /// Current cache version. Increment to force a full re-fetch on next launch.
-    private static let currentVersion = 1
+    private let pool: DatabasePool
 
     public init(containerURL: URL, accountId: String) {
+        self.pool = Self.openPool(containerURL: containerURL, accountId: accountId)
+    }
+
+    // MARK: - Schema
+
+    private static func registerMigrations(in migrator: inout DatabaseMigrator) {
+        migrator.registerMigration("v1_initial") { db in
+            try db.create(table: "nodes", ifNotExists: true) { t in
+                t.column("id", .text).primaryKey()
+                t.column("parentId", .text)
+                t.column("name", .text).notNull()
+                t.column("blobId", .text)
+                t.column("size", .integer).notNull().defaults(to: 0)
+                t.column("modified", .double)  // seconds since epoch; nil = unknown
+                t.column("isFolder", .boolean).notNull().defaults(to: false)
+                t.column("type", .text)
+                t.column("mayRead", .boolean).notNull().defaults(to: true)
+                t.column("mayWrite", .boolean).notNull().defaults(to: true)
+            }
+            try db.create(
+                index: "idx_nodes_parentId", on: "nodes",
+                columns: ["parentId"], ifNotExists: true
+            )
+            try db.create(table: "sync_state", ifNotExists: true) { t in
+                t.column("key", .text).primaryKey()
+                t.column("value", .text)
+            }
+        }
+    }
+
+    private static func openPool(containerURL: URL, accountId: String) -> DatabasePool {
+        do {
+            return try makePool(at: containerURL, accountId: accountId)
+        } catch {
+            // Fallback: corrupted or inaccessible DB — start fresh in a temp location.
+            // This should only happen in unusual circumstances (disk full, permissions).
+            let tmp = FileManager.default.temporaryDirectory
+                .appendingPathComponent("FastmailFilesFallback-\(accountId)-\(UUID().uuidString)")
+            return (try? makePool(at: tmp, accountId: accountId)) ?? {
+                fatalError("NodeDatabase: cannot open even a fallback SQLite — \(error)")
+            }()
+        }
+    }
+
+    private static func makePool(at containerURL: URL, accountId: String) throws -> DatabasePool {
         let dir = containerURL
             .appendingPathComponent("NodeCache", isDirectory: true)
             .appendingPathComponent(accountId, isDirectory: true)
-        self.fileURL = dir.appendingPathComponent("nodecache.json")
-
-        self.encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
-
-        self.decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-
-        // Try loading existing cache
-        if let data = try? Data(contentsOf: fileURL),
-           let loaded = try? decoder.decode(NodeCache.self, from: data),
-           loaded.version == Self.currentVersion
-        {
-            self.cache = loaded
-        } else {
-            self.cache = NodeCache(version: Self.currentVersion)
-        }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let dbURL = dir.appendingPathComponent("nodecache.sqlite")
+        // Allow up to 5 seconds of retries when the app and extension contend for
+        // the WAL write lock. Without this, concurrent writes silently fail.
+        var config = Configuration()
+        config.busyMode = .timeout(5)
+        let pool = try DatabasePool(path: dbURL.path, configuration: config)
+        var migrator = DatabaseMigrator()
+        registerMigrations(in: &migrator)
+        try migrator.migrate(pool)
+        return pool
     }
 
     // MARK: - State Token
 
     public var stateToken: String? {
-        cache.stateToken
+        syncStateValue(for: "stateToken")
     }
 
     public func setStateToken(_ token: String) {
-        cache.stateToken = token
+        setSyncStateValue(token, for: "stateToken")
     }
 
     // MARK: - Special Node IDs
 
     public var homeNodeId: String? {
-        cache.homeNodeId
+        syncStateValue(for: "homeNodeId")
     }
 
     public var trashNodeId: String? {
-        cache.trashNodeId
+        syncStateValue(for: "trashNodeId")
     }
 
     public func setHomeNodeId(_ id: String) {
-        cache.homeNodeId = id
+        setSyncStateValue(id, for: "homeNodeId")
     }
 
     public func setTrashNodeId(_ id: String?) {
-        cache.trashNodeId = id
+        if let id {
+            setSyncStateValue(id, for: "trashNodeId")
+        } else {
+            try? pool.write { db in
+                try db.execute(sql: "DELETE FROM sync_state WHERE key = 'trashNodeId'")
+            }
+        }
     }
 
     // MARK: - Node Entries
 
-    /// Get a cached node entry by ID.
     public func entry(for nodeId: String) -> NodeCacheEntry? {
-        cache.entries[nodeId]
+        try? pool.read { db in
+            guard let row = try Row.fetchOne(
+                db, sql: "SELECT * FROM nodes WHERE id = ?", arguments: [nodeId]
+            ) else { return nil }
+            return Self.entry(from: row)
+        }
     }
 
-    /// Get all cached node entries.
     public var allEntries: [String: NodeCacheEntry] {
-        cache.entries
+        (try? pool.read { db in
+            let rows = try Row.fetchAll(db, sql: "SELECT * FROM nodes")
+            return Dictionary(uniqueKeysWithValues: rows.map { row in
+                (row["id"] as String, Self.entry(from: row))
+            })
+        }) ?? [:]
     }
 
-    /// Number of cached entries.
     public var count: Int {
-        cache.entries.count
+        (try? pool.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM nodes") ?? 0
+        }) ?? 0
     }
 
-    /// Store or update a node entry.
     public func upsert(nodeId: String, entry: NodeCacheEntry) {
-        cache.entries[nodeId] = entry
+        try? pool.write { db in
+            try Self.write(nodeId: nodeId, entry: entry, to: db)
+        }
     }
 
-    /// Store a FileNode from the server.
     public func upsertFromServer(_ node: FileNode) {
-        guard let name = node.name else { return } // Skip partial nodes without name
-        cache.entries[node.id] = NodeCacheEntry(
+        guard let name = node.name else { return }
+        let entry = NodeCacheEntry(
             parentId: node.parentId,
             name: name,
             blobId: node.blobId,
@@ -101,98 +152,144 @@ public actor NodeDatabase {
             type: node.type,
             myRights: node.myRights
         )
+        upsert(nodeId: node.id, entry: entry)
     }
 
-    /// Remove a node entry.
     public func remove(nodeId: String) {
-        cache.entries.removeValue(forKey: nodeId)
+        try? pool.write { db in
+            try db.execute(sql: "DELETE FROM nodes WHERE id = ?", arguments: [nodeId])
+        }
     }
 
-    /// Remove multiple node entries.
     public func remove(nodeIds: [String]) {
-        for id in nodeIds {
-            cache.entries.removeValue(forKey: id)
+        guard !nodeIds.isEmpty else { return }
+        let placeholders = nodeIds.map { _ in "?" }.joined(separator: ", ")
+        try? pool.write { db in
+            try db.execute(
+                sql: "DELETE FROM nodes WHERE id IN (\(placeholders))",
+                arguments: StatementArguments(nodeIds)
+            )
         }
     }
 
-    /// Clear all entries (for full re-population).
     public func clearEntries() {
-        cache.entries.removeAll()
-        cache.stateToken = nil
+        try? pool.write { db in
+            try db.execute(sql: "DELETE FROM nodes")
+            try db.execute(sql: "DELETE FROM sync_state WHERE key = 'stateToken'")
+        }
     }
 
-    /// Get all children of a node.
     public func children(of parentId: String) -> [(id: String, entry: NodeCacheEntry)] {
-        cache.entries.compactMap { (id, entry) in
-            entry.parentId == parentId ? (id, entry) : nil
-        }
+        (try? pool.read { db in
+            let rows = try Row.fetchAll(
+                db, sql: "SELECT * FROM nodes WHERE parentId = ?", arguments: [parentId]
+            )
+            return rows.map { row in (row["id"] as String, Self.entry(from: row)) }
+        }) ?? []
     }
 
     // MARK: - Persistence
 
-    /// Save to disk. Uses atomic write (temp file + rename).
-    public func save() throws {
-        let dir = fileURL.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    /// No-op: SQLite writes are committed immediately on each mutation.
+    /// Kept for API compatibility with code that calls save() explicitly.
+    public func save() throws {}
 
-        let data = try encoder.encode(cache)
-        let tempURL = fileURL.appendingPathExtension("tmp")
-        try data.write(to: tempURL, options: .atomic)
-        // .atomic already does temp+rename, but let's be explicit
-        if FileManager.default.fileExists(atPath: fileURL.path) {
-            try FileManager.default.removeItem(at: fileURL)
-        }
-        try FileManager.default.moveItem(at: tempURL, to: fileURL)
-    }
-
-    /// Delete the cache file (for clean start).
+    /// Delete all node data. The SQLite file stays open but all rows are removed.
     public func delete() throws {
-        cache = NodeCache(version: Self.currentVersion)
-        if FileManager.default.fileExists(atPath: fileURL.path) {
-            try FileManager.default.removeItem(at: fileURL)
+        try pool.write { db in
+            try db.execute(sql: "DELETE FROM nodes")
+            try db.execute(sql: "DELETE FROM sync_state")
         }
     }
 
-    /// Build the complete path for a node by walking up the parent chain.
-    /// Returns nil if the chain doesn't reach the home node.
+    /// Build the relative path for a node by walking up the parent chain.
+    /// Returns nil if the chain doesn't reach the home node (orphaned or cycle).
     public func relativePath(for nodeId: String) -> String? {
-        guard let homeId = cache.homeNodeId else { return nil }
+        guard let homeId = homeNodeId else { return nil }
         if nodeId == homeId { return "" }
 
         var components: [String] = []
         var currentId = nodeId
-
-        // Walk up the tree with cycle detection
         var visited = Set<String>()
+
         while currentId != homeId {
             guard !visited.contains(currentId) else { return nil }
             visited.insert(currentId)
 
-            guard let entry = cache.entries[currentId] else { return nil }
-            components.append(entry.name)
+            guard let row = try? pool.read({ db in
+                try Row.fetchOne(
+                    db, sql: "SELECT parentId, name FROM nodes WHERE id = ?",
+                    arguments: [currentId]
+                )
+            }) else { return nil }
 
-            guard let parentId = entry.parentId else { return nil }
+            components.append(row["name"] as String)
+            guard let parentId = row["parentId"] as String? else { return nil }
             currentId = parentId
         }
 
         return components.reversed().joined(separator: "/")
     }
-}
 
-// MARK: - Cache Data Model
+    // MARK: - Private Helpers
 
-struct NodeCache: Codable {
-    var version: Int
-    var homeNodeId: String?
-    var trashNodeId: String?
-    var stateToken: String?
-    var entries: [String: NodeCacheEntry]
+    private func syncStateValue(for key: String) -> String? {
+        try? pool.read { db in
+            try String.fetchOne(
+                db, sql: "SELECT value FROM sync_state WHERE key = ?", arguments: [key]
+            )
+        }
+    }
 
-    init(version: Int) {
-        self.version = version
-        self.entries = [:]
+    private func setSyncStateValue(_ value: String, for key: String) {
+        try? pool.write { db in
+            try db.execute(
+                sql: "INSERT OR REPLACE INTO sync_state (key, value) VALUES (?, ?)",
+                arguments: [key, value]
+            )
+        }
+    }
+
+    private static func entry(from row: Row) -> NodeCacheEntry {
+        let modified: Double? = row["modified"]
+        let mayRead = (row["mayRead"] as Bool?) ?? true
+        let mayWrite = (row["mayWrite"] as Bool?) ?? true
+        return NodeCacheEntry(
+            parentId: row["parentId"],
+            name: row["name"] as String,
+            blobId: row["blobId"],
+            size: (row["size"] as Int?) ?? 0,
+            modified: modified.map { Date(timeIntervalSince1970: $0) },
+            isFolder: (row["isFolder"] as Bool?) ?? false,
+            type: row["type"],
+            myRights: FileNodeRights(mayRead: mayRead, mayWrite: mayWrite)
+        )
+    }
+
+    private static func write(nodeId: String, entry: NodeCacheEntry, to db: Database) throws {
+        try db.execute(
+            sql: """
+                INSERT OR REPLACE INTO nodes
+                    (id, parentId, name, blobId, size, modified, isFolder, type, mayRead, mayWrite)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            arguments: [
+                nodeId,
+                entry.parentId,
+                entry.name,
+                entry.blobId,
+                entry.size,
+                entry.modified?.timeIntervalSince1970,
+                entry.isFolder,
+                entry.type,
+                entry.myRights?.mayRead ?? true,
+                entry.myRights?.mayWrite ?? true,
+            ]
+        )
     }
 }
+
+// MARK: - NodeCacheEntry (public type — unchanged)
 
 public struct NodeCacheEntry: Codable, Sendable {
     public let parentId: String?

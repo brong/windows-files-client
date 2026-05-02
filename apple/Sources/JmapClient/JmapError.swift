@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FileProvider)
+import FileProvider
+#endif
 
 /// Errors from the JMAP client layer.
 public enum JmapError: Error, Sendable {
@@ -33,6 +36,34 @@ public enum JmapError: Error, Sendable {
         }
     }
 }
+
+#if canImport(FileProvider)
+extension JmapError {
+    /// Maps to the appropriate `NSFileProviderError` for passing to FileProvider completion handlers.
+    /// Exhaustive — compiler enforces that every new case is handled here.
+    public var fileProviderError: NSError {
+        switch self {
+        case .unauthorized, .forbidden:
+            return NSFileProviderError(.notAuthenticated) as NSError
+        case .cannotCalculateChanges:
+            return NSFileProviderError(.syncAnchorExpired) as NSError
+        case .notFound:
+            return NSFileProviderError(.noSuchItem) as NSError
+        case .httpError(let code, _) where code >= 500:
+            return NSFileProviderError(.serverUnreachable) as NSError
+        case .httpError, .rateLimited, .invalidResponse:
+            return NSFileProviderError(.serverUnreachable) as NSError
+        case .payloadTooLarge, .blobTooLarge:
+            return NSFileProviderError(.insufficientQuota) as NSError
+        case .missingCapability, .noAccountId, .keychainError:
+            // Configuration or credential issue — user needs to re-authenticate
+            return NSFileProviderError(.notAuthenticated) as NSError
+        case .serverError, .uploadFailed:
+            return NSFileProviderError(.cannotSynchronize) as NSError
+        }
+    }
+}
+#endif
 
 extension JmapError: LocalizedError {
     public var errorDescription: String? {

@@ -101,3 +101,20 @@ import Testing
     #expect(JmapCapability.blob2 == "https://www.fastmail.com/dev/blob2")
     #expect(JmapCapability.allFileNodeURIs.count == 2)
 }
+
+// MARK: - QuotaInfo
+
+@Test func testQuotaUsedFractionWithLimit() {
+    let q = QuotaInfo(used: 750, limit: 1000)
+    #expect(q.usedFraction == 0.75)
+}
+
+@Test func testQuotaUsedFractionNoLimit() {
+    let q = QuotaInfo(used: 500, limit: nil)
+    #expect(q.usedFraction == nil)
+}
+
+@Test func testQuotaUsedFractionZeroLimit() {
+    let q = QuotaInfo(used: 100, limit: 0)
+    #expect(q.usedFraction == nil)
+}

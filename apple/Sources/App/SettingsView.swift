@@ -5,9 +5,48 @@ import JmapClient
 import AppKit
 #endif
 
+private enum ConfirmAction: Identifiable {
+    case removeLogin(String)
+    case removeAccount(String, String)
+    case cleanAccount(String, String)
+
+    var id: String {
+        switch self {
+        case .removeLogin(let id): return "removeLogin:\(id)"
+        case .removeAccount(let l, let a): return "removeAccount:\(l):\(a)"
+        case .cleanAccount(let l, let a): return "cleanAccount:\(l):\(a)"
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .removeLogin: return "Remove Login?"
+        case .removeAccount: return "Remove Account?"
+        case .cleanAccount: return "Reset Cache?"
+        }
+    }
+
+    var message: String {
+        switch self {
+        case .removeLogin: return "This will sign you out and remove all accounts for this login. No server data will be deleted."
+        case .removeAccount: return "This account will be removed from sync. No server data will be deleted. You can re-add it from the login later."
+        case .cleanAccount: return "This will delete the local metadata cache and re-download it from the server. No server data will be deleted."
+        }
+    }
+
+    var buttonLabel: String {
+        switch self {
+        case .removeLogin: return "Remove Login"
+        case .removeAccount: return "Remove Account"
+        case .cleanAccount: return "Reset Cache"
+        }
+    }
+}
+
 struct SettingsView: View {
     @ObservedObject var appState: AppState
     @State private var orphanedDomains: [NSFileProviderDomain] = []
+    @State private var confirmAction: ConfirmAction?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -100,6 +139,25 @@ struct SettingsView: View {
             await refreshOrphanedDomains()
             appState.reloadExtensionStatuses()
         }
+        .alert(item: $confirmAction) { action in
+            Alert(
+                title: Text(action.title),
+                message: Text(action.message),
+                primaryButton: .destructive(Text(action.buttonLabel)) {
+                    Task {
+                        switch action {
+                        case .removeLogin(let loginId):
+                            await appState.removeLogin(loginId)
+                        case .removeAccount(let loginId, let accountId):
+                            await appState.removeAccount(loginId: loginId, accountId: accountId)
+                        case .cleanAccount(let loginId, let accountId):
+                            await appState.cleanAccount(loginId: loginId, accountId: accountId)
+                        }
+                    }
+                },
+                secondaryButton: .cancel()
+            )
+        }
     }
 
     // MARK: - Login Header
@@ -131,7 +189,7 @@ struct SettingsView: View {
             }
             .font(.caption)
             Button("Remove Login") {
-                Task { await appState.removeLogin(login.loginId) }
+                confirmAction = .removeLogin(login.loginId)
             }
             .font(.caption)
             .foregroundColor(.red)
@@ -230,11 +288,14 @@ struct SettingsView: View {
             Image(systemName: account.isSynced ? "checkmark.circle.fill" : "circle")
                 .foregroundColor(account.isSynced ? statusColor(status) : .gray)
 
-            VStack(alignment: .leading) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(account.displayName.isEmpty ? account.accountId : account.displayName)
                 Text(account.isSynced ? statusText(status) : "Not synced")
                     .font(.caption)
                     .foregroundColor(.secondary)
+                if let quota = appState.quotaInfo[account.accountId] {
+                    quotaBar(quota)
+                }
             }
 
             Spacer()
@@ -251,13 +312,13 @@ struct SettingsView: View {
                 .font(.caption)
 
                 Button("Clean") {
-                    Task { await appState.cleanAccount(loginId: login.loginId, accountId: account.accountId) }
+                    confirmAction = .cleanAccount(login.loginId, account.accountId)
                 }
                 .font(.caption)
                 .foregroundColor(.orange)
 
-                Button("Disable") {
-                    Task { await appState.disableAccount(loginId: login.loginId, accountId: account.accountId) }
+                Button("Remove") {
+                    confirmAction = .removeAccount(login.loginId, account.accountId)
                 }
                 .font(.caption)
                 .foregroundColor(.red)
@@ -268,6 +329,9 @@ struct SettingsView: View {
                 .font(.caption)
                 .foregroundColor(.blue)
             }
+        }
+        .onAppear {
+            if account.isSynced { appState.refreshQuota(for: account.accountId) }
         }
     }
 
@@ -289,6 +353,26 @@ struct SettingsView: View {
         }
     }
     #endif
+
+    @ViewBuilder
+    private func quotaBar(_ quota: QuotaInfo) -> some View {
+        let usedStr = ByteCountFormatter.string(fromByteCount: quota.used, countStyle: .file)
+        if let limit = quota.limit, let fraction = quota.usedFraction {
+            let limitStr = ByteCountFormatter.string(fromByteCount: limit, countStyle: .file)
+            VStack(alignment: .leading, spacing: 1) {
+                ProgressView(value: min(fraction, 1.0))
+                    .progressViewStyle(.linear)
+                    .tint(fraction > 0.9 ? .red : fraction > 0.75 ? .orange : .accentColor)
+                Text("\(usedStr) of \(limitStr)")
+                    .font(.caption2)
+                    .foregroundColor(fraction > 0.9 ? .red : .secondary)
+            }
+        } else {
+            Text("\(usedStr) used")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        }
+    }
 
     private func statusColor(_ status: SyncStatus) -> Color {
         switch status {
@@ -333,6 +417,7 @@ struct DiscoveredAccount: Identifiable {
 
 struct AddAccountView: View {
     @ObservedObject var appState: AppState
+    @State private var email = ""
     @State private var showAdvanced = false
     @State private var sessionURL = "https://api.fastmail.com/jmap/session"
     @State private var token = ""
@@ -367,7 +452,14 @@ struct AddAccountView: View {
                 .font(.title2)
                 .bold()
 
-            VStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 8) {
+                TextField("Email address", text: $email)
+                    .textFieldStyle(.roundedBorder)
+                    .textContentType(.emailAddress)
+                    #if os(macOS)
+                    .onSubmit { Task { await oauthLogin() } }
+                    #endif
+
                 Button(action: { Task { await oauthLogin() } }) {
                     HStack {
                         if isLoading && !showAdvanced {
@@ -376,13 +468,13 @@ struct AddAccountView: View {
                                 .padding(.trailing, 4)
                         }
                         Image(systemName: "person.badge.key")
-                        Text("Sign in with Fastmail")
+                        Text("Continue with OAuth")
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 8)
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(isLoading)
+                .disabled(isLoading || email.isEmpty)
 
                 if let status = statusMessage {
                     Text(status)
@@ -477,10 +569,10 @@ struct AddAccountView: View {
     private func oauthLogin() async {
         isLoading = true
         errorMessage = nil
-        statusMessage = "Discovering OAuth endpoints..."
+        statusMessage = "Discovering OAuth endpoints…"
 
         do {
-            let (sessionUrl, metadata) = try await oauthDiscover()
+            let (sessionUrl, metadata) = try await PaccDiscovery.discover(email: email)
 
             let port = UInt16.random(in: 49152...65000)
             let redirectURI = "http://127.0.0.1:\(port)/callback"

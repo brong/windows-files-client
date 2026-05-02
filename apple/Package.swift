@@ -12,10 +12,16 @@ let package = Package(
         .library(name: "FuseMount", targets: ["FuseMount"]),
         .executable(name: "fastmail-files", targets: ["FuseCLI"]),
     ],
+    dependencies: [
+        .package(url: "https://github.com/groue/GRDB.swift", from: "7.0.0"),
+    ],
     targets: [
         // JMAP protocol library (cross-platform)
         .target(
             name: "JmapClient",
+            dependencies: [
+                .product(name: "GRDB", package: "GRDB.swift"),
+            ],
             path: "Sources/JmapClient"
         ),
         .testTarget(

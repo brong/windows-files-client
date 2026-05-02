@@ -451,10 +451,9 @@ Check `changedFields` to determine what changed:
 
 **Content change** (`.contents` in changedFields):
 1. Upload new blob → `blobId`
-2. `FileNode/set create { parentId, blobId, name, type, created, modified, onExists: "replace" }` → new node
-3. **The nodeId changes** (because blobId is immutable, content update = destroy + create)
-4. Update database with new nodeId
-5. Return the new item — the system remaps the identifier
+2. `FileNode/set update { [nodeId]: { blobId, type, modified } }` — nodeId stays the same (v10+)
+3. Update database with new blobId (same nodeId)
+4. Return the same item — no identifier remap needed
 
 **Rename** (`.filename` in changedFields):
 1. `FileNode/set update { [nodeId]: { name: newName } }`
@@ -631,7 +630,7 @@ Called in batches. For each item:
 
 ### Caching
 
-Cache thumbnails in an LRU cache in the database or a dedicated cache directory in the App Group container, keyed by `(blobId, width, height)`. Since `blobId` is immutable, cached thumbnails never go stale — if the file content changes, it gets a new blobId and a new cache key.
+Cache thumbnails in an LRU cache in the database or a dedicated cache directory in the App Group container, keyed by `(blobId, width, height)`. Since blobId changes whenever file content changes, cached thumbnails keyed by blobId never go stale for a given version of the content.
 
 ---
 
@@ -1243,8 +1242,8 @@ If the App Group identifier doesn't match between app and extension entitlements
 
 ### Protocol Pitfalls (same as Windows)
 
-**5. blobId is immutable — content updates create new nodes.**
-Same as DESIGN.md pitfall #1. The `modifyItem` completion handler must return the new item with the new identifier. The system handles remapping.
+**5. blobId is mutable since v10 — content updates keep the same nodeId.**
+Use `FileNode/set update { [nodeId]: { blobId: newBlobId, modified: timestamp } }`. The nodeId stays the same; no destroy+create needed. The `modifyItem` completion handler returns the same identifier.
 
 **6. State tokens expire — return .syncAnchorExpired.**
 When `FileNode/changes` returns `cannotCalculateChanges`, return `NSFileProviderError(.syncAnchorExpired)`. The system restarts with a full enumeration.
@@ -1287,7 +1286,7 @@ The system may pass a `baseVersion` that's slightly behind the current server ve
 Same as DESIGN.md pitfall #22. If uploads and downloads share a URLSession, uploads can starve downloads. Use separate URLSession instances or configure QoS appropriately.
 
 **18. Batch thumbnail requests.**
-`fetchThumbnails` receives multiple identifiers at once. Batch the `Blob/convert` calls into a single JMAP request to reduce round-trips. Cache results aggressively (blobId is immutable, so cached thumbnails never go stale).
+`fetchThumbnails` receives multiple identifiers at once. Batch the `Blob/convert` calls into a single JMAP request to reduce round-trips. Cache results aggressively by blobId — a given blobId always maps to the same content, so the cache never needs invalidation for a known blobId.
 
 **19. Extension memory limit is lower than app.**
 FileProvider extensions have a lower memory budget (~50-80MB depending on device). Use streaming for large file transfers. Don't cache the entire node tree in memory for large sync roots — page from the database.

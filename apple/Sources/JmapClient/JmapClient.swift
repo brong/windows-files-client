@@ -1045,6 +1045,31 @@ public actor JmapClient {
 
     /// Record that a file was accessed. The timestamp will be piggybacked
     /// onto the next outgoing JMAP call, or flushed after 5 minutes.
+    // MARK: - Quota
+
+    /// Fetches storage quota for the account.
+    /// Returns nil if the server does not advertise the quota capability.
+    public func fetchQuota(accountId: String) async throws -> QuotaInfo? {
+        let session = try await sessionManager.session()
+        guard session.capabilities[JmapCapability.quota] != nil else { return nil }
+
+        let responses = try await call([
+            JmapMethodCall(
+                name: "Quota/get",
+                args: ["accountId": AnyCodable(accountId), "ids": AnyCodable(NSNull())],
+                callId: "q0"
+            ),
+        ], using: [JmapCapability.core, JmapCapability.quota])
+
+        let result = try extractResponse(QuotaGetResponse.self, from: responses, callId: "q0")
+
+        // Sum all octets-type quotas to get a single used/limit pair
+        let octets = result.list.filter { $0.resourceType == "octets" }
+        let totalUsed = octets.reduce(Int64(0)) { $0 + $1.used }
+        let totalLimit = octets.compactMap { $0.hardLimit ?? $0.softLimit }.min()
+        return QuotaInfo(used: totalUsed, limit: totalLimit)
+    }
+
     public func recordAccess(accountId: String, nodeId: String, at date: Date = Date()) {
         pendingAccessed[nodeId] = date
         accessedAccountId = accountId

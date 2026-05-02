@@ -57,6 +57,50 @@ private let testSessionJSON = """
 }
 """
 
+/// Read the full POST body from a URLRequest, handling both httpBody and httpBodyStream.
+private func readRequestBody(_ request: URLRequest) -> String {
+    if let body = request.httpBody {
+        return String(data: body, encoding: .utf8) ?? ""
+    }
+    guard let stream = request.httpBodyStream else { return "" }
+    stream.open()
+    defer { stream.close() }
+    var data = Data()
+    var buffer = [UInt8](repeating: 0, count: 4096)
+    while stream.hasBytesAvailable {
+        let n = stream.read(&buffer, maxLength: buffer.count)
+        if n > 0 { data.append(contentsOf: buffer[..<n]) }
+    }
+    return String(data: data, encoding: .utf8) ?? ""
+}
+
+private let testSessionWithQuota = """
+{
+    "apiUrl": "https://api.example.com/jmap/",
+    "downloadUrl": "https://api.example.com/jmap/download/{accountId}/{blobId}/{name}",
+    "uploadUrl": "https://api.example.com/jmap/upload/{accountId}/",
+    "eventSourceUrl": "https://api.example.com/jmap/eventsource/",
+    "capabilities": {
+        "urn:ietf:params:jmap:core": {},
+        "https://www.fastmail.com/dev/filenode": {},
+        "urn:ietf:params:jmap:quota": {}
+    },
+    "accounts": {
+        "u123": {
+            "name": "test@example.com",
+            "isPersonal": true,
+            "accountCapabilities": {
+                "https://www.fastmail.com/dev/filenode": {},
+                "urn:ietf:params:jmap:quota": {}
+            }
+        }
+    },
+    "primaryAccounts": {
+        "https://www.fastmail.com/dev/filenode": "u123"
+    }
+}
+"""
+
 private func makeTestClient() -> JmapClient {
     let sessionURL = URL(string: "https://api.example.com/jmap/session")!
     let tokenProvider = StaticTokenProvider(token: "test-token")
@@ -78,8 +122,8 @@ private func jsonResponse(url: URL, json: String, statusCode: Int = 200) -> (Dat
 
 // MARK: - Tests
 
-/// Serialized to avoid concurrent tests clobbering the shared MockURLProtocol.handler.
-@Suite(.serialized) struct JmapClientAPITests {
+extension NetworkTests {
+@Suite struct JmapClientAPITests {
 
     @Test func findHomeNode() async throws {
         let client = makeTestClient()
@@ -326,6 +370,156 @@ private func jsonResponse(url: URL, json: String, statusCode: Int = 200) -> (Dat
         try await client.destroyNode(accountId: "u123", nodeId: "M-gone")
     }
 
+    // MARK: - updateNodeContent (v10 blobId mutation)
+
+    @Test func updateNodeContentSendsBlobIdUpdate() async throws {
+        let client = makeTestClient()
+
+        nonisolated(unsafe) var capturedBody = ""
+        MockURLProtocol.handler = { request in
+            let url = request.url!
+            if url.path.contains("session") {
+                return jsonResponse(url: url, json: testSessionJSON)
+            }
+            capturedBody = readRequestBody(request)
+            return jsonResponse(url: url, json: """
+            {"methodResponses":[
+                ["FileNode/set",{"accountId":"u123","oldState":"s1","newState":"s2",
+                 "updated":{"N1":null}},"s0"]
+            ],"sessionState":"ss1"}
+            """)
+        }
+
+        try await client.updateNodeContent(accountId: "u123", nodeId: "N1", blobId: "B-new")
+
+        // v10 fix: must be an update, not a destroy+create
+        #expect(capturedBody.contains("\"blobId\""))
+        #expect(!capturedBody.contains("\"destroy\""))
+        #expect(capturedBody.contains("\"update\""))
+    }
+
+    @Test func updateNodeContentThrowsNotFound() async throws {
+        let client = makeTestClient()
+
+        MockURLProtocol.handler = { request in
+            let url = request.url!
+            if url.path.contains("session") { return jsonResponse(url: url, json: testSessionJSON) }
+            return jsonResponse(url: url, json: """
+            {"methodResponses":[
+                ["FileNode/set",{"accountId":"u123","oldState":"s1","newState":"s1",
+                 "notUpdated":{"N1":{"type":"notFound","description":"not found"}}},"s0"]
+            ],"sessionState":"ss1"}
+            """)
+        }
+
+        do {
+            try await client.updateNodeContent(accountId: "u123", nodeId: "N1", blobId: "B-new")
+            Issue.record("Expected notFound error")
+        } catch JmapError.notFound { /* expected */ }
+    }
+
+    // MARK: - updateNode (rename / move)
+
+    @Test func updateNodeRename() async throws {
+        let client = makeTestClient()
+
+        nonisolated(unsafe) var capturedBody = ""
+        MockURLProtocol.handler = { request in
+            let url = request.url!
+            if url.path.contains("session") { return jsonResponse(url: url, json: testSessionJSON) }
+            capturedBody = readRequestBody(request)
+            return jsonResponse(url: url, json: """
+            {"methodResponses":[
+                ["FileNode/set",{"accountId":"u123","oldState":"s1","newState":"s2",
+                 "updated":{"N1":null}},"s0"]
+            ],"sessionState":"ss1"}
+            """)
+        }
+
+        try await client.updateNode(accountId: "u123", nodeId: "N1", name: "renamed.txt")
+
+        #expect(capturedBody.contains("\"name\""))
+        #expect(capturedBody.contains("renamed.txt"))
+    }
+
+    @Test func updateNodeMove() async throws {
+        let client = makeTestClient()
+
+        nonisolated(unsafe) var capturedBody = ""
+        MockURLProtocol.handler = { request in
+            let url = request.url!
+            if url.path.contains("session") { return jsonResponse(url: url, json: testSessionJSON) }
+            capturedBody = readRequestBody(request)
+            return jsonResponse(url: url, json: """
+            {"methodResponses":[
+                ["FileNode/set",{"accountId":"u123","oldState":"s1","newState":"s2",
+                 "updated":{"N1":null}},"s0"]
+            ],"sessionState":"ss1"}
+            """)
+        }
+
+        try await client.updateNode(accountId: "u123", nodeId: "N1", parentId: "P-new")
+
+        #expect(capturedBody.contains("\"parentId\""))
+        #expect(capturedBody.contains("P-new"))
+    }
+
+    // MARK: - destroyNode (success path)
+
+    @Test func destroyNodeSuccess() async throws {
+        let client = makeTestClient()
+
+        MockURLProtocol.handler = { request in
+            let url = request.url!
+            if url.path.contains("session") { return jsonResponse(url: url, json: testSessionJSON) }
+            return jsonResponse(url: url, json: """
+            {"methodResponses":[
+                ["FileNode/set",{"accountId":"u123","oldState":"s1","newState":"s2",
+                 "destroyed":["N1"]},"s0"]
+            ],"sessionState":"ss1"}
+            """)
+        }
+
+        // Should complete without throwing
+        try await client.destroyNode(accountId: "u123", nodeId: "N1")
+    }
+
+    // MARK: - fetchQuota
+
+    @Test func fetchQuotaReturnsNilWhenCapabilityAbsent() async throws {
+        let client = makeTestClient()
+        // testSessionJSON has no quota capability — fetchQuota should short-circuit
+        MockURLProtocol.handler = { request in
+            jsonResponse(url: request.url!, json: testSessionJSON)
+        }
+        defer { MockURLProtocol.handler = nil }
+
+        let result = try await client.fetchQuota(accountId: "u123")
+        #expect(result == nil)
+    }
+
+    @Test func fetchQuotaSumsOctetsQuota() async throws {
+        let client = makeTestClient()
+
+        MockURLProtocol.handler = { request in
+            let url = request.url!
+            if url.path.contains("session") { return jsonResponse(url: url, json: testSessionWithQuota) }
+            return jsonResponse(url: url, json: """
+            {"methodResponses":[
+                ["Quota/get",{"accountId":"u123","state":"q1","list":[
+                    {"id":"Q1","name":"Storage","resourceType":"octets","used":1000,"hardLimit":5000},
+                    {"id":"Q2","name":"Messages","resourceType":"count","used":50,"hardLimit":100}
+                ],"notFound":[]},"q0"]
+            ],"sessionState":"ss1"}
+            """)
+        }
+
+        let quota = try await client.fetchQuota(accountId: "u123")
+        #expect(quota != nil)
+        #expect(quota?.used == 1000)       // only octets type summed
+        #expect(quota?.limit == 5000)
+    }
+
     @Test func http401TriggersRetry() async throws {
         let client = makeTestClient()
 
@@ -356,4 +550,5 @@ private func jsonResponse(url: URL, json: String, statusCode: Int = 200) -> (Dat
         #expect(home.id == "M-home")
         #expect(callCount == 2)
     }
+}
 }

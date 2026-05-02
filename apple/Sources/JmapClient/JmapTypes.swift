@@ -339,3 +339,31 @@ public struct AnyCodable: Codable, Sendable, ExpressibleByStringLiteral,
         }
     }
 }
+
+// MARK: - Quota
+
+/// Summarised quota for an account (used + optional hard/soft limit, in bytes).
+public struct QuotaInfo: Sendable {
+    public let used: Int64
+    public let limit: Int64?   // nil = no limit advertised
+
+    public var usedFraction: Double? {
+        guard let limit, limit > 0 else { return nil }
+        return Double(used) / Double(limit)
+    }
+}
+
+/// JMAP Quota/get response (RFC 9425).
+struct QuotaGetResponse: Decodable {
+    let list: [QuotaObject]
+}
+
+struct QuotaObject: Decodable {
+    let id: String
+    let name: String
+    let resourceType: String    // "octets" | "count"
+    let used: Int64
+    let warnLimit: Int64?
+    let softLimit: Int64?
+    let hardLimit: Int64?
+}
