@@ -746,22 +746,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
     /// Map errors to NSFileProviderError.
     private func mapError(_ error: Error) -> Error {
         if let jmapError = error as? JmapError {
-            switch jmapError {
-            case .unauthorized, .forbidden:
-                return NSFileProviderError(.notAuthenticated)
-            case .cannotCalculateChanges:
-                return NSFileProviderError(.syncAnchorExpired)
-            case .notFound:
-                return NSFileProviderError(.noSuchItem)
-            case .httpError(let code, _) where code >= 500:
-                return NSFileProviderError(.serverUnreachable)
-            case .rateLimited:
-                return NSFileProviderError(.serverUnreachable)
-            case .payloadTooLarge:
-                return NSFileProviderError(.insufficientQuota)
-            default:
-                return NSFileProviderError(.cannotSynchronize)
-            }
+            return jmapError.fileProviderError
         }
         if (error as NSError).domain == NSURLErrorDomain {
             return NSFileProviderError(.serverUnreachable)
