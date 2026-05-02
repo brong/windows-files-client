@@ -42,13 +42,12 @@ public struct JmapSession: Codable, Sendable {
 
     /// Resolve the download URL template for a specific blob.
     public func downloadURL(accountId: String, blobId: String, name: String, type: String?) -> URL? {
-        var urlString = downloadUrl
+        let effectiveType = type ?? "application/octet-stream"
+        let urlString = downloadUrl
             .replacingOccurrences(of: "{accountId}", with: accountId)
             .replacingOccurrences(of: "{blobId}", with: blobId)
             .replacingOccurrences(of: "{name}", with: name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? name)
-        if let type = type {
-            urlString = urlString.replacingOccurrences(of: "{type}", with: type)
-        }
+            .replacingOccurrences(of: "{type}", with: effectiveType.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? effectiveType)
         return URL(string: urlString)
     }
 
