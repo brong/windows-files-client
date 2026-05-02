@@ -162,14 +162,6 @@ class AppState: ObservableObject {
     @Published var extensionStatuses: [String: ExtensionStatus] = [:]
     /// Quota info per accountId, fetched on demand.
     @Published var quotaInfo: [String: QuotaInfo] = [:]
-    /// Active activities from the activity tracker — single source of truth for "currently syncing".
-    @Published var activeActivities: [ActivityTracker.Activity] = []
-    /// Pending activities (queued but not yet started) — "local changes not yet uploaded".
-    @Published var pendingActivities: [ActivityTracker.Activity] = []
-    /// Recently completed/failed activities for display in the activity log.
-    @Published var recentActivities: [ActivityTracker.Activity] = []
-
-    private var activityObserver: ActivityObserver?
 
     private let defaults: UserDefaults?
 
@@ -186,30 +178,26 @@ class AppState: ObservableObject {
     }
 
     /// Get the live status for an account.
-    /// Active activities are the single source of truth for "currently syncing".
-    /// The status file provides the persistent idle/error/offline state.
+    /// ExtensionStatus is the single source of truth for account sync state.
     func liveStatus(for accountId: String) -> SyncStatus {
         for login in logins {
             guard let acct = login.accounts.first(where: { $0.accountId == accountId }) else { continue }
             if !acct.isSynced { return .notSynced }
 
-            // Active activity → syncing, regardless of status file
-            if activeActivities.contains(where: { $0.accountId == accountId }) { return .syncing }
-
-            // Fall back to extension-reported status for idle/error/offline
             if let extStatus = extensionStatuses[accountId] {
                 switch extStatus.state {
-                case .initializing, .syncing: return .idle  // no active activity = stale syncing, treat as idle
-                case .idle: return .idle
-                case .error: return .error
-                case .offline: return .offline
+                case .initializing: return .syncing
+                case .syncing:      return .syncing
+                case .idle:         return extStatus.activeOperationCount > 0 ? .syncing : .idle
+                case .error:        return .error
+                case .offline:      return .offline
                 }
             }
 
             // No extension status yet — use connection check result as fallback
             switch login.connectionStatus {
-            case .authFailed: return .error
-            case .networkError: return .offline
+            case .authFailed:               return .error
+            case .networkError:             return .offline
             case .connecting, .unknown, .connected: return .syncing
             }
         }
@@ -246,34 +234,20 @@ class AppState: ObservableObject {
             DispatchQueue.main.async { state.reloadExtensionStatuses() }
         }, ExtensionStatusReader.notificationName, nil, .deliverImmediately)
         reloadExtensionStatuses()
-
-        // Observe activity changes — always active so menu bar status stays current.
-        let obs = ActivityObserver(onChange: { [weak self] in
-            DispatchQueue.main.async { self?.reloadActivities() }
-        })
-        obs.start()
-        activityObserver = obs
-        reloadActivities()
-    }
-
-    func reloadActivities() {
-        guard let containerURL = FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier: Self.appGroupId) else { return }
-        guard let snapshot = ActivityTracker.loadShared(containerURL: containerURL) else { return }
-        activeActivities = snapshot.activities.filter { $0.status == .active }
-        pendingActivities = snapshot.activities.filter { $0.status == .pending }
-        recentActivities = snapshot.activities.filter {
-            $0.status == .completed || $0.status == .error
-        }
     }
 
     var menuBarState: MenuBarState {
-        MenuBarState.derive(
-            pendingCount: pendingActivities.count,
-            activeCount: activeActivities.count,
-            extensionStatuses: Array(extensionStatuses.values),
+        let statuses = Array(extensionStatuses.values)
+        return MenuBarState.derive(
+            pendingCount: statuses.reduce(0) { $0 + $1.pendingOperationCount },
+            activeCount: statuses.reduce(0) { $0 + $1.activeOperationCount },
+            extensionStatuses: statuses,
             isOnline: isOnline
         )
+    }
+
+    var activeOperationHints: [ExtensionStatus.OperationHint] {
+        extensionStatuses.values.flatMap { $0.operationHints }
     }
 
     // MARK: - Connection Check

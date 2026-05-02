@@ -34,9 +34,9 @@ struct MenuBarView: View {
                 openSettings()
             }
         } else {
-            // Pending changes section — shown when local edits are not yet uploaded
-            if !appState.pendingActivities.isEmpty {
-                pendingSection(activities: appState.pendingActivities)
+            // Active/pending operations section — shown when operations are in flight
+            if !appState.activeOperationHints.isEmpty {
+                operationSection(hints: appState.activeOperationHints)
                 Divider()
             }
 
@@ -82,27 +82,33 @@ struct MenuBarView: View {
     }
 
     @ViewBuilder
-    private func pendingSection(activities: [ActivityTracker.Activity]) -> some View {
-        let shown = activities.prefix(5)
-        ForEach(shown) { activity in
+    private func operationSection(hints: [ExtensionStatus.OperationHint]) -> some View {
+        let shown = hints.prefix(5)
+        ForEach(shown) { hint in
             HStack(spacing: 6) {
-                Image(systemName: pendingIcon(for: activity.action))
-                    .foregroundColor(.orange)
+                Image(systemName: iconForVerb(hint.actionVerb))
+                    .foregroundColor(.blue)
                     .frame(width: 16)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(activity.fileName)
-                        .lineLimit(1)
-                    Text(activity.action.rawValue.capitalized)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                    Text(hint.fileName).lineLimit(1)
+                    Text(hint.actionVerb).font(.caption).foregroundColor(.secondary)
                 }
             }
             .padding(.vertical, 2)
         }
-        if activities.count > 5 {
-            Text("and \(activities.count - 5) more pending…")
+        if hints.count > 5 {
+            Text("and \(hints.count - 5) more…")
                 .font(.caption)
                 .foregroundColor(.secondary)
+        }
+    }
+
+    private func iconForVerb(_ verb: String) -> String {
+        switch verb {
+        case "Uploading":   return "arrow.up.doc"
+        case "Downloading": return "arrow.down.doc"
+        case "Deleting":    return "trash"
+        default:            return "arrow.triangle.2.circlepath"
         }
     }
 
@@ -111,15 +117,6 @@ struct MenuBarView: View {
         case .pending: return .orange
         case .error:   return .red
         default:       return .primary
-        }
-    }
-
-    private func pendingIcon(for action: ActivityTracker.Activity.Action) -> String {
-        switch action {
-        case .upload:   return "arrow.up.doc"
-        case .download: return "arrow.down.doc"
-        case .delete:   return "trash"
-        case .sync:     return "arrow.triangle.2.circlepath"
         }
     }
 

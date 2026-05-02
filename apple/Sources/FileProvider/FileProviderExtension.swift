@@ -221,6 +221,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
         logger.info("Container URL: \(effectiveContainerURL.path, privacy: .public)")
         #endif
         Task {
+            await activityTracker.setStatusWriter(statusWriter)
             await bandwidthPolicy.start()
             _ = try? await specialNodes.value  // errors handled inside the task above
             await startPushWatcher()

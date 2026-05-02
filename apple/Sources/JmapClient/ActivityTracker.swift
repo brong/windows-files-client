@@ -43,6 +43,7 @@ public actor ActivityTracker {
     private var lastPersistTime: Date = .distantPast
     private static let persistThrottle: TimeInterval = 0.25 // max 4 writes/sec
     private static let completedRetention: TimeInterval = 30 // keep completed items 30s
+    private var statusWriter: ExtensionStatusWriter?
 
     public init(containerURL: URL? = nil) {
         if let url = containerURL {
@@ -50,6 +51,10 @@ public actor ActivityTracker {
         } else {
             self.sharedFileURL = nil
         }
+    }
+
+    public func setStatusWriter(_ writer: ExtensionStatusWriter) {
+        statusWriter = writer
     }
 
     /// Start tracking an operation.
@@ -60,6 +65,7 @@ public actor ActivityTracker {
             action: action, fileSize: fileSize, startedAt: Date(),
             completedAt: nil, progress: nil, status: .active, error: nil)
         persist()
+        pushToStatus()
     }
 
     /// Update progress for an operation (0.0-1.0).
@@ -74,6 +80,7 @@ public actor ActivityTracker {
         activities[id]?.progress = 1.0
         activities[id]?.completedAt = Date()
         persist()
+        pushToStatus()
     }
 
     /// Mark an operation as failed.
@@ -81,12 +88,14 @@ public actor ActivityTracker {
         activities[id]?.status = .error
         activities[id]?.error = error
         persist()
+        pushToStatus()
     }
 
     /// Remove a specific activity.
     public func remove(id: String) {
         activities.removeValue(forKey: id)
         persist()
+        pushToStatus()
     }
 
     /// Drop any persisted error activities and publish the clean state.
@@ -94,6 +103,7 @@ public actor ActivityTracker {
     public func clearPersistedErrors() {
         activities = activities.filter { $0.value.status != .error }
         persist()
+        pushToStatus()
     }
 
     /// Get current snapshot, pruning old completed items.
@@ -141,6 +151,28 @@ public actor ActivityTracker {
 
     /// Darwin notification name for cross-process activity updates.
     nonisolated(unsafe) public static let darwinNotificationName = "com.fastmail.files.activityChanged" as CFString
+
+    /// Push current active/pending counts and hints into the ExtensionStatus file.
+    private func pushToStatus() {
+        guard let writer = statusWriter else { return }
+        let activeItems = activities.values.filter { $0.status == .active }
+        let pendingItems = activities.values.filter { $0.status == .pending }
+        let hints = (activeItems + pendingItems).prefix(5).map { a -> ExtensionStatus.OperationHint in
+            let verb: String
+            switch a.action {
+            case .upload:   verb = "Uploading"
+            case .download: verb = "Downloading"
+            case .sync:     verb = "Syncing"
+            case .delete:   verb = "Deleting"
+            }
+            return ExtensionStatus.OperationHint(id: a.id, fileName: a.fileName, actionVerb: verb)
+        }
+        writer.setActivityCounts(
+            active: activeItems.count,
+            pending: pendingItems.count,
+            hints: Array(hints)
+        )
+    }
 
     private func persist() {
         lastPersistTime = Date()

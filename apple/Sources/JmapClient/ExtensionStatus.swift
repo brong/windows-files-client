@@ -10,6 +10,12 @@ public struct ExtensionStatus: Codable, Sendable {
     public var nodeCount: Int
     public var error: String?
     public var updatedAt: Date
+    /// Number of in-flight operations (uploads, downloads, syncs).
+    public var activeOperationCount: Int
+    /// Number of queued operations not yet started.
+    public var pendingOperationCount: Int
+    /// Up to 5 operation hints for menu bar detail display.
+    public var operationHints: [OperationHint]
 
     public enum State: String, Codable, Sendable {
         case initializing   // extension just started, loading cache
@@ -17,6 +23,18 @@ public struct ExtensionStatus: Codable, Sendable {
         case idle           // up to date
         case error          // auth failed or other error
         case offline        // can't reach server
+    }
+
+    public struct OperationHint: Codable, Sendable, Identifiable {
+        public var id: String
+        public var fileName: String
+        public var actionVerb: String  // "Uploading", "Downloading", "Syncing", "Deleting"
+
+        public init(id: String, fileName: String, actionVerb: String) {
+            self.id = id
+            self.fileName = fileName
+            self.actionVerb = actionVerb
+        }
     }
 
     public init(accountId: String, state: State = .initializing,
@@ -27,6 +45,22 @@ public struct ExtensionStatus: Codable, Sendable {
         self.nodeCount = nodeCount
         self.error = error
         self.updatedAt = Date()
+        self.activeOperationCount = 0
+        self.pendingOperationCount = 0
+        self.operationHints = []
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        accountId = try container.decode(String.self, forKey: .accountId)
+        state = try container.decode(State.self, forKey: .state)
+        lastSyncTime = try container.decodeIfPresent(Date.self, forKey: .lastSyncTime)
+        nodeCount = try container.decode(Int.self, forKey: .nodeCount)
+        error = try container.decodeIfPresent(String.self, forKey: .error)
+        updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+        activeOperationCount = (try? container.decodeIfPresent(Int.self, forKey: .activeOperationCount)) ?? 0
+        pendingOperationCount = (try? container.decodeIfPresent(Int.self, forKey: .pendingOperationCount)) ?? 0
+        operationHints = (try? container.decodeIfPresent([OperationHint].self, forKey: .operationHints)) ?? []
     }
 }
 
@@ -51,7 +85,14 @@ public final class ExtensionStatusWriter: @unchecked Sendable {
     }
 
     public func setState(_ state: ExtensionStatus.State) {
-        update { $0.state = state }
+        update {
+            $0.state = state
+            if state == .initializing || state == .idle {
+                $0.activeOperationCount = 0
+                $0.pendingOperationCount = 0
+                $0.operationHints = []
+            }
+        }
     }
 
     public func setError(_ error: String) {
@@ -68,6 +109,20 @@ public final class ExtensionStatusWriter: @unchecked Sendable {
             $0.error = nil
             $0.lastSyncTime = Date()
             if let count = nodeCount { $0.nodeCount = count }
+            $0.activeOperationCount = 0
+            $0.pendingOperationCount = 0
+            $0.operationHints = []
+        }
+    }
+
+    /// Update operation counts and hints from ActivityTracker.
+    /// Auto-transitions state: idle→syncing when active>0.
+    public func setActivityCounts(active: Int, pending: Int, hints: [ExtensionStatus.OperationHint]) {
+        update {
+            $0.activeOperationCount = active
+            $0.pendingOperationCount = pending
+            $0.operationHints = hints
+            if active > 0, $0.state == .idle { $0.state = .syncing }
         }
     }
 
