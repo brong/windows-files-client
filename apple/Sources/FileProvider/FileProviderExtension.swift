@@ -596,6 +596,13 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
         guard database != nil else {
             throw NSFileProviderError(.notAuthenticated)
         }
+        // homeNodeId is resolved asynchronously during init. If the system
+        // requests an enumerator before it's ready, return serverUnreachable
+        // so it retries. initializeFromDatabase() signals the working set
+        // enumerator once the home node is known.
+        guard let homeNodeId else {
+            throw NSFileProviderError(.serverUnreachable)
+        }
 
         return FileProviderEnumerator(
             container: containerItemIdentifier,
@@ -604,7 +611,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
             syncEngine: syncEngine,
             accountId: accountId,
             accountName: accountName,
-            homeNodeId: homeNodeId ?? "",
+            homeNodeId: homeNodeId,
             trashNodeId: trashNodeId,
             activityTracker: activityTracker,
             statusWriter: statusWriter
@@ -700,6 +707,8 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
             homeNodeId = homeId
             trashNodeId = trashId
             await activityTracker.complete(id: activityId)
+            // Signal the system to retry enumeration now that homeNodeId is known.
+            NSFileProviderManager(for: domain)?.signalEnumerator(for: .workingSet) { _ in }
         } catch let error as JmapError {
             await activityTracker.fail(id: activityId, error: error.localizedDescription)
             switch error {
