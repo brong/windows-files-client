@@ -194,13 +194,21 @@ public struct FileNode: Codable, Sendable {
 
 public struct FileNodeRights: Codable, Sendable {
     public let mayRead: Bool
-    public let mayWrite: Bool
+    public let mayWrite: Bool   // server field: "mayModifyContent"
     public let mayShare: Bool
 
     public init(mayRead: Bool = true, mayWrite: Bool = true, mayShare: Bool = false) {
         self.mayRead = mayRead
         self.mayWrite = mayWrite
         self.mayShare = mayShare
+    }
+
+    // Map Swift property names to actual server field names.
+    // The server also sends mayAddChildren, mayDelete, mayRename — ignored here.
+    enum CodingKeys: String, CodingKey {
+        case mayRead
+        case mayWrite = "mayModifyContent"
+        case mayShare
     }
 }
 

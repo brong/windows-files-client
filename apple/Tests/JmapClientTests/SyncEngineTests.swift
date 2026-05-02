@@ -86,7 +86,7 @@ extension NetworkTests {
                     ["FileNode/get",{"accountId":"u123","state":"s1","list":[
                         {"id":"M-home","parentId":null,"blobId":null,"name":"Home",
                          "type":null,"size":null,"created":null,"modified":null,
-                         "role":"home","myRights":{"mayRead":true,"mayWrite":true,"mayShare":false}}
+                         "role":"home","myRights":{"mayRead":true,"mayModifyContent":true,"mayShare":false}}
                     ],"notFound":[]},"g0"]],"sessionState":"ss1"}
                 """)
             } else {
@@ -135,7 +135,7 @@ extension NetworkTests {
                 ["FileNode/get",{"accountId":"u123","state":"state-new","list":[
                     {"id":"N1","parentId":"M-home","blobId":"B1","name":"new.txt",
                      "type":"text/plain","size":42,"created":null,"modified":null,
-                     "role":null,"myRights":{"mayRead":true,"mayWrite":true,"mayShare":false}}
+                     "role":null,"myRights":{"mayRead":true,"mayModifyContent":true,"mayShare":false}}
                 ],"notFound":[]},"g-created"],
                 ["FileNode/get",{"accountId":"u123","state":"state-new","list":[],"notFound":[]},"g-updated"]
             ],"sessionState":"ss1"}

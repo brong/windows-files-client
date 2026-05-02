@@ -145,7 +145,7 @@ extension NetworkTests {
             {
                 "methodResponses": [
                     ["FileNode/query", {"accountId":"u123","queryState":"q1","ids":["M-home"],"total":1}, "q0"],
-                    ["FileNode/get", {"accountId":"u123","state":"s1","list":[{"id":"M-home","parentId":null,"blobId":null,"name":"Home","type":null,"size":null,"created":null,"modified":null,"role":"home","myRights":{"mayRead":true,"mayWrite":true,"mayShare":false}}],"notFound":[]}, "g0"]
+                    ["FileNode/get", {"accountId":"u123","state":"s1","list":[{"id":"M-home","parentId":null,"blobId":null,"name":"Home","type":null,"size":null,"created":null,"modified":null,"role":"home","myRights":{"mayRead":true,"mayModifyContent":true,"mayShare":false}}],"notFound":[]}, "g0"]
                 ],
                 "sessionState": "ss1"
             }
@@ -202,7 +202,7 @@ extension NetworkTests {
                         "oldState": "s1",
                         "newState": "s2",
                         "created": {
-                            "c0": {"id":"M-new","parentId":"M-home","blobId":null,"name":"NewFolder","type":null,"size":null,"created":null,"modified":null,"role":null,"myRights":{"mayRead":true,"mayWrite":true,"mayShare":false}}
+                            "c0": {"id":"M-new","parentId":"M-home","blobId":null,"name":"NewFolder","type":null,"size":null,"created":null,"modified":null,"role":null,"myRights":{"mayRead":true,"mayModifyContent":true,"mayShare":false}}
                         }
                     }, "s0"]
                 ],

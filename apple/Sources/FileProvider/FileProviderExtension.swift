@@ -784,11 +784,30 @@ final class TrafficLog: Sendable {
     static let shared = TrafficLog()
 
     private let logger = Logger(subsystem: "com.fastmail.files", category: "JMAP")
+    private let fileURL: URL?
+    private let lock = NSLock()
 
-    private init() {}
+    private init() {
+        fileURL = FileManager.default
+            .containerURL(forSecurityApplicationGroupIdentifier: "BJL34Q426G.com.fastmail.files")?
+            .appendingPathComponent("jmap-traffic.log")
+        // Truncate on each extension launch so the file doesn't grow unbounded
+        if let url = fileURL { try? "".write(to: url, atomically: false, encoding: .utf8) }
+    }
 
     func log(_ message: String) {
         logger.info("\(message, privacy: .public)")
+        guard let url = fileURL else { return }
+        let line = message + "\n---\n"
+        lock.lock()
+        if let handle = try? FileHandle(forWritingTo: url) {
+            handle.seekToEndOfFile()
+            handle.write(Data(line.utf8))
+            try? handle.close()
+        } else {
+            try? line.write(to: url, atomically: false, encoding: .utf8)
+        }
+        lock.unlock()
     }
 
     /// Format a JMAP body for logging, extracting method calls/responses.

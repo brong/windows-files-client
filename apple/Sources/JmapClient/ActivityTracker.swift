@@ -89,6 +89,13 @@ public actor ActivityTracker {
         persist()
     }
 
+    /// Drop any persisted error activities and publish the clean state.
+    /// Called on extension startup to clear stale errors from previous runs.
+    public func clearPersistedErrors() {
+        activities = activities.filter { $0.value.status != .error }
+        persist()
+    }
+
     /// Get current snapshot, pruning old completed items.
     public func snapshot() -> Snapshot {
         // Prune completed items older than retention period
