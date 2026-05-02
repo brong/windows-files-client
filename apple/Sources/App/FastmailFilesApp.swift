@@ -15,8 +15,7 @@ struct FastmailFilesApp: App {
         MenuBarExtra {
             MenuBarView(appState: appState)
         } label: {
-            Image("MenuBarIcon")
-                .renderingMode(.template)
+            MenuBarIconLabel(state: appState.menuBarState)
         }
 
         Window("Fastmail Files Settings", id: "settings") {
@@ -62,6 +61,30 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
 extension Notification.Name {
     static let openSettings = Notification.Name("openSettings")
+}
+
+/// Menu bar icon that changes symbol and color based on sync state.
+struct MenuBarIconLabel: View {
+    let state: MenuBarState
+
+    var body: some View {
+        if #available(macOS 14.0, *), state.isSyncing {
+            Image(systemName: state.symbolName)
+                .symbolEffect(.variableColor.iterative, options: .repeating)
+                .foregroundStyle(iconColor)
+        } else {
+            Image(systemName: state.symbolName)
+                .foregroundStyle(iconColor)
+        }
+    }
+
+    private var iconColor: Color {
+        switch state {
+        case .pending: return .orange
+        case .error:   return .red
+        default:       return .primary
+        }
+    }
 }
 #endif
 
@@ -134,6 +157,8 @@ class AppState: ObservableObject {
     @Published var extensionStatuses: [String: ExtensionStatus] = [:]
     /// Active activities from the activity tracker — single source of truth for "currently syncing".
     @Published var activeActivities: [ActivityTracker.Activity] = []
+    /// Pending activities (queued but not yet started) — "local changes not yet uploaded".
+    @Published var pendingActivities: [ActivityTracker.Activity] = []
     /// Recently completed/failed activities for display in the activity log.
     @Published var recentActivities: [ActivityTracker.Activity] = []
 
@@ -196,14 +221,6 @@ class AppState: ObservableObject {
         extensionStatuses = newStatuses
     }
 
-    var statusIcon: String {
-        let synced = syncedAccounts
-        if !isOnline { return "icloud.slash" }
-        if synced.contains(where: { liveStatus(for: $0.accountId) == .error }) { return "exclamationmark.icloud" }
-        if synced.contains(where: { liveStatus(for: $0.accountId) == .syncing }) { return "arrow.clockwise.icloud" }
-        return "icloud"
-    }
-
     init() {
         self.defaults = UserDefaults(suiteName: Self.appGroupId)
         loadState()
@@ -237,7 +254,19 @@ class AppState: ObservableObject {
             forSecurityApplicationGroupIdentifier: Self.appGroupId) else { return }
         guard let snapshot = ActivityTracker.loadShared(containerURL: containerURL) else { return }
         activeActivities = snapshot.activities.filter { $0.status == .active }
-        recentActivities = snapshot.activities.filter { $0.status != .active }
+        pendingActivities = snapshot.activities.filter { $0.status == .pending }
+        recentActivities = snapshot.activities.filter {
+            $0.status == .completed || $0.status == .error
+        }
+    }
+
+    var menuBarState: MenuBarState {
+        MenuBarState.derive(
+            pendingCount: pendingActivities.count,
+            activeCount: activeActivities.count,
+            extensionStatuses: Array(extensionStatuses.values),
+            isOnline: isOnline
+        )
     }
 
     // MARK: - Connection Check
@@ -545,11 +574,13 @@ class AppState: ObservableObject {
             print("FileProvider domain removal failed: \(error.localizedDescription)")
         }
 
-        // Clean node cache and blob cache
+        // Clean node cache (SQLite) and blob cache
         if let containerURL = FileManager.default.containerURL(
             forSecurityApplicationGroupIdentifier: Self.appGroupId) {
-            let nodeCache = containerURL.appendingPathComponent("nodes-\(accountId).json")
-            try? FileManager.default.removeItem(at: nodeCache)
+            let nodeCacheDir = containerURL
+                .appendingPathComponent("NodeCache", isDirectory: true)
+                .appendingPathComponent(accountId, isDirectory: true)
+            try? FileManager.default.removeItem(at: nodeCacheDir)
             let blobDir = containerURL.appendingPathComponent("blobs-\(accountId)")
             try? FileManager.default.removeItem(at: blobDir)
         }
