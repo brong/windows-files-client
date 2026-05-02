@@ -34,8 +34,10 @@ public actor SyncEngine {
         }
         let home = try await client.findHomeNode(accountId: accountId)
         await database.setHomeNodeId(home.id)
+        await database.upsertFromServer(home)
         let trash = try await client.findTrashNode(accountId: accountId)
         await database.setTrashNodeId(trash?.id)
+        if let trash { await database.upsertFromServer(trash) }
         try? await database.save()
         return (home.id, trash?.id)
     }
