@@ -295,7 +295,9 @@ public actor OAuthTokenProvider: TokenProvider {
     private var clientId: String
     private var expiresAt: Date
     private let refreshMargin: TimeInterval = 60 // refresh 60s before expiry
-    private var isRefreshing = false
+    /// In-flight refresh task. Concurrent callers await this instead of starting a second refresh,
+    /// guaranteeing the use-case requirement: one refresh at a time, no token rewind.
+    private var refreshTask: Task<Void, Error>?
     private var onTokenRefreshed: (@Sendable (OAuthCredential) -> Void)?
     /// Optional callback to reload credential from keychain (e.g. after app reauthenticates).
     private var reloadCredential: (@Sendable () -> OAuthCredential?)?
@@ -337,20 +339,33 @@ public actor OAuthTokenProvider: TokenProvider {
     }
 
     /// Force a refresh (e.g., after 401).
-    /// Safe to call concurrently — only one refresh runs at a time.
+    /// Race-free: concurrent callers await the single in-flight refresh task rather
+    /// than each starting their own, guaranteeing no token rewind (use-cases.txt §OAuth).
     ///
     /// Refresh strategy (handles multiple accounts sharing the same login):
-    /// 1. Try to reload from keychain first — another process may have already refreshed.
-    /// 2. If keychain has a newer token (different from ours), use it without hitting the server.
-    /// 3. Otherwise, call the token endpoint to refresh.
-    /// 4. Persist new tokens, then update in-memory state.
-    /// 5. If refresh fails, try reloading from keychain one more time.
+    /// 1. If a refresh is already in flight, wait for it — don't start a second one.
+    /// 2. Try to reload from keychain first — another process may have already refreshed.
+    /// 3. If keychain has a newer token (different from ours), use it without hitting the server.
+    /// 4. Otherwise, call the token endpoint to refresh.
+    /// 5. Persist new tokens BEFORE updating in-memory state (no rewind on crash).
+    /// 6. If refresh fails, try reloading from keychain one more time.
     public func refresh() async throws {
-        // Prevent concurrent refresh within this process
-        guard !isRefreshing else { return }
-        isRefreshing = true
-        defer { isRefreshing = false }
+        // If a refresh is already running, join it — don't start a second one.
+        if let existing = refreshTask {
+            try await existing.value
+            return
+        }
 
+        let task = Task<Void, Error> { [weak self] in
+            guard let self else { return }
+            try await self.performRefresh()
+        }
+        refreshTask = task
+        defer { refreshTask = nil }
+        try await task.value
+    }
+
+    private func performRefresh() async throws {
         // Step 1: Check if another process already refreshed (e.g. another account
         // in the same login, or the app's Reauthenticate flow).
         if let reload = reloadCredential, let fresh = reload() {
