@@ -16,8 +16,7 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
     private let syncEngine: SyncEngine
     private let accountId: String
     private let accountName: String
-    private let homeNodeId: String
-    private let trashNodeId: String?
+    private let specialNodes: Task<SpecialNodes, Error>
     private let activityTracker: ActivityTracker?
     private let statusWriter: ExtensionStatusWriter?
 
@@ -32,8 +31,7 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
         syncEngine: SyncEngine,
         accountId: String,
         accountName: String = "",
-        homeNodeId: String,
-        trashNodeId: String?,
+        specialNodes: Task<SpecialNodes, Error>,
         activityTracker: ActivityTracker? = nil,
         statusWriter: ExtensionStatusWriter? = nil
     ) {
@@ -43,8 +41,7 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
         self.syncEngine = syncEngine
         self.accountId = accountId
         self.accountName = accountName
-        self.homeNodeId = homeNodeId
-        self.trashNodeId = trashNodeId
+        self.specialNodes = specialNodes
         self.activityTracker = activityTracker
         self.statusWriter = statusWriter
     }
@@ -120,6 +117,8 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
         for observer: NSFileProviderEnumerationObserver,
         startingAt page: NSFileProviderPage
     ) async throws {
+        let nodes = try await specialNodes.value
+
         let activityId = "enum:\(accountId):working-set"
         let label = accountName.isEmpty ? "Downloading node list" : "Downloading node list (\(accountName))"
         statusWriter?.setSyncing()
@@ -127,12 +126,12 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
             id: activityId, accountId: accountId,
             fileName: label, action: .sync)
 
-        var effectiveTrashId: String? = trashNodeId
+        var effectiveTrashId: String? = nodes.trashId
         var allNodes: [FileNode] = []
         var finalState: String = ""
 
         // BFS queue of folder IDs whose children need to be fetched.
-        var folderQueue: [String] = [homeNodeId]
+        var folderQueue: [String] = [nodes.homeId]
         var itemBatch: [FileProviderItem] = []
         let itemBatchSize = 100
         let folderBatchSize = 16  // 16 folders → 32 method calls per HTTP request
@@ -153,7 +152,7 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
 
                         if !node.isHome && !node.isRoot {
                             itemBatch.append(FileProviderItem(
-                                node: node, homeNodeId: homeNodeId, trashNodeId: effectiveTrashId))
+                                node: node, homeNodeId: nodes.homeId, trashNodeId: effectiveTrashId))
                             if itemBatch.count >= itemBatchSize {
                                 observer.didEnumerate(itemBatch)
                                 itemBatch.removeAll()
@@ -174,7 +173,7 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
             for node in allNodes {
                 await database.upsertFromServer(node)
             }
-            await database.setHomeNodeId(homeNodeId)
+            await database.setHomeNodeId(nodes.homeId)
             await database.setTrashNodeId(effectiveTrashId)
             await database.setStateToken(finalState)
             try await database.save()
@@ -194,13 +193,14 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
         for observer: NSFileProviderEnumerationObserver,
         startingAt page: NSFileProviderPage
     ) async throws {
-        let parentId = resolveParentId(containerIdentifier)
+        let nodes = try await specialNodes.value
+        let parentId = resolveParentId(containerIdentifier, nodes: nodes)
 
         // Get children from cache first
         let children = await database.children(of: parentId)
 
         let items = children.map { (id, entry) in
-            FileProviderItem(nodeId: id, entry: entry, homeNodeId: homeNodeId, trashNodeId: trashNodeId)
+            FileProviderItem(nodeId: id, entry: entry, homeNodeId: nodes.homeId, trashNodeId: nodes.trashId)
         }
 
         observer.didEnumerate(items)
@@ -225,12 +225,13 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
             fileName: label, action: .sync)
 
         do {
+            let nodes = try await specialNodes.value
             // SyncEngine.fetchChanges handles the JMAP protocol + database update.
             // The enumerator is responsible for the FileProvider observer callbacks only.
             let (updatedNodes, deletedIds) = try await syncEngine.fetchChanges()
 
             let updatedItems = updatedNodes.filter { !$0.isHome && !$0.isRoot }.map {
-                FileProviderItem(node: $0, homeNodeId: homeNodeId, trashNodeId: trashNodeId)
+                FileProviderItem(node: $0, homeNodeId: nodes.homeId, trashNodeId: nodes.trashId)
             }
             if !updatedItems.isEmpty { observer.didUpdate(updatedItems) }
 
@@ -268,10 +269,10 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
     // MARK: - Helpers
 
     /// Resolve a FileProvider item identifier to a JMAP nodeId.
-    private func resolveParentId(_ identifier: NSFileProviderItemIdentifier) -> String {
+    private func resolveParentId(_ identifier: NSFileProviderItemIdentifier, nodes: SpecialNodes) -> String {
         switch identifier {
-        case .rootContainer: return homeNodeId
-        case .trashContainer: return trashNodeId ?? homeNodeId
+        case .rootContainer: return nodes.homeId
+        case .trashContainer: return nodes.trashId ?? nodes.homeId
         default: return identifier.rawValue
         }
     }

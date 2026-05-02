@@ -5,6 +5,12 @@ import JmapClient
 import os
 #endif
 
+/// Resolved home and trash node IDs — available once the extension has contacted the server.
+struct SpecialNodes {
+    let homeId: String
+    let trashId: String?
+}
+
 /// The main FileProvider extension class.
 ///
 /// Implements `NSFileProviderReplicatedExtension` — the system calls this
@@ -16,18 +22,18 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
     NSFileProviderEnumerating, NSFileProviderThumbnailing
 {
     private let domain: NSFileProviderDomain
-    private var database: NodeDatabase!
-    private var client: JmapClient!
-    private var sessionManager: SessionManager!
-    private var pushWatcher: PushWatcher!
-    private var syncEngine: SyncEngine!
-    private var accountId: String!
-    private var accountName: String = ""
-    private var homeNodeId: String!
-    private var trashNodeId: String?
-    private var activityTracker: ActivityTracker!
-    private var statusWriter: ExtensionStatusWriter!
+    private let database: NodeDatabase
+    private let client: JmapClient
+    private let sessionManager: SessionManager
+    private let pushWatcher: PushWatcher
+    private let syncEngine: SyncEngine
+    private let accountId: String
+    private let accountName: String
+    private let activityTracker: ActivityTracker
+    private let statusWriter: ExtensionStatusWriter
     private let bandwidthPolicy = BandwidthPolicy()
+    /// Resolved once on first use; all sync methods await this before touching the server.
+    private let specialNodes: Task<SpecialNodes, Error>
     /// Set to true when the domain is being removed — prevents server-side deletes.
     private var isDomainBeingRemoved = false
 
@@ -67,107 +73,150 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
     // MARK: - Lifecycle
 
     public required init(domain: NSFileProviderDomain) {
-        self.domain = domain
-        super.init()
+        // Phase 1: initialize all stored properties before super.init().
+        // No `self` access allowed here — use local variables for everything.
 
-        // The domain identifier is the JMAP accountId
+        self.domain = domain
         self.accountId = domain.identifier.rawValue
         self.accountName = domain.displayName
-        logger.info("Extension init for account: \(domain.identifier.rawValue, privacy: .public)")
 
-        // Initialize from shared container
-        guard let containerURL = FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier: Self.appGroupId)
-        else {
-            logger.error("Failed to access App Group container")
-            return
-        }
-        logger.info("Container URL: \(containerURL.path, privacy: .public)")
+        let appGroup = Self.appGroupId
+        let acctId = domain.identifier.rawValue
+
+        // App Group container — fall back to temp dir so all `let` properties are always valid.
+        let containerURL = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: appGroup)
+        let effectiveContainerURL = containerURL ?? FileManager.default.temporaryDirectory
 
         // Load config from shared UserDefaults
-        let defaults = UserDefaults(suiteName: Self.appGroupId)
-        let sessionURLString = defaults?.string(forKey: "sessionURL-\(accountId!)")
+        let defaults = UserDefaults(suiteName: appGroup)
+        let sessionURLString = defaults?.string(forKey: "sessionURL-\(acctId)")
             ?? "https://api.fastmail.com/jmap/session"
-        guard let sessionURL = URL(string: sessionURLString) else { return }
+        let sessionURL = URL(string: sessionURLString)
+            ?? URL(string: "https://api.fastmail.com/jmap/session")!
 
         // Look up which login owns this account
-        let loginId = defaults?.string(forKey: "loginForAccount-\(accountId!)")
-        let authType = defaults?.string(forKey: "authType-\(accountId!)")
+        let loginId = defaults?.string(forKey: "loginForAccount-\(acctId)")
+        let authType = defaults?.string(forKey: "authType-\(acctId)")
         let loginKeychainService = "com.fastmail.files.login"
-        let keychainAccount = loginId ?? accountId!  // fall back to accountId for legacy
+        let keychainAccount = loginId ?? acctId
 
-        logger.info("Auth type for \(self.accountId!, privacy: .public): \(authType ?? "nil", privacy: .public)")
-        logger.info("Login ID: \(loginId ?? "nil", privacy: .public)")
-        logger.info("Session URL: \(sessionURLString, privacy: .public)")
+        let credData = FileProviderExtension.readKeychainData(
+            service: loginKeychainService, account: keychainAccount, accessGroup: appGroup)
 
         let tokenProvider: TokenProvider
-        let appGroup = Self.appGroupId
-
-        // Read login-level credential from keychain
-        let credData = Self.readKeychainData(
-            service: loginKeychainService, account: keychainAccount, accessGroup: appGroup)
-        logger.info("Keychain data for login \(keychainAccount, privacy: .public): \(credData != nil ? "\(credData!.count) bytes" : "nil", privacy: .public)")
-
-        if authType == "oauth", let credData = credData {
-            let decoder = JSONDecoder()
-            decoder.dateDecodingStrategy = .iso8601
-            if let credential = try? decoder.decode(OAuthCredential.self, from: credData) {
-                let kcService = loginKeychainService
-                let kcAccount = keychainAccount
-                tokenProvider = OAuthTokenProvider(credential: credential,
-                    onTokenRefreshed: { updated in
-                        // Persist refreshed tokens back to login-level keychain
-                        let encoder = JSONEncoder()
-                        encoder.dateEncodingStrategy = .iso8601
-                        if let data = try? encoder.encode(updated),
-                           let str = String(data: data, encoding: .utf8) {
-                            try? KeychainTokenProvider.storeToken(
-                                str, service: kcService,
-                                account: kcAccount, accessGroup: appGroup)
-                        }
-                    },
-                    reloadCredential: {
-                        // Reload from keychain — another process or app may have refreshed
-                        guard let data = FileProviderExtension.readKeychainData(
-                            service: kcService, account: kcAccount, accessGroup: appGroup)
-                        else { return nil }
-                        let decoder = JSONDecoder()
-                        decoder.dateDecodingStrategy = .iso8601
-                        return try? decoder.decode(OAuthCredential.self, from: data)
+        if authType == "oauth", let credData = credData,
+           let credential = {
+               let d = JSONDecoder(); d.dateDecodingStrategy = .iso8601
+               return try? d.decode(OAuthCredential.self, from: credData)
+           }()
+        {
+            let kcService = loginKeychainService
+            let kcAccount = keychainAccount
+            tokenProvider = OAuthTokenProvider(credential: credential,
+                onTokenRefreshed: { updated in
+                    let encoder = JSONEncoder()
+                    encoder.dateEncodingStrategy = .iso8601
+                    if let data = try? encoder.encode(updated),
+                       let str = String(data: data, encoding: .utf8) {
+                        try? KeychainTokenProvider.storeToken(
+                            str, service: kcService,
+                            account: kcAccount, accessGroup: appGroup)
                     }
-                )
-            } else {
-                logger.error("Failed to decode OAuth credential for \(keychainAccount, privacy: .public)")
-                tokenProvider = KeychainTokenProvider(
-                    service: loginKeychainService, account: keychainAccount, accessGroup: appGroup)
-            }
+                },
+                reloadCredential: {
+                    guard let data = FileProviderExtension.readKeychainData(
+                        service: kcService, account: kcAccount, accessGroup: appGroup)
+                    else { return nil }
+                    let d = JSONDecoder(); d.dateDecodingStrategy = .iso8601
+                    return try? d.decode(OAuthCredential.self, from: data)
+                }
+            )
         } else {
             tokenProvider = KeychainTokenProvider(
                 service: loginKeychainService, account: keychainAccount, accessGroup: appGroup)
         }
 
-        // Initialize components — with traffic logging to shared container
-        let logFile = containerURL.appendingPathComponent("jmap-traffic.log")
-        self.sessionManager = SessionManager(sessionURL: sessionURL, tokenProvider: tokenProvider)
-        self.client = JmapClient(sessionManager: sessionManager, tokenProvider: tokenProvider,
-                                  requestWillSend: { url, body in
-            TrafficLog.shared.log("→ POST \(url.absoluteString)\n\(TrafficLog.formatBody(body))")
-        }, responseDidReceive: { url, status, body in
-            TrafficLog.shared.log("← \(status) \(url.absoluteString)\n\(TrafficLog.formatBody(body))")
-        })
-        self.database = NodeDatabase(containerURL: containerURL, accountId: accountId)
-        self.activityTracker = ActivityTracker(containerURL: containerURL)
-        self.statusWriter = ExtensionStatusWriter(containerURL: containerURL, accountId: accountId)
-        self.syncEngine = SyncEngine(client: client, database: database, accountId: accountId)
+        // Build all infrastructure synchronously (no self needed).
+        let _sessionManager = SessionManager(sessionURL: sessionURL, tokenProvider: tokenProvider)
+        let _client = JmapClient(
+            sessionManager: _sessionManager, tokenProvider: tokenProvider,
+            requestWillSend: { url, body in
+                TrafficLog.shared.log("→ POST \(url.absoluteString)\n\(TrafficLog.formatBody(body))")
+            }, responseDidReceive: { url, status, body in
+                TrafficLog.shared.log("← \(status) \(url.absoluteString)\n\(TrafficLog.formatBody(body))")
+            })
+        let _database = NodeDatabase(containerURL: effectiveContainerURL, accountId: acctId)
+        let _activityTracker = ActivityTracker(containerURL: effectiveContainerURL)
+        let _statusWriter = ExtensionStatusWriter(containerURL: effectiveContainerURL, accountId: acctId)
+        let _syncEngine = SyncEngine(client: _client, database: _database, accountId: acctId)
+        let _pushWatcher = PushWatcher(
+            sessionManager: _sessionManager, tokenProvider: tokenProvider, accountId: acctId)
 
-        // Set up push watcher
-        self.pushWatcher = PushWatcher(sessionManager: sessionManager, tokenProvider: tokenProvider, accountId: accountId)
+        // Assign stored properties.
+        self.sessionManager = _sessionManager
+        self.client = _client
+        self.database = _database
+        self.activityTracker = _activityTracker
+        self.statusWriter = _statusWriter
+        self.syncEngine = _syncEngine
+        self.pushWatcher = _pushWatcher
 
-        statusWriter.setState(.initializing)
+        _statusWriter.setState(.initializing)
+
+        // specialNodes is the single async init barrier.
+        // All sync methods await this; the result is cached so the network
+        // round-trip only happens once regardless of concurrency.
+        if containerURL == nil {
+            // Misconfigured entitlements — extension cannot function.
+            self.specialNodes = Task { throw JmapError.serverError("container", "App Group container unavailable") }
+        } else {
+            self.specialNodes = Task {
+                // Warm start: home node already known from previous session.
+                if let homeId = await _database.homeNodeId {
+                    return SpecialNodes(homeId: homeId, trashId: await _database.trashNodeId)
+                }
+                // Cold start: resolve via JMAP session.
+                _statusWriter.setSyncing()
+                let actId = "init:\(acctId):session"
+                await _activityTracker.start(
+                    id: actId, accountId: acctId,
+                    fileName: "Reading session data", action: .sync)
+                do {
+                    let (homeId, trashId) = try await _syncEngine.resolveSpecialNodes()
+                    await _database.setHomeNodeId(homeId)
+                    await _database.setTrashNodeId(trashId)
+                    try await _database.save()
+                    await _activityTracker.complete(id: actId)
+                    _statusWriter.setIdle()
+                    return SpecialNodes(homeId: homeId, trashId: trashId)
+                } catch let err as JmapError {
+                    await _activityTracker.fail(id: actId, error: err.localizedDescription)
+                    switch err {
+                    case .unauthorized, .forbidden:
+                        _statusWriter.setError("Authentication failed")
+                    default:
+                        _statusWriter.setError(err.localizedDescription ?? "Unknown error")
+                    }
+                    throw err
+                } catch {
+                    await _activityTracker.fail(id: actId, error: error.localizedDescription)
+                    _statusWriter.setState(.offline)
+                    throw error
+                }
+            }
+        }
+
+        super.init()
+
+        // Phase 2: background startup (may reference self).
+        #if canImport(os)
+        logger.info("Extension init for account: \(acctId, privacy: .public)")
+        logger.info("Container URL: \(effectiveContainerURL.path, privacy: .public)")
+        #endif
         Task {
             await bandwidthPolicy.start()
-            await initializeFromDatabase()
-            statusWriter.setIdle()
+            _ = try? await specialNodes.value  // errors handled inside the task above
             await startPushWatcher()
         }
     }
@@ -192,7 +241,8 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
     ) -> Progress {
         Task {
             do {
-                let item = try await lookupItem(identifier)
+                let nodes = try await specialNodes.value
+                let item = try await lookupItem(identifier, nodes: nodes)
                 completionHandler(item, nil)
             } catch {
                 completionHandler(nil, mapError(error))
@@ -213,6 +263,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
 
         Task {
             do {
+                let nodes = try await specialNodes.value
                 let nodeId = itemIdentifier.rawValue
                 guard let entry = await database.entry(for: nodeId) else {
                     throw JmapError.notFound(nodeId)
@@ -241,7 +292,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                     throw JmapError.invalidResponse
                 }
 
-                let activityId = "dl:\(accountId!):\(nodeId)"
+                let activityId = "dl:\(accountId):\(nodeId)"
                 await activityTracker.start(
                     id: activityId, accountId: accountId, fileName: entry.name,
                     action: .download, fileSize: entry.size)
@@ -268,10 +319,10 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
 
                 let item = FileProviderItem(
                     nodeId: nodeId, entry: entry,
-                    homeNodeId: homeNodeId, trashNodeId: trashNodeId)
+                    homeNodeId: nodes.homeId, trashNodeId: nodes.trashId)
                 completionHandler(tempURL, item, nil)
             } catch {
-                let activityId = "dl:\(accountId!):\(itemIdentifier.rawValue)"
+                let activityId = "dl:\(accountId):\(itemIdentifier.rawValue)"
                 await activityTracker.fail(id: activityId, error: error.localizedDescription)
                 completionHandler(nil, nil, mapError(error))
             }
@@ -298,7 +349,8 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
 
         Task {
             do {
-                let parentId = resolveNodeId(itemTemplate.parentItemIdentifier)
+                let nodes = try await specialNodes.value
+                let parentId = resolveNodeId(itemTemplate.parentItemIdentifier, nodes: nodes)
 
                 if itemTemplate.contentType == .folder {
                     // Create folder
@@ -323,7 +375,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
 
                     let item = FileProviderItem(
                         nodeId: node.id, entry: entry,
-                        homeNodeId: homeNodeId, trashNodeId: trashNodeId)
+                        homeNodeId: nodes.homeId, trashNodeId: nodes.trashId)
                     completionHandler(item, [], false, nil)
                 } else {
                     // Create file — upload blob then create node
@@ -339,7 +391,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                         throw JmapError.rateLimited  // defer until better connection
                     }
 
-                    let activityId = "ul:\(accountId!):\(fileName)"
+                    let activityId = "ul:\(accountId):\(fileName)"
                     await activityTracker.start(
                         id: activityId, accountId: accountId, fileName: fileName,
                         action: .upload, fileSize: fileSize)
@@ -391,12 +443,12 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
 
                     let item = FileProviderItem(
                         nodeId: node.id, entry: entry,
-                        homeNodeId: homeNodeId, trashNodeId: trashNodeId)
+                        homeNodeId: nodes.homeId, trashNodeId: nodes.trashId)
                     completionHandler(item, [], false, nil)
                 }
             } catch {
                 // Mark any in-flight upload as failed
-                let failId = "ul:\(accountId!):\(desanitizeFilename(itemTemplate.filename))"
+                let failId = "ul:\(accountId):\(desanitizeFilename(itemTemplate.filename))"
                 await activityTracker.fail(id: failId, error: error.localizedDescription)
                 completionHandler(nil, [], false, mapError(error))
             }
@@ -420,13 +472,13 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
 
         Task {
             do {
+                let nodes = try await specialNodes.value
                 let nodeId = item.itemIdentifier.rawValue
                 var currentNodeId = nodeId
 
                 // Handle content change — v10: update blobId directly (node ID stays the same)
                 if changedFields.contains(.contents), let contentURL = newContents {
                     let contentType = item.contentType?.preferredMIMEType ?? "application/octet-stream"
-                    let parentId = resolveNodeId(item.parentItemIdentifier)
                     let fileName = desanitizeFilename(item.filename)
                     let fileSize = (try? FileManager.default.attributesOfItem(
                         atPath: contentURL.path)[.size] as? Int) ?? 0
@@ -435,7 +487,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                         throw JmapError.rateLimited  // defer until better connection
                     }
 
-                    let activityId = "ul:\(accountId!):\(fileName)"
+                    let activityId = "ul:\(accountId):\(fileName)"
                     await activityTracker.start(
                         id: activityId, accountId: accountId, fileName: fileName,
                         action: .upload, fileSize: fileSize)
@@ -463,7 +515,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                     progress.completedUnitCount = 80
 
                     // Update database with new blob info (node ID unchanged)
-                    if var entry = await database.entry(for: nodeId) {
+                    if let entry = await database.entry(for: nodeId) {
                         let updatedEntry = NodeCacheEntry(
                             parentId: entry.parentId,
                             name: entry.name,
@@ -492,9 +544,9 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
 
                 // Handle move (parent change)
                 if changedFields.contains(.parentItemIdentifier) {
-                    let newParentId = resolveNodeId(item.parentItemIdentifier)
+                    let newParentId = resolveNodeId(item.parentItemIdentifier, nodes: nodes)
 
-                    if newParentId == trashNodeId {
+                    if newParentId == nodes.trashId {
                         // Move to trash
                         try await client.updateNode(
                             accountId: accountId,
@@ -523,7 +575,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                 }
                 let resultItem = FileProviderItem(
                     nodeId: currentNodeId, entry: entry,
-                    homeNodeId: homeNodeId, trashNodeId: trashNodeId)
+                    homeNodeId: nodes.homeId, trashNodeId: nodes.trashId)
                 completionHandler(resultItem, [], false, nil)
             } catch {
                 completionHandler(nil, [], false, mapError(error))
@@ -552,9 +604,10 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                     return
                 }
 
+                let nodes = try await specialNodes.value
                 let nodeId = identifier.rawValue
 
-                if let trashId = trashNodeId {
+                if let trashId = nodes.trashId {
                     // Move to trash (preferred)
                     do {
                         try await client.updateNode(
@@ -593,17 +646,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
         for containerItemIdentifier: NSFileProviderItemIdentifier,
         request: NSFileProviderRequest
     ) throws -> NSFileProviderEnumerator {
-        guard database != nil else {
-            throw NSFileProviderError(.notAuthenticated)
-        }
-        // homeNodeId is resolved asynchronously during init. If the system
-        // requests an enumerator before it's ready, return serverUnreachable
-        // so it retries. initializeFromDatabase() signals the working set
-        // enumerator once the home node is known.
-        guard let homeNodeId else {
-            throw NSFileProviderError(.serverUnreachable)
-        }
-
+        // specialNodes is awaited inside the enumerator — no need to block here.
         return FileProviderEnumerator(
             container: containerItemIdentifier,
             database: database,
@@ -611,8 +654,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
             syncEngine: syncEngine,
             accountId: accountId,
             accountName: accountName,
-            homeNodeId: homeNodeId,
-            trashNodeId: trashNodeId,
+            specialNodes: specialNodes,
             activityTracker: activityTracker,
             statusWriter: statusWriter
         )
@@ -691,48 +733,6 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
 
     // MARK: - Private Helpers
 
-    private func initializeFromDatabase() async {
-        homeNodeId = await database.homeNodeId
-        trashNodeId = await database.trashNodeId
-
-        // Always signal: enumerator() throws .serverUnreachable while homeNodeId is nil,
-        // so whether we got it from cache or the network, the system needs to retry.
-        defer {
-            NSFileProviderManager(for: domain)?.signalEnumerator(for: .workingSet) { _ in }
-        }
-
-        guard homeNodeId == nil else { return }
-
-        statusWriter.setSyncing()
-        let activityId = "init:\(accountId!):session"
-        await activityTracker.start(
-            id: activityId, accountId: accountId,
-            fileName: "Reading session data", action: .sync)
-        do {
-            let (homeId, trashId) = try await syncEngine.resolveSpecialNodes()
-            homeNodeId = homeId
-            trashNodeId = trashId
-            await activityTracker.complete(id: activityId)
-        } catch let error as JmapError {
-            await activityTracker.fail(id: activityId, error: error.localizedDescription)
-            switch error {
-            case .unauthorized, .forbidden:
-                statusWriter.setError("Authentication failed")
-            default:
-                statusWriter.setError(error.localizedDescription ?? "Unknown error")
-            }
-            #if canImport(os)
-            logger.error("Failed to discover home/trash nodes: \(error.localizedDescription)")
-            #endif
-        } catch {
-            await activityTracker.fail(id: activityId, error: error.localizedDescription)
-            statusWriter.setState(.offline)
-            #if canImport(os)
-            logger.error("Failed to discover home/trash nodes: \(error.localizedDescription)")
-            #endif
-        }
-    }
-
     private func startPushWatcher() async {
         // Set up push delegate to signal working set enumerator
         // The PushWatcher needs a delegate — we'll use a bridge object
@@ -740,22 +740,22 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
     }
 
     /// Resolve a FileProvider item identifier to a JMAP nodeId.
-    private func resolveNodeId(_ identifier: NSFileProviderItemIdentifier) -> String {
+    private func resolveNodeId(_ identifier: NSFileProviderItemIdentifier, nodes: SpecialNodes) -> String {
         switch identifier {
-        case .rootContainer: return homeNodeId ?? ""
-        case .trashContainer: return trashNodeId ?? homeNodeId ?? ""
+        case .rootContainer: return nodes.homeId
+        case .trashContainer: return nodes.trashId ?? nodes.homeId
         default: return identifier.rawValue
         }
     }
 
     /// Look up an item by identifier from the database.
-    private func lookupItem(_ identifier: NSFileProviderItemIdentifier) async throws -> FileProviderItem {
+    private func lookupItem(_ identifier: NSFileProviderItemIdentifier, nodes: SpecialNodes) async throws -> FileProviderItem {
         let nodeId: String
         switch identifier {
         case .rootContainer:
-            nodeId = homeNodeId ?? ""
+            nodeId = nodes.homeId
         case .trashContainer:
-            nodeId = trashNodeId ?? homeNodeId ?? ""
+            nodeId = nodes.trashId ?? nodes.homeId
         default:
             nodeId = identifier.rawValue
         }
@@ -766,7 +766,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
 
         return FileProviderItem(
             nodeId: nodeId, entry: entry,
-            homeNodeId: homeNodeId ?? "", trashNodeId: trashNodeId)
+            homeNodeId: nodes.homeId, trashNodeId: nodes.trashId)
     }
 
     /// Reverse filename sanitization (restore original characters for server).
