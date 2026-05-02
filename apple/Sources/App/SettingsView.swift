@@ -333,6 +333,7 @@ struct DiscoveredAccount: Identifiable {
 
 struct AddAccountView: View {
     @ObservedObject var appState: AppState
+    @State private var email = ""
     @State private var showAdvanced = false
     @State private var sessionURL = "https://api.fastmail.com/jmap/session"
     @State private var token = ""
@@ -367,7 +368,14 @@ struct AddAccountView: View {
                 .font(.title2)
                 .bold()
 
-            VStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 8) {
+                TextField("Email address", text: $email)
+                    .textFieldStyle(.roundedBorder)
+                    .textContentType(.emailAddress)
+                    #if os(macOS)
+                    .onSubmit { Task { await oauthLogin() } }
+                    #endif
+
                 Button(action: { Task { await oauthLogin() } }) {
                     HStack {
                         if isLoading && !showAdvanced {
@@ -376,13 +384,13 @@ struct AddAccountView: View {
                                 .padding(.trailing, 4)
                         }
                         Image(systemName: "person.badge.key")
-                        Text("Sign in with Fastmail")
+                        Text("Continue with OAuth")
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 8)
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(isLoading)
+                .disabled(isLoading || email.isEmpty)
 
                 if let status = statusMessage {
                     Text(status)
@@ -477,10 +485,10 @@ struct AddAccountView: View {
     private func oauthLogin() async {
         isLoading = true
         errorMessage = nil
-        statusMessage = "Discovering OAuth endpoints..."
+        statusMessage = "Discovering OAuth endpoints…"
 
         do {
-            let (sessionUrl, metadata) = try await oauthDiscover()
+            let (sessionUrl, metadata) = try await PaccDiscovery.discover(email: email)
 
             let port = UInt16.random(in: 49152...65000)
             let redirectURI = "http://127.0.0.1:\(port)/callback"
