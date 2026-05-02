@@ -10,17 +10,18 @@ struct MenuBarView: View {
     var body: some View {
         let state = appState.menuBarState
 
-        // Status header — always visible
-        VStack(alignment: .leading, spacing: 2) {
-            HStack(spacing: 6) {
-                Image(systemName: state.symbolName)
-                    .foregroundColor(headerIconColor(for: state))
-                Text(state.statusText)
-                    .font(.callout)
-                    .fontWeight(.medium)
-            }
+        // Status header — always visible, non-interactive
+        HStack(spacing: 6) {
+            Image(systemName: state.symbolName)
+                .foregroundColor(headerIconColor(for: state))
+                .imageScale(.medium)
+            Text(state.statusText)
+                .font(.callout)
+                .fontWeight(.medium)
+            Spacer()
         }
-        .padding(.vertical, 4)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
 
         Divider()
 
