@@ -124,6 +124,12 @@ public actor ActivityTracker {
         return try? decoder.decode(Snapshot.self, from: data)
     }
 
+    /// Force an immediate write to the shared file, bypassing the throttle.
+    /// Use before reading the file from another process or in tests.
+    public func flush() {
+        persist()
+    }
+
     // MARK: - Persistence & Notification
 
     /// Darwin notification name for cross-process activity updates.

@@ -63,7 +63,11 @@ public actor NodeDatabase {
             .appendingPathComponent(accountId, isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let dbURL = dir.appendingPathComponent("nodecache.sqlite")
-        let pool = try DatabasePool(path: dbURL.path)
+        // Allow up to 5 seconds of retries when the app and extension contend for
+        // the WAL write lock. Without this, concurrent writes silently fail.
+        var config = Configuration()
+        config.busyMode = .timeout(5)
+        let pool = try DatabasePool(path: dbURL.path, configuration: config)
         var migrator = DatabaseMigrator()
         registerMigrations(in: &migrator)
         try migrator.migrate(pool)

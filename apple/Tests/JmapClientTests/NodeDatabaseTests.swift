@@ -219,6 +219,39 @@ import Testing
     #expect(await db.homeNodeId == nil)
 }
 
+// MARK: - Concurrent write safety
+
+/// Two actors writing to the same SQLite file simultaneously must not corrupt data.
+/// This is the primary correctness guarantee of the GRDB/WAL migration.
+@Test func testConcurrentWritesDontCorrupt() async throws {
+    let tempDir = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    // Simulate app + extension opening the same database simultaneously
+    let db1 = NodeDatabase(containerURL: tempDir, accountId: "shared")
+    let db2 = NodeDatabase(containerURL: tempDir, accountId: "shared")
+
+    // Fire 50 concurrent upserts across both instances
+    await withTaskGroup(of: Void.self) { group in
+        for i in 0..<25 {
+            group.addTask {
+                await db1.upsert(nodeId: "N\(i)", entry: NodeCacheEntry(
+                    parentId: "P", name: "file\(i).txt", isFolder: false))
+            }
+            group.addTask {
+                await db2.upsert(nodeId: "N\(i + 25)", entry: NodeCacheEntry(
+                    parentId: "P", name: "file\(i + 25).txt", isFolder: false))
+            }
+        }
+    }
+
+    // All 50 nodes must be readable; no rows silently lost to write contention
+    let db3 = NodeDatabase(containerURL: tempDir, accountId: "shared")
+    #expect(await db3.count == 50)
+}
+
 // MARK: - Helpers
 
 private func makeDatabase() -> NodeDatabase {

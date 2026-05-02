@@ -50,7 +50,8 @@ private func makeTmpDB() throws -> (NodeDatabase, URL) {
     return (NodeDatabase(containerURL: tmp, accountId: "u123"), tmp)
 }
 
-@Suite(.serialized) struct SyncEngineTests {
+extension NetworkTests {
+@Suite struct SyncEngineTests {
 
     // MARK: - resolveSpecialNodes
 
@@ -179,4 +180,5 @@ private func makeTmpDB() throws -> (NodeDatabase, URL) {
             // expected
         }
     }
+}
 }
