@@ -225,6 +225,9 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
             await bandwidthPolicy.start()
             _ = try? await specialNodes.value  // errors handled inside the task above
             await startPushWatcher()
+            // Tell the system we're ready so it calls enumerateItems immediately,
+            // rather than waiting for its own (potentially serialised) schedule.
+            NSFileProviderManager(for: domain)?.signalEnumerator(for: .workingSet) { _ in }
         }
     }
 
