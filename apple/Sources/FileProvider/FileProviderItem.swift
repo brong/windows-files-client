@@ -104,6 +104,12 @@ public final class FileProviderItem: NSObject, NSFileProviderItem {
         entry.isFolder ? nil : NSNumber(value: entry.size)
     }
 
+    /// Files are eligible for eviction (Finder shows "Remove Download" on downloaded files).
+    /// Folders use the same policy so their subtree can be evicted recursively.
+    public var contentPolicy: NSFileProviderItemContentPolicy {
+        .downloadEligibleForEncryptedStorage
+    }
+
     public var creationDate: Date? {
         // We don't store creation date in the cache currently.
         // Could be added if needed.

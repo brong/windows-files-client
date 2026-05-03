@@ -479,6 +479,15 @@ class AppState: ObservableObject {
         saveState()
     }
 
+    /// Evict all downloaded file content for an account without touching sync state.
+    /// The extension will re-download files on demand when opened.
+    /// Use this to free up disk space without losing the file list or re-syncing metadata.
+    func evictDownloadedFiles(accountId: String) {
+        let domain = NSFileProviderDomain(
+            identifier: NSFileProviderDomainIdentifier(rawValue: accountId), displayName: "")
+        NSFileProviderManager(for: domain)?.evictItem(identifier: .rootContainer) { _ in }
+    }
+
     func cleanAccount(loginId: String, accountId: String) async {
         guard let loginIdx = logins.firstIndex(where: { $0.loginId == loginId }),
               let acctIdx = logins[loginIdx].accounts.firstIndex(where: { $0.accountId == accountId }),

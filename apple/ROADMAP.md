@@ -18,7 +18,7 @@ Tracks progress against the requirements in `../use-cases.txt`. Status key:
 | Navigate files in Finder | Done | BUG-005 fixed: stale state token reset via DB API on domain re-add |
 | Open a file (download on demand) | Done | |
 | Select files/folders to stay hydrated | Todo | NSFileProviderItem `keepDownloaded` not wired up |
-| Dehydrate files to free space | Partial | Full-account eviction via "Reset Cache"; no per-file eviction UI |
+| Dehydrate files to free space | Done | `contentPolicy: .downloadEligibleForEncryptedStorage` enables Finder's per-file "Remove Download"; "Free Up Space" button in Settings evicts all downloaded content without resetting sync state |
 | Remove one account without removing login | Done | |
 | Remove entire login (removes all accounts + credentials) | Done | |
 | See server changes immediately (online) | Done | SSE push + enumerateChanges |
@@ -85,10 +85,8 @@ Tracks progress against the requirements in `../use-cases.txt`. Status key:
 ## Remaining work (priority order)
 
 1. **Sparkle package** — add Sparkle SPM dependency + `SUFeedURL`/`SUPublicEDKey` in Info.plist to fully activate auto-updates (wiring is done)
-2. **Per-file dehydration UI** — expose `evictItem` on individual files, not just full-account reset
-3. **Diagnostics bundle** — capture os_log entries + traffic log into a ZIP for support
-4. **PACC full RFC discovery** — remove Fastmail-hardcoded fallback; discover any server
-5. **`keepDownloaded` pin** — let user mark files/folders to always stay hydrated
-6. **Case-insensitive collision handling** — detect and handle name conflicts on case-insensitive volumes
-7. **Distribution pipeline** — DMG / notarised package + appcast for Sparkle
-8. **Uninstall cleanup** — script or helper to remove FileProvider domains + app group data
+2. **Diagnostics bundle** — capture os_log entries + traffic log into a ZIP for support
+3. **PACC full RFC discovery** — remove Fastmail-hardcoded fallback; discover any server
+4. **`keepDownloaded` pin** — let user mark files/folders to always stay hydrated
+5. **Distribution pipeline** — DMG / notarised package + appcast for Sparkle
+6. **Uninstall cleanup** — script or helper to remove FileProvider domains + app group data

@@ -9,12 +9,14 @@ private enum ConfirmAction: Identifiable {
     case removeLogin(String)
     case removeAccount(String, String)
     case cleanAccount(String, String)
+    case evictFiles(String)
 
     var id: String {
         switch self {
         case .removeLogin(let id): return "removeLogin:\(id)"
         case .removeAccount(let l, let a): return "removeAccount:\(l):\(a)"
         case .cleanAccount(let l, let a): return "cleanAccount:\(l):\(a)"
+        case .evictFiles(let a): return "evictFiles:\(a)"
         }
     }
 
@@ -23,6 +25,7 @@ private enum ConfirmAction: Identifiable {
         case .removeLogin: return "Remove Login?"
         case .removeAccount: return "Remove Account?"
         case .cleanAccount: return "Reset Cache?"
+        case .evictFiles: return "Free Up Space?"
         }
     }
 
@@ -31,6 +34,7 @@ private enum ConfirmAction: Identifiable {
         case .removeLogin: return "This will sign you out and remove all accounts for this login. No server data will be deleted."
         case .removeAccount: return "This account will be removed from sync. No server data will be deleted. You can re-add it from the login later."
         case .cleanAccount: return "This will delete the local metadata cache and re-download it from the server. No server data will be deleted."
+        case .evictFiles: return "Downloaded file content will be removed from this device. Files will be re-downloaded on demand. No server data will be deleted."
         }
     }
 
@@ -39,6 +43,7 @@ private enum ConfirmAction: Identifiable {
         case .removeLogin: return "Remove Login"
         case .removeAccount: return "Remove Account"
         case .cleanAccount: return "Reset Cache"
+        case .evictFiles: return "Free Up Space"
         }
     }
 }
@@ -152,6 +157,8 @@ struct SettingsView: View {
                             await appState.removeAccount(loginId: loginId, accountId: accountId)
                         case .cleanAccount(let loginId, let accountId):
                             await appState.cleanAccount(loginId: loginId, accountId: accountId)
+                        case .evictFiles(let accountId):
+                            appState.evictDownloadedFiles(accountId: accountId)
                         }
                     }
                 },
@@ -308,6 +315,11 @@ struct SettingsView: View {
 
                 Button("Sync") {
                     appState.syncNow(account.accountId)
+                }
+                .font(.caption)
+
+                Button("Free Up Space") {
+                    confirmAction = .evictFiles(account.accountId)
                 }
                 .font(.caption)
 
