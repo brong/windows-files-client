@@ -1,0 +1,93 @@
+# Fastmail Files — Bug Log
+
+Running record of bugs found, root causes, and fixes. Goal: never repeat the same mistake.
+
+Status: **Open** | **Fixed** | **Mitigated** (workaround in place, root cause not fully resolved)
+
+---
+
+## BUG-001 — Stale build artifact causes "undefined symbol" linker error
+**Status:** Fixed (workaround: ⇧⌘K Clean Build Folder)
+**Symptom:** Xcode reports `Undefined symbol: JmapClient.SessionManager.__allocating_init(...)` after editing Swift Package sources outside Xcode.
+**Root cause:** Xcode's incremental build cache holds compiled `.o` files for the SPM package. When source files are modified by an external editor, Xcode sometimes doesn't detect the change and links the extension against the stale library.
+**Fix:** No code change needed — this is an Xcode bug. Clean Build Folder before reporting as a real error.
+**Lesson:** When you see "undefined symbol" for a function that clearly exists in source, try Clean Build Folder before investigating further.
+
+---
+
+## BUG-002 — os_log messages appear as `<private>` in Console
+**Status:** Fixed (commit a61d38e / 85240fb)
+**Symptom:** Log entries show `<private>` instead of account IDs and error messages, making log analysis useless.
+**Root cause:** Swift string interpolation inside `Logger.info()` captures values as `@autoclosure`, which marks them private by default. Must explicitly add `privacy: .public`.
+**Fix:** Add `, privacy: .public` to every interpolated value in logger calls.
+**Lesson:** All logging of identifiers and error messages needs explicit `privacy: .public`. Default is private. Never log without checking this.
+
+---
+
+## BUG-003 — `await` illegal inside `&&` operator (Swift 6 concurrency)
+**Status:** Fixed (commit a932484)
+**Symptom:** Swift 6 compiler error: "'await' in an autoclosure that does not support concurrency" on lines like `if children.isEmpty && (await db.stateToken ?? "").isEmpty`.
+**Root cause:** The `&&` operator's right-hand side is `@autoclosure`, which doesn't support concurrency. Same applies to any short-circuit operator and string interpolation in logger calls.
+**Fix:** Hoist the `await` expression into a `let` binding before the `if` condition.
+**Lesson:** Never write `await` inside `&&`, `||`, or logger string interpolation. Always hoist to a `let` first.
+
+---
+
+## BUG-004 — Session document re-fetched on every extension process launch
+**Status:** Fixed (commit 0818aa2)
+**Symptom:** Every time the FileProvider extension wakes up (which can be every 10–30 seconds), it makes an HTTP round-trip to fetch the JMAP session document, even though the document rarely changes.
+**Root cause:** `SessionManager` only had an in-memory cache. Extension processes are short-lived; the cache was lost on every kill/restart.
+**Fix:** Added disk cache (`session-{accountId}.json` in shared container). Three-tier lookup: in-memory → disk → network. Session state invalidated when server's `sessionState` header differs from cached session's `state` field.
+**Lesson:** Extension processes are transient. Any "once per session" work must be persisted to disk, not just held in memory.
+
+---
+
+## BUG-005 — Finder empty after account remove + re-add
+**Status:** Open (partially mitigated in commit b2d5cc8)
+**Symptom:** After removing an account and re-adding it, Finder shows the domain in the sidebar but no files/folders appear, despite the extension reporting "Up to date".
+**Root cause (confirmed partial):** Three contributing issues:
+  1. `currentSyncAnchor` returned a non-nil anchor for empty-string state tokens (`"".data(using:)` is non-nil `Data()`), so the system called `enumerateChanges` instead of `enumerateItems`.
+  2. `performChangeEnumeration` returned "no changes" when the DB was empty (fetchChanges returns `([], [])` with no state token), tricking the system into thinking it was up-to-date with an empty cache.
+  3. `removeDomain` was not deleting `session-{accountId}.json`.
+**Root cause (suspected, not confirmed):** Even after the above fixes, the system may call `enumerateChanges` before `enumerateItems` because it retains a cached anchor from the previous domain registration. Calling `NSFileProviderManager.signalEnumerator(for: .workingSet)` after `add(domain)` may force `enumerateItems`.
+**Fix applied:** `currentSyncAnchor` now treats `""` same as nil. `performChangeEnumeration` returns `syncAnchorExpired` when DB has no state token. `session-{accountId}.json` now deleted on remove.
+**Remaining work:** Confirm signal approach or find root cause via info-level logging during a fresh remove/re-add cycle.
+**Lesson:** FileProvider state lives in two places: our SQLite DB and the system's own metadata cache. After removing a domain, the system's cache is cleared but ours persists. If we return a valid anchor, the system skips `enumerateItems` and Finder stays empty. Always clear the state token (or the whole DB) before removing a domain.
+
+---
+
+## BUG-006 — Status view shows `nodeCount: 0` after successful enumeration
+**Status:** Open
+**Symptom:** The account status shows "0 files" even after `enumerateWorkingSet` successfully fetches nodes.
+**Root cause:** `setIdle()` (no count argument) is called by `performChangeEnumeration` after every `enumerateChanges` call. Although it's designed to preserve the existing count, the initial count is 0, so if `setIdle(nodeCount: N)` from `enumerateWorkingSet` and `setIdle()` from `performChangeEnumeration` race, the last writer wins. Additionally, `enumerateWorkingSet`'s allNodes count excludes the home node, meaning a single-node account shows `nodeCount: 0`.
+**Remaining work:** Use a dedicated "last full enumeration count" field in status, not overwritten by incremental change calls.
+**Lesson:** Don't share the same status field for counts from two different code paths with different semantics.
+
+---
+
+## BUG-007 — No retry cap on syncAnchorExpired path (potential DoS loop)
+**Status:** Open
+**Symptom:** If `enumerateWorkingSet` repeatedly fails or writes an empty state token to the DB, the system calls `enumerateItems` again immediately, which hits the JMAP server again, with no backoff or cap.
+**Root cause:** `performChangeEnumeration` returns `syncAnchorExpired` when the DB has no state token. This is correct for the first call after a fresh domain registration. But if `enumerateWorkingSet` itself then fails to persist a state token (e.g., `getChildrenBatched` returns no state string), the cycle repeats indefinitely.
+**Violates:** use-cases.txt: "Not have the client go into an infinite loop (which causes denial of service) if something is broken, either in client OR server."
+**Remaining work:** Add a consecutive-failure counter with exponential backoff on the `syncAnchorExpired` → `enumerateWorkingSet` path. After N failures, transition to an error state and notify the user.
+**Lesson:** Every error recovery path that triggers a network call needs a retry cap and backoff. "It should succeed next time" is not a loop-safety argument.
+
+---
+
+## BUG-008 — `removeLogin` skipped cleanup for non-synced accounts
+**Status:** Fixed (commit b2d5cc8)
+**Symptom:** If an account was added to a login but never enabled for sync (`isSynced = false`), removing the login left that account's database, session cache, and status files behind in the shared container.
+**Root cause:** `removeLogin` iterated `login.accounts where acct.isSynced`, skipping non-synced accounts entirely.
+**Fix:** Added `purgeAccountFiles(accountId:)` helper called for non-synced accounts in `removeLogin`. This deletes all per-account files without touching the FileProvider domain (which was never registered).
+**Lesson:** Cleanup must cover all accounts in a login, not just the ones currently syncing. "Didn't sync it" doesn't mean "didn't create any files".
+
+---
+
+## Recurring mistakes to watch for
+
+- **`privacy: .public` omitted** — every interpolated value in a logger call needs it
+- **`await` inside `&&`/`||`** — always hoist to `let` first
+- **Extension process is transient** — never rely on in-memory state surviving between requests; persist to disk
+- **Two caches, one truth** — our DB and the system's FileProvider metadata cache can diverge; state token changes must keep both in sync
+- **Retry paths need backoff** — any error handler that triggers a network call needs a cap
