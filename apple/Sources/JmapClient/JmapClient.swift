@@ -241,6 +241,9 @@ public actor JmapClient {
     ) async throws -> (childrenByParent: [String: [FileNode]], state: String) {
         guard !parentIds.isEmpty else { return ([:], "") }
 
+        #if canImport(os)
+        logger.info("[\(accountId, privacy: .public)] getChildrenBatched: \(parentIds.count) parents")
+        #endif
         var methodCalls: [JmapMethodCall] = []
         for (i, parentId) in parentIds.enumerated() {
             let qId = "q\(i)"
@@ -277,6 +280,10 @@ public actor JmapClient {
             childrenByParent[parentId] = getResponse.list
             state = getResponse.state
         }
+        #if canImport(os)
+        let totalChildren = childrenByParent.values.reduce(0) { $0 + $1.count }
+        logger.info("[\(accountId, privacy: .public)] getChildrenBatched: \(totalChildren) nodes, state=\(state, privacy: .public)")
+        #endif
         return (childrenByParent, state)
     }
 
@@ -321,6 +328,9 @@ public actor JmapClient {
         accountId: String,
         sinceState: String
     ) async throws -> (changes: FileNodeChangesResponse, created: [FileNode], updated: [FileNode]) {
+        #if canImport(os)
+        logger.info("[\(accountId, privacy: .public)] FileNode/changes sinceState=\(sinceState, privacy: .public)")
+        #endif
         let responses = try await call([
             JmapMethodCall(
                 name: "FileNode/changes",
@@ -362,6 +372,9 @@ public actor JmapClient {
         let createdNodes = try extractResponse(FileNodeGetResponse.self, from: responses, callId: "g-created")
         let updatedNodes = try extractResponse(FileNodeGetResponse.self, from: responses, callId: "g-updated")
 
+        #if canImport(os)
+        logger.info("[\(accountId, privacy: .public)] FileNode/changes result: \(createdNodes.list.count) created, \(updatedNodes.list.count) updated, \(changesResponse.destroyed.count) destroyed, newState=\(changesResponse.newState, privacy: .public)")
+        #endif
         return (changesResponse, createdNodes.list, updatedNodes.list)
     }
 

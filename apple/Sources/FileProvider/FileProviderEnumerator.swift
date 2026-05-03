@@ -119,6 +119,11 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
     ) async throws {
         let nodes = try await specialNodes.value
 
+        #if canImport(os)
+        let existingToken = await database.stateToken ?? "(none)"
+        logger.info("[\(accountId, privacy: .public)] enumerateWorkingSet start — stateToken=\(existingToken, privacy: .public)")
+        #endif
+
         let activityId = "enum:\(accountId):working-set"
         let label = accountName.isEmpty ? "Downloading node list" : "Downloading node list (\(accountName))"
         statusWriter?.setSyncing()
@@ -180,10 +185,16 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
 
             await activityTracker?.complete(id: activityId)
             statusWriter?.setIdle(nodeCount: allNodes.count)
+            #if canImport(os)
+            logger.info("[\(accountId, privacy: .public)] enumerateWorkingSet done — \(allNodes.count) nodes, stateToken=\(finalState, privacy: .public)")
+            #endif
             observer.finishEnumerating(upTo: nil)
         } catch {
             await activityTracker?.remove(id: activityId)
             statusWriter?.setIdle()
+            #if canImport(os)
+            logger.error("[\(accountId, privacy: .public)] enumerateWorkingSet failed — \(error.localizedDescription, privacy: .public)")
+            #endif
             throw error
         }
     }
@@ -196,13 +207,26 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
         let nodes = try await specialNodes.value
         let parentId = resolveParentId(containerIdentifier, nodes: nodes)
 
-        // Get children from cache first
         let children = await database.children(of: parentId)
+
+        if children.isEmpty && (await database.stateToken ?? "").isEmpty {
+            // Database not yet populated — fetch this folder's children from the server
+            // so the user sees content immediately rather than waiting for the BFS.
+            let (childrenByParent, _) = try await client.getChildrenBatched(
+                accountId: accountId, parentIds: [parentId])
+            let fetched = childrenByParent[parentId] ?? []
+            for node in fetched { await database.upsertFromServer(node) }
+            let items = fetched.map {
+                FileProviderItem(node: $0, homeNodeId: nodes.homeId, trashNodeId: nodes.trashId)
+            }
+            observer.didEnumerate(items)
+            observer.finishEnumerating(upTo: nil)
+            return
+        }
 
         let items = children.map { (id, entry) in
             FileProviderItem(nodeId: id, entry: entry, homeNodeId: nodes.homeId, trashNodeId: nodes.trashId)
         }
-
         observer.didEnumerate(items)
         observer.finishEnumerating(upTo: nil)
     }
@@ -216,6 +240,10 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
         guard let stateToken = String(data: syncAnchor.rawValue, encoding: .utf8) else {
             throw NSFileProviderError(.syncAnchorExpired)
         }
+
+        #if canImport(os)
+        logger.info("[\(accountId, privacy: .public)] enumerateChanges start — anchor=\(stateToken, privacy: .public)")
+        #endif
 
         let activityId = "sync:\(accountId):changes"
         let label = accountName.isEmpty ? "Checking for changes" : "Checking for changes (\(accountName))"
@@ -247,6 +275,9 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
                 await activityTracker?.remove(id: activityId)
             }
             statusWriter?.setIdle()
+            #if canImport(os)
+            logger.info("[\(accountId, privacy: .public)] enumerateChanges done — \(updatedNodes.count) updated, \(deletedIds.count) deleted, newAnchor=\(newToken, privacy: .public)")
+            #endif
             observer.finishEnumeratingChanges(upTo: newAnchor, moreComing: false)
 
         } catch JmapError.cannotCalculateChanges {

@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(os)
+import os
+#endif
 
 /// Orchestrates JMAP FileNode sync for one account.
 ///
@@ -9,6 +12,10 @@ public actor SyncEngine {
     private let client: JmapClient
     private let database: NodeDatabase
     public let accountId: String
+
+    #if canImport(os)
+    private let logger = Logger(subsystem: "com.fastmail.files", category: "SyncEngine")
+    #endif
 
     public init(client: JmapClient, database: NodeDatabase, accountId: String) {
         self.client = client
@@ -30,8 +37,14 @@ public actor SyncEngine {
     /// Returns immediately if the home ID is already in the database.
     public func resolveSpecialNodes() async throws -> (homeId: String, trashId: String?) {
         if let homeId = await database.homeNodeId {
+            #if canImport(os)
+            logger.info("[\(self.accountId, privacy: .public)] resolveSpecialNodes: cached homeId=\(homeId, privacy: .public)")
+            #endif
             return (homeId, await database.trashNodeId)
         }
+        #if canImport(os)
+        logger.info("[\(self.accountId, privacy: .public)] resolveSpecialNodes: fetching from server")
+        #endif
         let home = try await client.findHomeNode(accountId: accountId)
         await database.setHomeNodeId(home.id)
         await database.upsertFromServer(home)
@@ -39,6 +52,9 @@ public actor SyncEngine {
         await database.setTrashNodeId(trash?.id)
         if let trash { await database.upsertFromServer(trash) }
         try? await database.save()
+        #if canImport(os)
+        logger.info("[\(self.accountId, privacy: .public)] resolveSpecialNodes: homeId=\(home.id, privacy: .public) trashId=\(trash?.id ?? "none", privacy: .public)")
+        #endif
         return (home.id, trash?.id)
     }
 
@@ -54,8 +70,14 @@ public actor SyncEngine {
     /// caller should clear the state token and trigger a fresh enumeration.
     public func fetchChanges() async throws -> (updated: [FileNode], deleted: [String]) {
         guard let stateToken = await database.stateToken, !stateToken.isEmpty else {
+            #if canImport(os)
+            logger.info("[\(self.accountId, privacy: .public)] fetchChanges: no state token yet — skipping")
+            #endif
             return ([], [])
         }
+        #if canImport(os)
+        logger.info("[\(self.accountId, privacy: .public)] fetchChanges: sinceState=\(stateToken, privacy: .public)")
+        #endif
         let (changes, created, updated) = try await client.getChanges(
             accountId: accountId,
             sinceState: stateToken
@@ -69,6 +91,9 @@ public actor SyncEngine {
         }
         await database.setStateToken(changes.newState)
         try? await database.save()
+        #if canImport(os)
+        logger.info("[\(self.accountId, privacy: .public)] fetchChanges: done — \(created.count) created, \(updated.count) updated, \(changes.destroyed.count) deleted, newState=\(changes.newState, privacy: .public) (stateChanged=\(stateToken != changes.newState, privacy: .public))")
+        #endif
         return (allUpdated, changes.destroyed)
     }
 }
