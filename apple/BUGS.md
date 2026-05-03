@@ -84,6 +84,53 @@ Status: **Open** | **Fixed** | **Mitigated** (workaround in place, root cause no
 
 ---
 
+## Known divergence scenarios — DB vs FileProvider system cache
+
+These are situations where our SQLite database and the system's FileProvider metadata cache can hold inconsistent views of the world. Most are tolerated; the dangerous ones are marked.
+
+### 1 — Extension killed between DB write and `completionHandler`
+**Scenario:** `createItem` or `modifyItem` writes the new node to the DB (via `upsertFromServer`), then the extension is killed before calling `completionHandler(item, ...)`.
+**Result:** DB has the node; system cache does not. System will retry the operation.
+**Current mitigation:** On retry the server call is re-issued. For `modifyItem` (rename/move) the server returns success again and the DB is re-written — idempotent. For `createItem` see scenario 2.
+
+### 2 — `createItem` retry creates a duplicate ⚠️ DANGEROUS
+**Scenario:** `createItem` succeeds on the server and in our DB, extension dies before `completionHandler`. System retries → we call `FileNode/set create` again → a second node with the same name is created on the server (or an error if `onExists` rejects it).
+**Result:** Two files on the server where the user intended one, or a spurious error on the retry. If the retry gets a new node ID, DB ends up with two entries for the same local file.
+**Current mitigation:** `compareCaseInsensitively: true` and `onExists: "rename"` in some paths reduces collisions. Not fully resolved — idempotency key (e.g. include a client-generated UUID in the create and deduplicate on retry) would fix this properly.
+**Status:** Open. Low frequency (extension must die in a specific 50–200 ms window), but possible.
+
+### 3 — `deleteItem` (move to trash) succeeds on server, DB delete fails
+**Scenario:** `client.updateNode(parentId: trashId)` succeeds. DB write (`upsertFromServer` / `remove`) then throws or extension dies.
+**Result:** Node is in trash on server, DB still shows it at original location. Next `enumerateChanges` fetches the server change, re-deletes from DB, and signals the system — eventually self-correcting.
+**Current mitigation:** Self-correcting within one sync cycle. Not dangerous.
+
+### 4 — `modifyItem` content upload succeeds, `updateNodeContent` fails
+**Scenario:** Blob is uploaded and stored on the server. `FileNode/set update { blobId }` then fails (network, auth, etc.).
+**Result:** A blob exists on the server that nothing references. The file content on the server is stale (old blobId). Our DB still has the old blobId.
+**Current mitigation:** On retry we re-upload the blob and re-call `updateNodeContent`. The orphaned blob is cleaned up by the server's GC. Not dangerous for user data.
+
+### 5 — Partial `enumerateWorkingSet` BFS
+**Scenario:** BFS fetches some pages then crashes or is killed mid-way. `stateToken` is only written on full success.
+**Result:** DB has partial data; system has partial enumeration; stateToken is empty. Next restart retries the full BFS from scratch.
+**Current mitigation:** Empty stateToken → `currentSyncAnchor` returns nil → system calls `enumerateItems` → full re-population. Self-correcting.
+
+### 6 — DB cleared (`stateToken = ""`) but system cache still populated
+**Scenario:** `cleanAccount` clears the DB. System still holds the previously-enumerated item set from before the reset.
+**Result:** System calls `enumerateItems` (not `enumerateChanges`) because anchor is nil. BFS re-populates DB and signals updates. System reconciles its cache against the fresh enumeration.
+**Current mitigation:** Correct by design — intentional full re-sync. Not dangerous.
+
+### 7 — Pin state orphaned after account remove + re-add
+**Scenario:** `pinned_nodes` table is local-only and not cleared by a node-table reset or domain removal. After re-add, the BFS may assign different node IDs (unlikely but possible if server state changed).
+**Result:** `pinned_nodes` contains IDs that no longer exist in `nodes`. `contentPolicy` lookups return false (correct: no match). Orphaned rows are harmless but accumulate.
+**Current mitigation:** Harmless — `isPinned(id:)` returns false for unknown IDs. Could add a periodic cleanup (`DELETE FROM pinned_nodes WHERE nodeId NOT IN (SELECT id FROM nodes)`), but not urgent.
+
+### 8 — `enumerateChanges` returns items not yet in DB
+**Scenario:** Server reports a node as created/updated. We call `FileNode/get`, get the node back, write to DB, then call `observer.didUpdate(item)`. If `item(for:identifier:)` is called by the system before the DB write is committed (race with `database.save()`), it fetches a stale or missing entry.
+**Result:** System gets a `noSuchItem` error for an item it just received as an update. Typically causes a brief Finder glitch; system retries.
+**Current mitigation:** Low probability due to actor isolation. `database.save()` is called before `observer.finishEnumeratingChanges`. Not fully eliminated — a more robust fix would pass the fully-written items directly rather than relying on a subsequent `item(for:)` lookup.
+
+---
+
 ## Recurring mistakes to watch for
 
 - **`privacy: .public` omitted** — every interpolated value in a logger call needs it
