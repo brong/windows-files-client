@@ -425,6 +425,12 @@ struct AddAccountView: View {
     @State private var statusMessage: String?
     @State private var errorMessage: String?
 
+    // OAuth fallback state (shown after PACC discovery fails)
+    @State private var showOAuthFallback = false
+    @State private var showCustomOAuth = false
+    @State private var customIssuer = "https://api.fastmail.com"
+    @State private var customSessionURL = "https://api.fastmail.com/jmap/session"
+
     // Account picker state
     @State private var discoveredAccounts: [DiscoveredAccount] = []
     @State private var pendingCredential: OAuthCredential?
@@ -483,6 +489,56 @@ struct AddAccountView: View {
                 }
             }
 
+            if let error = errorMessage {
+                Text(error)
+                    .foregroundColor(.red)
+                    .font(.caption)
+            }
+
+            if showOAuthFallback {
+                Divider()
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Sign in with a known server instead:")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Button(action: { Task { await oauthLoginWithFastmail() } }) {
+                        HStack {
+                            if isLoading && !showAdvanced && !showCustomOAuth {
+                                ProgressView().controlSize(.small).padding(.trailing, 4)
+                            }
+                            Image(systemName: "person.badge.key")
+                            Text("Use Fastmail OAuth")
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 6)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(isLoading)
+
+                    DisclosureGroup("Custom OAuth server", isExpanded: $showCustomOAuth) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            TextField("OAuth issuer URL", text: $customIssuer)
+                                .textFieldStyle(.roundedBorder)
+                            TextField("JMAP session URL", text: $customSessionURL)
+                                .textFieldStyle(.roundedBorder)
+                            Button(action: { Task { await oauthLoginWithCustomIssuer() } }) {
+                                HStack {
+                                    if isLoading && showCustomOAuth {
+                                        ProgressView().controlSize(.small).padding(.trailing, 4)
+                                    }
+                                    Text("Continue")
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 4)
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(isLoading || customIssuer.isEmpty || customSessionURL.isEmpty)
+                        }
+                        .padding(.top, 4)
+                    }
+                }
+            }
+
             DisclosureGroup("Advanced: Use App Password", isExpanded: $showAdvanced) {
                 VStack(alignment: .leading, spacing: 8) {
                     TextField("Session URL", text: $sessionURL)
@@ -495,12 +551,6 @@ struct AddAccountView: View {
                     .disabled(token.isEmpty || isLoading)
                 }
                 .padding(.top, 4)
-            }
-
-            if let error = errorMessage {
-                Text(error)
-                    .foregroundColor(.red)
-                    .font(.caption)
             }
 
             HStack {
@@ -569,110 +619,146 @@ struct AddAccountView: View {
     private func oauthLogin() async {
         isLoading = true
         errorMessage = nil
+        showOAuthFallback = false
         statusMessage = "Discovering OAuth endpoints…"
 
         do {
             let (sessionUrl, metadata) = try await PaccDiscovery.discover(email: email)
-
-            let port = UInt16.random(in: 49152...65000)
-            let redirectURI = "http://127.0.0.1:\(port)/callback"
-
-            guard let regEndpoint = metadata.registrationEndpoint else {
-                throw JmapError.serverError("oauth", "Server does not support dynamic client registration")
-            }
-
-            statusMessage = "Registering client..."
-            let registration = try await oauthRegisterClient(
-                registrationEndpoint: regEndpoint, redirectURI: redirectURI)
-
-            let pkce = PKCEChallenge()
-            let state = UUID().uuidString
-
-            guard let authURL = oauthAuthorizationURL(
-                authorizationEndpoint: metadata.authorizationEndpoint,
-                clientId: registration.clientId,
-                redirectURI: redirectURI,
-                codeChallenge: pkce.codeChallenge,
-                state: state,
-                resource: sessionUrl
-            ) else {
-                throw JmapError.serverError("oauth", "Failed to build authorization URL")
-            }
-
-            statusMessage = "Waiting for browser authentication..."
-
-            let code = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
-                startOAuthCallbackServer(port: port, expectedState: state, continuation: continuation)
-                #if canImport(AppKit)
-                NSWorkspace.shared.open(authURL)
-                #endif
-            }
-
-            #if canImport(AppKit)
-            NSApp.activate(ignoringOtherApps: true)
-            #endif
-
-            statusMessage = "Exchanging code for tokens..."
-            let tokenResponse = try await oauthExchangeCode(
-                tokenEndpoint: metadata.tokenEndpoint,
-                clientId: registration.clientId,
-                code: code,
-                redirectURI: redirectURI,
-                codeVerifier: pkce.codeVerifier
-            )
-
-            let credential = OAuthCredential(
-                sessionUrl: sessionUrl,
-                accessToken: tokenResponse.accessToken,
-                refreshToken: tokenResponse.refreshToken ?? "",
-                tokenEndpoint: metadata.tokenEndpoint,
-                clientId: registration.clientId,
-                expiresAt: Date().addingTimeInterval(TimeInterval(tokenResponse.expiresIn))
-            )
-
-            // Discover accounts
-            statusMessage = "Discovering accounts..."
-            let tokenProvider = OAuthTokenProvider(credential: credential)
-            let sessionManager = SessionManager(
-                sessionURL: URL(string: sessionUrl)!, tokenProvider: tokenProvider)
-            let session = try await sessionManager.session()
-
-            let fileNodeAccounts = session.fileNodeAccounts()
-            if fileNodeAccounts.isEmpty {
-                throw JmapError.noAccountId
-            }
-
-            // Derive loginId from primary account name or first account
-            let loginId = fileNodeAccounts.first(where: { $0.isPrimary })?.name
-                ?? fileNodeAccounts.first?.name ?? "unknown"
-
-            // Go to account picker (even for single account, for consistency)
-            discoveredAccounts = fileNodeAccounts.map { acct in
-                DiscoveredAccount(accountId: acct.accountId, name: acct.name,
-                                  isPrimary: acct.isPrimary, enabled: true)
-            }
-            pendingCredential = credential
-            pendingSessionURL = sessionUrl
-            pendingLoginId = loginId
-            showAccountPicker = true
-            statusMessage = nil
+            try await performOAuth(sessionUrl: sessionUrl, metadata: metadata)
         } catch {
             let urlError = error as? URLError
             switch urlError?.code {
             case .serverCertificateUntrusted, .serverCertificateHasUnknownRoot,
                  .serverCertificateNotYetValid, .serverCertificateHasBadDate,
                  .secureConnectionFailed:
-                errorMessage = "TLS error connecting to \(domainFrom(email: email) ?? "server"). Check that ua-auto-config.\(domainFrom(email: email) ?? "your domain") has a valid certificate."
+                let domain = domainFrom(email: email) ?? "your domain"
+                errorMessage = "TLS error reaching ua-auto-config.\(domain) — the server's certificate doesn't cover this subdomain."
+                showOAuthFallback = true
             case .cannotFindHost, .cannotConnectToHost, .dnsLookupFailed:
-                errorMessage = "Could not find discovery server for \(domainFrom(email: email) ?? email). Check the domain or use App Password login."
+                let domain = domainFrom(email: email) ?? email
+                errorMessage = "No discovery server found for \(domain)."
+                showOAuthFallback = true
             case .notConnectedToInternet, .networkConnectionLost:
                 errorMessage = "No internet connection."
             default:
                 errorMessage = error.localizedDescription
+                // Also offer fallback for other PACC errors (e.g. missing JMAP config)
+                if error is PaccError { showOAuthFallback = true }
             }
             statusMessage = nil
         }
         isLoading = false
+    }
+
+    private func oauthLoginWithFastmail() async {
+        isLoading = true
+        errorMessage = nil
+        statusMessage = "Connecting to Fastmail…"
+        do {
+            let (sessionUrl, metadata) = try await PaccDiscovery.discover(email: "discover@fastmail.com")
+            try await performOAuth(sessionUrl: sessionUrl, metadata: metadata)
+        } catch {
+            errorMessage = error.localizedDescription
+            statusMessage = nil
+        }
+        isLoading = false
+    }
+
+    private func oauthLoginWithCustomIssuer() async {
+        isLoading = true
+        errorMessage = nil
+        statusMessage = "Fetching OAuth metadata…"
+        do {
+            let (sessionUrl, metadata) = try await PaccDiscovery.discoverFromIssuer(
+                issuer: customIssuer, sessionUrl: customSessionURL)
+            try await performOAuth(sessionUrl: sessionUrl, metadata: metadata)
+        } catch {
+            errorMessage = error.localizedDescription
+            statusMessage = nil
+        }
+        isLoading = false
+    }
+
+    private func performOAuth(sessionUrl: String, metadata: OAuthServerMetadata) async throws {
+        let port = UInt16.random(in: 49152...65000)
+        let redirectURI = "http://127.0.0.1:\(port)/callback"
+
+        guard let regEndpoint = metadata.registrationEndpoint else {
+            throw JmapError.serverError("oauth", "Server does not support dynamic client registration")
+        }
+
+        statusMessage = "Registering client..."
+        let registration = try await oauthRegisterClient(
+            registrationEndpoint: regEndpoint, redirectURI: redirectURI)
+
+        let pkce = PKCEChallenge()
+        let state = UUID().uuidString
+
+        guard let authURL = oauthAuthorizationURL(
+            authorizationEndpoint: metadata.authorizationEndpoint,
+            clientId: registration.clientId,
+            redirectURI: redirectURI,
+            codeChallenge: pkce.codeChallenge,
+            state: state,
+            resource: sessionUrl
+        ) else {
+            throw JmapError.serverError("oauth", "Failed to build authorization URL")
+        }
+
+        statusMessage = "Waiting for browser authentication..."
+
+        let code = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
+            startOAuthCallbackServer(port: port, expectedState: state, continuation: continuation)
+            #if canImport(AppKit)
+            NSWorkspace.shared.open(authURL)
+            #endif
+        }
+
+        #if canImport(AppKit)
+        NSApp.activate(ignoringOtherApps: true)
+        #endif
+
+        statusMessage = "Exchanging code for tokens..."
+        let tokenResponse = try await oauthExchangeCode(
+            tokenEndpoint: metadata.tokenEndpoint,
+            clientId: registration.clientId,
+            code: code,
+            redirectURI: redirectURI,
+            codeVerifier: pkce.codeVerifier
+        )
+
+        let credential = OAuthCredential(
+            sessionUrl: sessionUrl,
+            accessToken: tokenResponse.accessToken,
+            refreshToken: tokenResponse.refreshToken ?? "",
+            tokenEndpoint: metadata.tokenEndpoint,
+            clientId: registration.clientId,
+            expiresAt: Date().addingTimeInterval(TimeInterval(tokenResponse.expiresIn))
+        )
+
+        statusMessage = "Discovering accounts..."
+        let tokenProvider = OAuthTokenProvider(credential: credential)
+        let sessionManager = SessionManager(
+            sessionURL: URL(string: sessionUrl)!, tokenProvider: tokenProvider)
+        let session = try await sessionManager.session()
+
+        let fileNodeAccounts = session.fileNodeAccounts()
+        if fileNodeAccounts.isEmpty {
+            throw JmapError.noAccountId
+        }
+
+        let loginId = fileNodeAccounts.first(where: { $0.isPrimary })?.name
+            ?? fileNodeAccounts.first?.name ?? "unknown"
+
+        discoveredAccounts = fileNodeAccounts.map { acct in
+            DiscoveredAccount(accountId: acct.accountId, name: acct.name,
+                              isPrimary: acct.isPrimary, enabled: true)
+        }
+        pendingCredential = credential
+        pendingSessionURL = sessionUrl
+        pendingLoginId = loginId
+        showAccountPicker = true
+        statusMessage = nil
     }
 
     private func domainFrom(email: String) -> String? {

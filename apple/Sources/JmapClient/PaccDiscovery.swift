@@ -77,6 +77,19 @@ public struct PaccDiscovery {
         return (sessionUrl, metadata)
     }
 
+    /// Discovers OAuth metadata directly from a known issuer URL and session URL,
+    /// bypassing PACC DNS lookup. Used when PACC discovery fails for a custom domain.
+    public static func discoverFromIssuer(
+        issuer: String,
+        sessionUrl: String,
+        session: URLSession = .shared
+    ) async throws -> (sessionUrl: String, metadata: OAuthServerMetadata) {
+        var normalizedIssuer = issuer.hasSuffix("/") ? String(issuer.dropLast()) : issuer
+        if !normalizedIssuer.contains("://") { normalizedIssuer = "https://\(normalizedIssuer)" }
+        let metadata = try await fetchOAuthMetadata(issuer: normalizedIssuer, session: session)
+        return (sessionUrl, metadata)
+    }
+
     private static func fetchOAuthMetadata(
         issuer: String, session: URLSession
     ) async throws -> OAuthServerMetadata {
