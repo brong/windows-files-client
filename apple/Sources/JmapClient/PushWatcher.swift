@@ -118,7 +118,7 @@ public actor PushWatcher {
                 return
             } catch {
                 #if canImport(os)
-                logger.warning("SSE connection error: \(error.localizedDescription). Retrying in \(self.backoffSeconds)s")
+                logger.warning("[\(self.accountId, privacy: .public)] SSE connection error: \(error.localizedDescription, privacy: .public). Retrying in \(self.backoffSeconds, privacy: .public)s")
                 #endif
             }
 
@@ -170,7 +170,7 @@ public actor PushWatcher {
         // Reset backoff on successful connection
         backoffSeconds = 1.0
         #if canImport(os)
-        logger.info("SSE connected")
+        logger.info("[\(self.accountId, privacy: .public)] SSE connected")
         #endif
 
         // Parse SSE stream using the extracted parser
