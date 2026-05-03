@@ -61,7 +61,7 @@ Tracks progress against the requirements in `../use-cases.txt`. Status key:
 | No re-upload / re-download of unchanged data | Done | State token + blob identity checks |
 | Listen for changes via SSE, not polling | Done | PushWatcher with exponential backoff |
 | No infinite loop / DoS on error | Done | BUG-007 fixed: 5-attempt cap on syncAnchorExpired; SSE backoff; extension process kills reset gracefully |
-| Case-insensitive filename collision handling | Todo | |
+| Case-insensitive filename collision handling | Done | `compareCaseInsensitively: true` on all FileNode/set; `caseInsensitiveNames(accountId:)` reads server capability |
 | Filename mangling safety (never rename unless user asked) | Partial | `sanitizeFilename` exists; no round-trip verification |
 | Never accidentally wipe / trash content due to confused state | Partial | Echo suppression exists; anchor-expiry re-enumeration clears DB before repopulate |
 

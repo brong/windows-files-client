@@ -136,6 +136,22 @@ public struct JmapSession: Codable, Sendable {
     public func hasDirectWrite(accountId: String) -> Bool {
         webWriteUrlTemplate(accountId: accountId) != nil
     }
+
+    /// Whether the server treats file names as case-insensitive for this account.
+    /// When true, compareCaseInsensitively on FileNode/set is redundant (but harmless).
+    /// When false (the default), macOS clients MUST send compareCaseInsensitively: true
+    /// to prevent the server creating siblings whose names differ only in case.
+    public func caseInsensitiveNames(accountId: String) -> Bool {
+        guard let account = accounts[accountId] else { return false }
+        for uri in JmapCapability.allFileNodeURIs {
+            if let cap = account.accountCapabilities[uri],
+               let dict = cap.dictValue,
+               let value = dict["caseInsensitiveNames"]?.boolValue {
+                return value
+            }
+        }
+        return false
+    }
 }
 
 public struct JmapAccount: Codable, Sendable {

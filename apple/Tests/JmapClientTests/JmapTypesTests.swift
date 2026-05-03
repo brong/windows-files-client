@@ -96,6 +96,42 @@ import Testing
     #expect(url?.absoluteString == "https://api.example.com/jmap/download/A1/B1/test.txt?type=text/plain")
 }
 
+@Test func testCaseInsensitiveNamesCapability() throws {
+    let json = """
+    {
+        "state": "s1",
+        "apiUrl": "https://api.example.com/jmap/",
+        "downloadUrl": "https://api.example.com/jmap/dl/{accountId}/{blobId}/{name}",
+        "uploadUrl": "https://api.example.com/jmap/ul/{accountId}/",
+        "eventSourceUrl": "https://api.example.com/jmap/ev/",
+        "capabilities": { "urn:ietf:params:jmap:core": {}, "https://www.fastmail.com/dev/filenode": {} },
+        "accounts": {
+            "A1": {
+                "name": "ci@example.com", "isPersonal": true,
+                "accountCapabilities": {
+                    "https://www.fastmail.com/dev/filenode": { "caseInsensitiveNames": true }
+                }
+            },
+            "A2": {
+                "name": "cs@example.com", "isPersonal": false,
+                "accountCapabilities": {
+                    "https://www.fastmail.com/dev/filenode": { "caseInsensitiveNames": false }
+                }
+            },
+            "A3": {
+                "name": "default@example.com", "isPersonal": false,
+                "accountCapabilities": { "https://www.fastmail.com/dev/filenode": {} }
+            }
+        },
+        "primaryAccounts": { "https://www.fastmail.com/dev/filenode": "A1" }
+    }
+    """.data(using: .utf8)!
+    let session = try JSONDecoder().decode(JmapSession.self, from: json)
+    #expect(session.caseInsensitiveNames(accountId: "A1") == true)   // explicit true
+    #expect(session.caseInsensitiveNames(accountId: "A2") == false)  // explicit false
+    #expect(session.caseInsensitiveNames(accountId: "A3") == false)  // absent → defaults false
+}
+
 @Test func testCapabilityURIs() {
     #expect(JmapCapability.core == "urn:ietf:params:jmap:core")
     #expect(JmapCapability.blob == "urn:ietf:params:jmap:blob")
