@@ -57,11 +57,11 @@ Status: **Open** | **Fixed** | **Mitigated** (workaround in place, root cause no
 ---
 
 ## BUG-006 — Status view shows `nodeCount: 0` after successful enumeration
-**Status:** Open
+**Status:** Fixed
 **Symptom:** The account status shows "0 files" even after `enumerateWorkingSet` successfully fetches nodes.
-**Root cause:** `setIdle()` (no count argument) is called by `performChangeEnumeration` after every `enumerateChanges` call. Although it's designed to preserve the existing count, the initial count is 0, so if `setIdle(nodeCount: N)` from `enumerateWorkingSet` and `setIdle()` from `performChangeEnumeration` race, the last writer wins. Additionally, `enumerateWorkingSet`'s allNodes count excludes the home node, meaning a single-node account shows `nodeCount: 0`.
-**Remaining work:** Use a dedicated "last full enumeration count" field in status, not overwritten by incremental change calls.
-**Lesson:** Don't share the same status field for counts from two different code paths with different semantics.
+**Root cause:** `ExtensionStatusWriter.init` always started with `nodeCount: 0` in memory. The extension is killed every ~60s; the new process has count 0. The first no-op `enumerateChanges` poll calls `setIdle()` (no count arg), which writes 0 to disk — overwriting the count that `enumerateWorkingSet` stored.
+**Fix:** `ExtensionStatusWriter.init` now reads back the existing status JSON from disk on startup and uses it as the initial in-memory state. Subsequent no-arg `setIdle()` calls preserve the already-correct count across process restarts.
+**Lesson:** Any state that must survive extension process restarts must be read back from disk at startup — not re-initialised to a zero/default value. The extension is ephemeral; the file is not.
 
 ---
 

@@ -72,7 +72,17 @@ public final class ExtensionStatusWriter: @unchecked Sendable {
 
     public init(containerURL: URL, accountId: String) {
         self.fileURL = containerURL.appendingPathComponent("status-\(accountId).json")
-        self.current = ExtensionStatus(accountId: accountId)
+        // Restore persisted state so nodeCount survives extension process restarts.
+        // The extension is killed every ~60s; without this, every restart writes nodeCount=0.
+        if let data = try? Data(contentsOf: containerURL.appendingPathComponent("status-\(accountId).json")),
+           let persisted = try? {
+               let d = JSONDecoder(); d.dateDecodingStrategy = .iso8601
+               return try d.decode(ExtensionStatus.self, from: data)
+           }() {
+            self.current = persisted
+        } else {
+            self.current = ExtensionStatus(accountId: accountId)
+        }
     }
 
     public func update(_ modify: (inout ExtensionStatus) -> Void) {
