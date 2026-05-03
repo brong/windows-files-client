@@ -24,6 +24,7 @@ private func syncJsonResponse(url: URL, json: String) -> (Data, HTTPURLResponse)
 
 private let syncTestSession = """
 {
+    "state": "test-session-state-1",
     "apiUrl": "https://api.example.com/jmap/",
     "downloadUrl": "https://api.example.com/jmap/download/{accountId}/{blobId}/{name}",
     "uploadUrl": "https://api.example.com/jmap/upload/{accountId}/",

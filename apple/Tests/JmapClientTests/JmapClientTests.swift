@@ -34,6 +34,7 @@ final class MockURLProtocol: URLProtocol, @unchecked Sendable {
 
 private let testSessionJSON = """
 {
+    "state": "test-session-state-1",
     "apiUrl": "https://api.example.com/jmap/",
     "downloadUrl": "https://api.example.com/jmap/download/{accountId}/{blobId}/{name}?type={type}",
     "uploadUrl": "https://api.example.com/jmap/upload/{accountId}/",
@@ -76,6 +77,7 @@ private func readRequestBody(_ request: URLRequest) -> String {
 
 private let testSessionWithQuota = """
 {
+    "state": "test-session-state-1",
     "apiUrl": "https://api.example.com/jmap/",
     "downloadUrl": "https://api.example.com/jmap/download/{accountId}/{blobId}/{name}",
     "uploadUrl": "https://api.example.com/jmap/upload/{accountId}/",

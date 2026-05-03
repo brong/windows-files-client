@@ -63,6 +63,7 @@ import Testing
 @Test func testSessionFileNodeCapability() throws {
     let json = """
     {
+        "state": "test-session-state-1",
         "apiUrl": "https://api.example.com/jmap/api",
         "downloadUrl": "https://api.example.com/jmap/download/{accountId}/{blobId}/{name}?type={type}",
         "uploadUrl": "https://api.example.com/jmap/upload/{accountId}/",
