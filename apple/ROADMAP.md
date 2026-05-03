@@ -35,7 +35,7 @@ Tracks progress against the requirements in `../use-cases.txt`. Status key:
 | Rename files on server | Done | `modifyItem` handles rename |
 | See quota usage | Done | Fetched via JMAP Quota/get; progress bar in Settings |
 | Clear error messages on failure | Partial | JmapError maps to NSFileProviderError; no user-visible error detail surfaced in UI |
-| Automatic updates (Sparkle) | Partial | `UpdateManager` infrastructure exists but not instantiated or wired into any menu |
+| Automatic updates (Sparkle) | Partial | `UpdateManager` instantiated at app startup; "Check for Updates…" menu item wired. Requires Sparkle package + Info.plist `SUFeedURL`/`SUPublicEDKey` to activate — see comments in UpdateManager.swift |
 
 ---
 
@@ -84,7 +84,7 @@ Tracks progress against the requirements in `../use-cases.txt`. Status key:
 
 ## Remaining work (priority order)
 
-1. **Sparkle auto-updates** — wire `UpdateManager` into app startup and add "Check for Updates…" menu item
+1. **Sparkle package** — add Sparkle SPM dependency + `SUFeedURL`/`SUPublicEDKey` in Info.plist to fully activate auto-updates (wiring is done)
 2. **Per-file dehydration UI** — expose `evictItem` on individual files, not just full-account reset
 3. **Diagnostics bundle** — capture os_log entries + traffic log into a ZIP for support
 4. **PACC full RFC discovery** — remove Fastmail-hardcoded fallback; discover any server

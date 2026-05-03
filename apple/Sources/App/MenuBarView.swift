@@ -5,6 +5,7 @@ import JmapClient
 #if os(macOS)
 struct MenuBarView: View {
     @ObservedObject var appState: AppState
+    @ObservedObject var updateManager: UpdateManager
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
@@ -73,6 +74,9 @@ struct MenuBarView: View {
         }
         Button("Diagnostics...") {
             openDiagnostics()
+        }
+        Button("Check for Updates…") {
+            updateManager.checkForUpdates()
         }
         Divider()
         Button("Quit") {

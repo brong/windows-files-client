@@ -5,6 +5,7 @@ import JmapClient
 @main
 struct FastmailFilesApp: App {
     @StateObject private var appState = AppState()
+    @StateObject private var updateManager = UpdateManager()
     #if os(macOS)
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @Environment(\.openWindow) private var openWindow
@@ -13,7 +14,7 @@ struct FastmailFilesApp: App {
     var body: some Scene {
         #if os(macOS)
         MenuBarExtra {
-            MenuBarView(appState: appState)
+            MenuBarView(appState: appState, updateManager: updateManager)
         } label: {
             MenuBarIconLabel(state: appState.menuBarState)
         }
