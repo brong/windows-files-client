@@ -224,9 +224,8 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
             await activityTracker.setStatusWriter(statusWriter)
             await bandwidthPolicy.start()
             _ = try? await specialNodes.value  // errors handled inside the task above
-            // On a warm start specialNodes resolves without any JMAP call, so the token
-            // may be stale. Fetch the session now to trigger a proactive refresh before
-            // the SSE connection is opened — avoids the 401→refresh→retry cycle on startup.
+            // Pre-warm the session cache so PushWatcher's first sessionManager.session()
+            // call is a cache hit rather than a second HTTP round-trip.
             _ = try? await sessionManager.session()
             await startPushWatcher()
             // Tell the system we're ready so it calls enumerateItems immediately,
