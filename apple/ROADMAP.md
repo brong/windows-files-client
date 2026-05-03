@@ -16,7 +16,7 @@ Tracks progress against the requirements in `../use-cases.txt`. Status key:
 | Add login via OAuth + PACC discovery | Partial | OAuth works; PACC falls back to Fastmail-hardcoded issuer. Full RFC discovery not implemented. |
 | Add account manually (session URL + bearer token) | Done | |
 | Select which accounts to sync | Done | |
-| Navigate files in Finder | Partial | Works for large accounts; small account Finder-empty bug open (BUG-005) |
+| Navigate files in Finder | Partial | BUG-005 mitigated: signalEnumerator after domain add; root cause not fully confirmed |
 | Open a file (download on demand) | Done | |
 | Select files/folders to stay hydrated | Todo | NSFileProviderItem `keepDownloaded` not wired up |
 | Dehydrate files to free space | Todo | `evictItem` not exposed in UI |
@@ -61,7 +61,7 @@ Tracks progress against the requirements in `../use-cases.txt`. Status key:
 | Upload in chunks matching server chunk size | Partial | Chunked upload implemented but doesn't negotiate chunk size from session |
 | No re-upload / re-download of unchanged data | Done | State token + blob identity checks |
 | Listen for changes via SSE, not polling | Done | PushWatcher with exponential backoff |
-| **No infinite loop / DoS on error** | **Partial** | **New syncAnchorExpired path has no retry cap (BUG-007). SSE has backoff. enumerateWorkingSet has no backoff.** |
+| **No infinite loop / DoS on error** | **Partial** | **BUG-007 fixed: 5-attempt cap on syncAnchorExpired loop. SSE has backoff. enumerateWorkingSet itself has no backoff yet.** |
 | Case-insensitive filename collision handling | Todo | |
 | Filename mangling safety (never rename unless user asked) | Partial | sanitizeFilename exists; no round-trip verification |
 | Never accidentally wipe / trash content due to confused state | Partial | Echo suppression exists; anchor-expiry re-enumeration clears DB before repopulate |
@@ -85,8 +85,8 @@ Tracks progress against the requirements in `../use-cases.txt`. Status key:
 
 ## Priority order for next work
 
-1. **BUG-005** — Finder empty after remove/re-add (root cause not confirmed; `signalEnumerator` after domain add may fix)
-2. **BUG-007** — Add retry cap / backoff to syncAnchorExpired retry path
+1. **BUG-005** — Mitigated; needs real-world verification of the `signalEnumerator` fix
+2. **BUG-007** — Fixed; needs real-world verification
 3. **Pending changes visibility** (VERY IMPORTANT per use-cases.txt)
 4. **Bandwidth / cellular policy** (NWPathMonitor)
 5. **Quota display**

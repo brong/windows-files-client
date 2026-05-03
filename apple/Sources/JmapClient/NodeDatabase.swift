@@ -108,6 +108,18 @@ public actor NodeDatabase {
         }
     }
 
+    // MARK: - Enumeration Failure Counter (BUG-007)
+
+    /// Number of consecutive syncAnchorExpired returns from the empty-DB guard.
+    /// Persisted across extension process restarts so the loop cap survives kills.
+    public var enumerationFailureCount: Int {
+        Int(syncStateValue(for: "enumerationFailureCount") ?? "0") ?? 0
+    }
+
+    public func setEnumerationFailureCount(_ count: Int) {
+        setSyncStateValue(String(count), for: "enumerationFailureCount")
+    }
+
     // MARK: - Node Entries
 
     public func entry(for nodeId: String) -> NodeCacheEntry? {

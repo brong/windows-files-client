@@ -43,16 +43,15 @@ Status: **Open** | **Fixed** | **Mitigated** (workaround in place, root cause no
 ---
 
 ## BUG-005 — Finder empty after account remove + re-add
-**Status:** Open (partially mitigated in commit b2d5cc8)
+**Status:** Mitigated (commit b2d5cc8 + signalEnumerator fix)
 **Symptom:** After removing an account and re-adding it, Finder shows the domain in the sidebar but no files/folders appear, despite the extension reporting "Up to date".
 **Root cause (confirmed partial):** Three contributing issues:
   1. `currentSyncAnchor` returned a non-nil anchor for empty-string state tokens (`"".data(using:)` is non-nil `Data()`), so the system called `enumerateChanges` instead of `enumerateItems`.
   2. `performChangeEnumeration` returned "no changes" when the DB was empty (fetchChanges returns `([], [])` with no state token), tricking the system into thinking it was up-to-date with an empty cache.
   3. `removeDomain` was not deleting `session-{accountId}.json`.
-**Root cause (suspected, not confirmed):** Even after the above fixes, the system may call `enumerateChanges` before `enumerateItems` because it retains a cached anchor from the previous domain registration. Calling `NSFileProviderManager.signalEnumerator(for: .workingSet)` after `add(domain)` may force `enumerateItems`.
-**Fix applied:** `currentSyncAnchor` now treats `""` same as nil. `performChangeEnumeration` returns `syncAnchorExpired` when DB has no state token. `session-{accountId}.json` now deleted on remove.
-**Remaining work:** Confirm signal approach or find root cause via info-level logging during a fresh remove/re-add cycle.
-**Lesson:** FileProvider state lives in two places: our SQLite DB and the system's own metadata cache. After removing a domain, the system's cache is cleared but ours persists. If we return a valid anchor, the system skips `enumerateItems` and Finder stays empty. Always clear the state token (or the whole DB) before removing a domain.
+**Root cause (suspected, addressed):** Even after the above fixes, the system may call `enumerateChanges` before `enumerateItems` because it retains a cached anchor from the previous domain registration. Fixed by calling `NSFileProviderManager.signalEnumerator(for: .workingSet)` immediately after `NSFileProviderManager.add(domain)` in `registerDomain`, which forces `enumerateItems`.
+**Fix applied:** `currentSyncAnchor` treats `""` same as nil. `performChangeEnumeration` returns `syncAnchorExpired` when DB has no state token. `session-{accountId}.json` deleted on remove. `signalEnumerator(for: .workingSet)` called after domain add.
+**Lesson:** FileProvider state lives in two places: our SQLite DB and the system's own metadata cache. After removing a domain, the system's cache is cleared but ours persists. If we return a valid anchor, the system skips `enumerateItems` and Finder stays empty. Always clear the state token (or the whole DB) before removing a domain. And always signal after re-adding.
 
 ---
 
@@ -66,12 +65,12 @@ Status: **Open** | **Fixed** | **Mitigated** (workaround in place, root cause no
 ---
 
 ## BUG-007 — No retry cap on syncAnchorExpired path (potential DoS loop)
-**Status:** Open
+**Status:** Fixed
 **Symptom:** If `enumerateWorkingSet` repeatedly fails or writes an empty state token to the DB, the system calls `enumerateItems` again immediately, which hits the JMAP server again, with no backoff or cap.
 **Root cause:** `performChangeEnumeration` returns `syncAnchorExpired` when the DB has no state token. This is correct for the first call after a fresh domain registration. But if `enumerateWorkingSet` itself then fails to persist a state token (e.g., `getChildrenBatched` returns no state string), the cycle repeats indefinitely.
+**Fix:** Added `enumerationFailureCount` to `NodeDatabase` (persisted in `sync_state` table, survives extension process kills). `performChangeEnumeration` increments this counter on each `syncAnchorExpired` return from the empty-DB guard. After 5 consecutive failures it emits `.cannotSynchronize` instead, halting the loop. `enumerateWorkingSet` resets the counter to 0 on successful completion.
 **Violates:** use-cases.txt: "Not have the client go into an infinite loop (which causes denial of service) if something is broken, either in client OR server."
-**Remaining work:** Add a consecutive-failure counter with exponential backoff on the `syncAnchorExpired` → `enumerateWorkingSet` path. After N failures, transition to an error state and notify the user.
-**Lesson:** Every error recovery path that triggers a network call needs a retry cap and backoff. "It should succeed next time" is not a loop-safety argument.
+**Lesson:** Every error recovery path that triggers a network call needs a retry cap and backoff. "It should succeed next time" is not a loop-safety argument. The counter must be persisted to disk, not held in memory, because extension instances are ephemeral.
 
 ---
 

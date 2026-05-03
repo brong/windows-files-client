@@ -602,6 +602,11 @@ class AppState: ObservableObject {
                 displayName: domainName
             )
             try await NSFileProviderManager.add(domain)
+            // Signal the system to call enumerateItems on the working set immediately.
+            // Without this, the system may retain a cached anchor from a previous
+            // registration and call enumerateChanges before enumerateItems, leaving
+            // Finder empty until the next push event triggers a re-check.
+            NSFileProviderManager(for: domain)?.signalEnumerator(for: .workingSet) { _ in }
         } catch {
             // Clean up mapping on failure
             defaults?.removeObject(forKey: "loginForAccount-\(accountId)")

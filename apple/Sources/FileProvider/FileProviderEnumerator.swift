@@ -183,6 +183,7 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
             await database.setStateToken(finalState)
             try await database.save()
 
+            await database.setEnumerationFailureCount(0)
             await activityTracker?.complete(id: activityId)
             statusWriter?.setIdle(nodeCount: allNodes.count)
             #if canImport(os)
@@ -248,8 +249,21 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
         // force a full re-enumeration rather than reporting "no changes" with an empty DB.
         let dbToken = await database.stateToken ?? ""
         guard !dbToken.isEmpty else {
+            let failCount = await database.enumerationFailureCount
+            // Cap consecutive re-enumeration attempts. Each syncAnchorExpired here means
+            // enumerateWorkingSet either hasn't run yet or failed to persist a state token.
+            // After 5 consecutive failures something is broken — stop looping and surface an error.
+            if failCount >= 5 {
+                #if canImport(os)
+                logger.error("[\(self.accountId, privacy: .public)] enumerateChanges: \(failCount) consecutive failures with no state token — halting retry loop")
+                #endif
+                await database.setEnumerationFailureCount(0)
+                observer.finishEnumeratingWithError(NSFileProviderError(.cannotSynchronize))
+                return
+            }
+            await database.setEnumerationFailureCount(failCount + 1)
             #if canImport(os)
-            logger.info("[\(self.accountId, privacy: .public)] enumerateChanges: DB has no state token — requesting full re-enumeration")
+            logger.info("[\(self.accountId, privacy: .public)] enumerateChanges: DB has no state token (attempt \(failCount + 1)/5) — requesting full re-enumeration")
             #endif
             observer.finishEnumeratingWithError(NSFileProviderError(.syncAnchorExpired))
             return
