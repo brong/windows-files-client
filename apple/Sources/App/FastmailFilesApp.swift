@@ -160,6 +160,8 @@ class AppState: ObservableObject {
     @Published var showingAddAccount = false
     /// Extension-reported statuses, keyed by accountId. Single source of truth.
     @Published var extensionStatuses: [String: ExtensionStatus] = [:]
+    /// Full activity snapshot read directly from activity.json.
+    @Published var activitySnapshot: ActivityTracker.Snapshot? = nil
     /// Quota info per accountId, fetched on demand.
     @Published var quotaInfo: [String: QuotaInfo] = [:]
 
@@ -215,6 +217,7 @@ class AppState: ObservableObject {
             newStatuses[status.accountId] = status
         }
         extensionStatuses = newStatuses
+        activitySnapshot = ActivityTracker.loadShared(containerURL: containerURL)
     }
 
     init() {
@@ -225,15 +228,19 @@ class AppState: ObservableObject {
     }
 
     private func startObservers() {
-        // Reload extension statuses on Darwin notification (replaces the per-view registration
-        // that previously leaked observers when the settings window reopened).
         let center = CFNotificationCenterGetDarwinNotifyCenter()
-        let statusObserver = Unmanaged.passUnretained(self).toOpaque()
-        CFNotificationCenterAddObserver(center, statusObserver, { _, observer, _, _, _ in
+        let observer = Unmanaged.passUnretained(self).toOpaque()
+        let callback: CFNotificationCallback = { _, observer, _, _, _ in
             guard let observer = observer else { return }
             let state = Unmanaged<AppState>.fromOpaque(observer).takeUnretainedValue()
             DispatchQueue.main.async { state.reloadExtensionStatuses() }
-        }, ExtensionStatusReader.notificationName, nil, .deliverImmediately)
+        }
+        // Extension status updates (state, nodeCount, operationHints)
+        CFNotificationCenterAddObserver(center, observer, callback,
+            ExtensionStatusReader.notificationName, nil, .deliverImmediately)
+        // Activity updates (full pending/active/error list from activity.json)
+        CFNotificationCenterAddObserver(center, observer, callback,
+            ActivityTracker.darwinNotificationName, nil, .deliverImmediately)
         reloadExtensionStatuses()
     }
 

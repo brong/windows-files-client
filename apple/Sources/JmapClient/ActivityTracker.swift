@@ -58,14 +58,42 @@ public actor ActivityTracker {
     }
 
     /// Start tracking an operation.
+    /// Pass status: .pending when the operation is queued but not yet executing (e.g.
+    /// before upload bytes start flowing). Call markActive(id:) when execution begins.
     public func start(id: String, accountId: String, fileName: String,
-                      action: Activity.Action, fileSize: Int? = nil) {
+                      action: Activity.Action, fileSize: Int? = nil,
+                      status: Activity.Status = .active) {
         activities[id] = Activity(
             id: id, accountId: accountId, fileName: fileName,
             action: action, fileSize: fileSize, startedAt: Date(),
-            completedAt: nil, progress: nil, status: .active, error: nil)
+            completedAt: nil, progress: nil, status: status, error: nil)
         persist()
         pushToStatus()
+    }
+
+    /// Transition a pending activity to active (bytes are now flowing).
+    public func markActive(id: String) {
+        guard activities[id] != nil else { return }
+        activities[id]?.status = .active
+        activities[id]?.progress = nil
+        persist()
+        pushToStatus()
+    }
+
+    /// On extension startup, convert any stale .active entries to .pending.
+    /// The extension may have been killed mid-operation; the system will retry,
+    /// so these are genuinely "queued" not "in progress".
+    public func recoverStaledActives() {
+        var changed = false
+        for key in activities.keys where activities[key]?.status == .active {
+            activities[key]?.status = .pending
+            activities[key]?.progress = nil
+            changed = true
+        }
+        if changed {
+            persist()
+            pushToStatus()
+        }
     }
 
     /// Update progress for an operation (0.0-1.0).

@@ -927,22 +927,42 @@ private func startOAuthCallbackServer(
 struct ActivityView: View {
     @ObservedObject var appState: AppState
 
+    private var activities: [ActivityTracker.Activity] {
+        appState.activitySnapshot?.activities ?? []
+    }
+
+    private var pending: [ActivityTracker.Activity] {
+        activities.filter { $0.status == .pending }
+    }
+    private var active: [ActivityTracker.Activity] {
+        activities.filter { $0.status == .active }
+    }
+    private var errors: [ActivityTracker.Activity] {
+        activities.filter { $0.status == .error }
+    }
+
     var body: some View {
-        let hints = appState.activeOperationHints
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("Activity")
+                Text("Pending Changes")
                     .font(.headline)
                 Spacer()
-                if !hints.isEmpty {
-                    Text("\(hints.count) in flight")
+                let total = pending.count + active.count
+                if total > 0 {
+                    Text("\(total) not yet synced")
                         .font(.caption)
-                        .foregroundColor(.blue)
+                        .foregroundColor(.orange)
+                        .fontWeight(.medium)
+                } else if !errors.isEmpty {
+                    Text("\(errors.count) failed")
+                        .font(.caption)
+                        .foregroundColor(.red)
+                        .fontWeight(.medium)
                 }
             }
 
-            if hints.isEmpty {
-                Text("No active operations")
+            if pending.isEmpty && active.isEmpty && errors.isEmpty {
+                Text("All changes synced to server")
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .frame(maxWidth: .infinity, alignment: .center)
@@ -950,46 +970,101 @@ struct ActivityView: View {
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 4) {
-                        ForEach(hints.prefix(10)) { hint in
-                            hintRow(hint)
+                        ForEach(errors) { activity in
+                            activityRow(activity)
                         }
-                        if hints.count > 10 {
-                            Text("+ \(hints.count - 10) more…")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
+                        ForEach(active) { activity in
+                            activityRow(activity)
+                        }
+                        ForEach(pending) { activity in
+                            activityRow(activity)
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .frame(height: 150)
+                .frame(maxHeight: 200)
             }
         }
     }
 
-    private func hintRow(_ hint: ExtensionStatus.OperationHint) -> some View {
+    private func activityRow(_ activity: ActivityTracker.Activity) -> some View {
         HStack(spacing: 8) {
-            Image(systemName: iconForVerb(hint.actionVerb))
-                .foregroundColor(.blue)
+            Image(systemName: icon(for: activity))
+                .foregroundColor(color(for: activity))
                 .frame(width: 16)
             VStack(alignment: .leading, spacing: 2) {
-                Text(hint.fileName)
+                Text(activity.fileName)
                     .font(.caption)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                Text(hint.actionVerb)
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
+                if let error = activity.error {
+                    Text(error)
+                        .font(.caption2)
+                        .foregroundColor(.red)
+                        .lineLimit(1)
+                } else if activity.status == .active, let progress = activity.progress {
+                    ProgressView(value: progress)
+                        .progressViewStyle(.linear)
+                        .tint(.blue)
+                        .frame(maxWidth: 160)
+                } else {
+                    Text(label(for: activity))
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
             }
+            Spacer()
         }
-        .id(hint.id)
+        .id(activity.id)
+        .padding(.vertical, 1)
     }
 
-    private func iconForVerb(_ verb: String) -> String {
-        switch verb {
-        case "Uploading":   return "arrow.up.circle"
-        case "Downloading": return "arrow.down.circle"
-        case "Deleting":    return "trash"
-        default:            return "arrow.triangle.2.circlepath"
+    private func icon(for activity: ActivityTracker.Activity) -> String {
+        switch activity.status {
+        case .error:   return "exclamationmark.circle"
+        case .pending:
+            switch activity.action {
+            case .upload: return "arrow.up.circle"
+            case .delete: return "trash"
+            default:      return "clock"
+            }
+        case .active:
+            switch activity.action {
+            case .upload:   return "arrow.up.circle.fill"
+            case .download: return "arrow.down.circle.fill"
+            case .delete:   return "trash.fill"
+            case .sync:     return "arrow.triangle.2.circlepath"
+            }
+        case .completed: return "checkmark.circle"
+        }
+    }
+
+    private func color(for activity: ActivityTracker.Activity) -> Color {
+        switch activity.status {
+        case .error:     return .red
+        case .pending:   return .orange
+        case .active:    return .blue
+        case .completed: return .green
+        }
+    }
+
+    private func label(for activity: ActivityTracker.Activity) -> String {
+        switch activity.status {
+        case .pending:
+            switch activity.action {
+            case .upload: return "Waiting to upload"
+            case .delete: return "Waiting to delete"
+            default:      return "Queued"
+            }
+        case .active:
+            switch activity.action {
+            case .upload:   return "Uploading…"
+            case .download: return "Downloading…"
+            case .delete:   return "Deleting…"
+            case .sync:     return "Syncing…"
+            }
+        case .completed: return "Done"
+        case .error:     return "Failed"
         }
     }
 }

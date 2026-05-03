@@ -224,6 +224,9 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
         #endif
         Task {
             await activityTracker.setStatusWriter(statusWriter)
+            // Convert any stale .active entries from a previous killed process to .pending.
+            // The system will retry those operations; show them as "queued" not "in progress".
+            await activityTracker.recoverStaledActives()
             await bandwidthPolicy.start()
             _ = try? await specialNodes.value  // errors handled inside the task above
             // Pre-warm the session cache so PushWatcher's first sessionManager.session()
@@ -402,15 +405,19 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                     let fileSize = (try? FileManager.default.attributesOfItem(
                         atPath: contentURL.path)[.size] as? Int) ?? 0
 
-                    guard await bandwidthPolicy.allowsUpload(bytes: fileSize) else {
-                        throw JmapError.rateLimited  // defer until better connection
-                    }
-
+                    // Register as pending immediately — visible to the user even if
+                    // the upload is blocked by bandwidth policy or hasn't started yet.
                     let activityId = "ul:\(accountId):\(fileName)"
                     await activityTracker.start(
                         id: activityId, accountId: accountId, fileName: fileName,
-                        action: .upload, fileSize: fileSize)
+                        action: .upload, fileSize: fileSize, status: .pending)
 
+                    guard await bandwidthPolicy.allowsUpload(bytes: fileSize) else {
+                        await activityTracker.fail(id: activityId, error: "Upload deferred (bandwidth policy)")
+                        throw JmapError.rateLimited
+                    }
+
+                    await activityTracker.markActive(id: activityId)
                     let contentType = itemTemplate.contentType?.preferredMIMEType ?? "application/octet-stream"
                     let blob = try await client.uploadBlobChunked(
                         accountId: accountId,
@@ -498,15 +505,17 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                     let fileSize = (try? FileManager.default.attributesOfItem(
                         atPath: contentURL.path)[.size] as? Int) ?? 0
 
-                    guard await bandwidthPolicy.allowsUpload(bytes: fileSize) else {
-                        throw JmapError.rateLimited  // defer until better connection
-                    }
-
                     let activityId = "ul:\(accountId):\(fileName)"
                     await activityTracker.start(
                         id: activityId, accountId: accountId, fileName: fileName,
-                        action: .upload, fileSize: fileSize)
+                        action: .upload, fileSize: fileSize, status: .pending)
 
+                    guard await bandwidthPolicy.allowsUpload(bytes: fileSize) else {
+                        await activityTracker.fail(id: activityId, error: "Upload deferred (bandwidth policy)")
+                        throw JmapError.rateLimited
+                    }
+
+                    await activityTracker.markActive(id: activityId)
                     let blob = try await client.uploadBlobChunked(
                         accountId: accountId,
                         fileURL: contentURL,
@@ -622,31 +631,42 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                 let nodes = try await specialNodes.value
                 let nodeId = identifier.rawValue
 
-                if let trashId = nodes.trashId {
-                    // Move to trash (preferred)
-                    do {
-                        try await client.updateNode(
+                let fileName = (await database.entry(for: nodeId))?.name ?? nodeId
+                let activityId = "del:\(accountId):\(nodeId)"
+                await activityTracker.start(
+                    id: activityId, accountId: accountId, fileName: fileName,
+                    action: .delete)
+
+                do {
+                    if let trashId = nodes.trashId {
+                        // Move to trash (preferred)
+                        do {
+                            try await client.updateNode(
+                                accountId: accountId,
+                                nodeId: nodeId,
+                                parentId: trashId,
+                                onExists: "rename"
+                            )
+                        } catch JmapError.notFound {
+                            // Already gone — success (idempotent)
+                        }
+                    } else {
+                        // Permanent delete
+                        try await client.destroyNode(
                             accountId: accountId,
                             nodeId: nodeId,
-                            parentId: trashId,
-                            onExists: "rename"
+                            removeChildren: true
                         )
-                    } catch JmapError.notFound {
-                        // Already gone — success (idempotent)
                     }
-                } else {
-                    // Permanent delete
-                    try await client.destroyNode(
-                        accountId: accountId,
-                        nodeId: nodeId,
-                        removeChildren: true
-                    )
+
+                    await database.remove(nodeId: nodeId)
+                    try await database.save()
+                    await activityTracker.complete(id: activityId)
+                    completionHandler(nil)
+                } catch {
+                    await activityTracker.fail(id: activityId, error: error.localizedDescription)
+                    completionHandler(mapError(error))
                 }
-
-                await database.remove(nodeId: nodeId)
-                try await database.save()
-
-                completionHandler(nil)
             } catch {
                 completionHandler(mapError(error))
             }
