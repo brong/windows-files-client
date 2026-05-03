@@ -406,6 +406,7 @@ class AppState: ObservableObject {
 
         logins.removeAll { $0.loginId == loginId }
         saveState()
+        cleanSharedContainerFiles()
     }
 
     // MARK: - Per-Account Actions
@@ -613,21 +614,34 @@ class AppState: ObservableObject {
             print("FileProvider domain removal failed: \(error.localizedDescription)")
         }
 
-        // Clean node cache (SQLite) and blob cache
         if let containerURL = FileManager.default.containerURL(
             forSecurityApplicationGroupIdentifier: Self.appGroupId) {
+            // Node cache (SQLite) and blob cache
             let nodeCacheDir = containerURL
                 .appendingPathComponent("NodeCache", isDirectory: true)
                 .appendingPathComponent(accountId, isDirectory: true)
             try? FileManager.default.removeItem(at: nodeCacheDir)
             let blobDir = containerURL.appendingPathComponent("blobs-\(accountId)")
             try? FileManager.default.removeItem(at: blobDir)
+            // Extension status file
+            let statusFile = containerURL.appendingPathComponent("status-\(accountId).json")
+            try? FileManager.default.removeItem(at: statusFile)
         }
 
-        // Clean mapping
+        // Per-account UserDefaults keys
         defaults?.removeObject(forKey: "loginForAccount-\(accountId)")
         defaults?.removeObject(forKey: "sessionURL-\(accountId)")
         defaults?.removeObject(forKey: "authType-\(accountId)")
+        RoleCache.clear(accountId: accountId, defaults: defaults)
+    }
+
+    private func cleanSharedContainerFiles() {
+        guard logins.isEmpty,
+              let containerURL = FileManager.default.containerURL(
+                forSecurityApplicationGroupIdentifier: Self.appGroupId)
+        else { return }
+        try? FileManager.default.removeItem(at: containerURL.appendingPathComponent("activity.json"))
+        try? FileManager.default.removeItem(at: containerURL.appendingPathComponent("jmap-traffic.log"))
     }
 
     func cleanupOrphanedDomains() async {
