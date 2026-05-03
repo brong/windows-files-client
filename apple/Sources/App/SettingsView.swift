@@ -657,10 +657,26 @@ struct AddAccountView: View {
             showAccountPicker = true
             statusMessage = nil
         } catch {
-            errorMessage = String(describing: error)
+            let urlError = error as? URLError
+            switch urlError?.code {
+            case .serverCertificateUntrusted, .serverCertificateHasUnknownRoot,
+                 .serverCertificateNotYetValid, .serverCertificateHasBadDate,
+                 .secureConnectionFailed:
+                errorMessage = "TLS error connecting to \(domainFrom(email: email) ?? "server"). Check that ua-auto-config.\(domainFrom(email: email) ?? "your domain") has a valid certificate."
+            case .cannotFindHost, .cannotConnectToHost, .dnsLookupFailed:
+                errorMessage = "Could not find discovery server for \(domainFrom(email: email) ?? email). Check the domain or use App Password login."
+            case .notConnectedToInternet, .networkConnectionLost:
+                errorMessage = "No internet connection."
+            default:
+                errorMessage = error.localizedDescription
+            }
             statusMessage = nil
         }
         isLoading = false
+    }
+
+    private func domainFrom(email: String) -> String? {
+        email.split(separator: "@").last.map(String.init)
     }
 
     // MARK: - Manual Login
