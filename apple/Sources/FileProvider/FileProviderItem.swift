@@ -9,16 +9,21 @@ public final class FileProviderItem: NSObject, NSFileProviderItem {
     private let entry: NodeCacheEntry
     private let homeNodeId: String
     private let trashNodeId: String?
+    private let pinned: Bool
 
-    public init(nodeId: String, entry: NodeCacheEntry, homeNodeId: String, trashNodeId: String?) {
+    public init(nodeId: String, entry: NodeCacheEntry,
+                homeNodeId: String, trashNodeId: String?,
+                isPinned: Bool = false) {
         self.nodeId = nodeId
         self.entry = entry
         self.homeNodeId = homeNodeId
         self.trashNodeId = trashNodeId
+        self.pinned = isPinned
     }
 
     /// Convenience init from a FileNode.
-    public convenience init(node: FileNode, homeNodeId: String, trashNodeId: String?) {
+    public convenience init(node: FileNode, homeNodeId: String, trashNodeId: String?,
+                            isPinned: Bool = false) {
         let entry = NodeCacheEntry(
             parentId: node.parentId,
             name: node.name ?? "Untitled",
@@ -29,7 +34,8 @@ public final class FileProviderItem: NSObject, NSFileProviderItem {
             type: node.type,
             myRights: node.myRights
         )
-        self.init(nodeId: node.id, entry: entry, homeNodeId: homeNodeId, trashNodeId: trashNodeId)
+        self.init(nodeId: node.id, entry: entry, homeNodeId: homeNodeId,
+                  trashNodeId: trashNodeId, isPinned: isPinned)
     }
 
     // MARK: - NSFileProviderItem
@@ -104,10 +110,11 @@ public final class FileProviderItem: NSObject, NSFileProviderItem {
         entry.isFolder ? nil : NSNumber(value: entry.size)
     }
 
-    /// Files are eligible for eviction (Finder shows "Remove Download" on downloaded files).
-    /// Folders use the same policy so their subtree can be evicted recursively.
+    /// Pinned items stay downloaded regardless of storage pressure (Finder shows
+    /// "Keep Downloaded" / "Remove from Everywhere" in the context menu).
+    /// Unpinned items are eligible for eviction when storage is needed.
     public var contentPolicy: NSFileProviderItemContentPolicy {
-        .downloadEligibleForEncryptedStorage
+        pinned ? .downloadEagerlyAndKeepDownloaded : .downloadEligibleForEncryptedStorage
     }
 
     public var creationDate: Date? {

@@ -17,7 +17,7 @@ Tracks progress against the requirements in `../use-cases.txt`. Status key:
 | Select which accounts to sync | Done | Per-account enable/disable toggle in Settings |
 | Navigate files in Finder | Done | BUG-005 fixed: stale state token reset via DB API on domain re-add |
 | Open a file (download on demand) | Done | |
-| Select files/folders to stay hydrated | Todo | NSFileProviderItem `keepDownloaded` not wired up |
+| Select files/folders to stay hydrated | Done | `contentPolicy` returns `.downloadEagerlyAndKeepDownloaded` for pinned items; Finder shows "Keep Downloaded" context menu; pin state stored in `pinned_nodes` SQLite table (survives re-enumeration). Eager download gated on `bandwidthPolicy.allowsBackgroundDownload` — never on cellular/Low Data Mode |
 | Dehydrate files to free space | Done | `contentPolicy: .downloadEligibleForEncryptedStorage` enables Finder's per-file "Remove Download"; "Free Up Space" button in Settings evicts all downloaded content without resetting sync state |
 | Remove one account without removing login | Done | |
 | Remove entire login (removes all accounts + credentials) | Done | |
@@ -86,6 +86,6 @@ Tracks progress against the requirements in `../use-cases.txt`. Status key:
 
 1. **Sparkle package** — add Sparkle SPM dependency + `SUFeedURL`/`SUPublicEDKey` in Info.plist to fully activate auto-updates (wiring is done)
 2. **PACC full RFC discovery** — remove Fastmail-hardcoded fallback; discover any server
-3. **`keepDownloaded` pin** — let user mark files/folders to always stay hydrated
+
 4. **Distribution pipeline** — DMG / notarised package + appcast for Sparkle
 5. **Uninstall cleanup** — script or helper to remove FileProvider domains + app group data

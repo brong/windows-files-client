@@ -337,7 +337,8 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
 
                 let item = FileProviderItem(
                     nodeId: nodeId, entry: entry,
-                    homeNodeId: nodes.homeId, trashNodeId: nodes.trashId)
+                    homeNodeId: nodes.homeId, trashNodeId: nodes.trashId,
+                    isPinned: await database.isPinned(id: nodeId))
                 completionHandler(tempURL, item, nil)
             } catch {
                 let activityId = "dl:\(accountId):\(itemIdentifier.rawValue)"
@@ -589,6 +590,23 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                     }
                 }
 
+                // Handle pin/unpin — local-only, not sent to server.
+                // Pinned items get contentPolicy .downloadEagerlyAndKeepDownloaded so the
+                // framework keeps them hydrated. Eager download is gated on bandwidth:
+                // it runs only on unrestricted connections so it never competes with an
+                // interactive file open on cellular / Low Data Mode.
+                if changedFields.contains(.contentPolicy) {
+                    let wantsPinned = item.contentPolicy == .downloadEagerlyAndKeepDownloaded
+                    await database.setPinned(id: currentNodeId, pinned: wantsPinned)
+                    if wantsPinned && (await bandwidthPolicy.allowsBackgroundDownload) {
+                        // Ask the framework to hydrate now; it will schedule behind any
+                        // in-flight interactive downloads automatically.
+                        let identifier = NSFileProviderItemIdentifier(currentNodeId)
+                        NSFileProviderManager(for: domain)?
+                            .requestDownloadForItems(withIdentifiers: [identifier]) { _ in }
+                    }
+                }
+
                 progress.completedUnitCount = 100
 
                 try await database.save()
@@ -597,9 +615,11 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                 guard let entry = await database.entry(for: currentNodeId) else {
                     throw JmapError.notFound(currentNodeId)
                 }
+                let isPinned = await database.isPinned(id: currentNodeId)
                 let resultItem = FileProviderItem(
                     nodeId: currentNodeId, entry: entry,
-                    homeNodeId: nodes.homeId, trashNodeId: nodes.trashId)
+                    homeNodeId: nodes.homeId, trashNodeId: nodes.trashId,
+                    isPinned: isPinned)
                 completionHandler(resultItem, [], false, nil)
             } catch {
                 completionHandler(nil, [], false, mapError(error))
@@ -798,7 +818,8 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
         if let entry = await database.entry(for: nodeId) {
             return FileProviderItem(
                 nodeId: nodeId, entry: entry,
-                homeNodeId: nodes.homeId, trashNodeId: nodes.trashId)
+                homeNodeId: nodes.homeId, trashNodeId: nodes.trashId,
+                isPinned: await database.isPinned(id: nodeId))
         }
 
         // Node not in cache — fetch from server and cache it for future calls.
@@ -808,7 +829,8 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
         }
         await database.upsertFromServer(node)
         return FileProviderItem(
-            node: node, homeNodeId: nodes.homeId, trashNodeId: nodes.trashId)
+            node: node, homeNodeId: nodes.homeId, trashNodeId: nodes.trashId,
+            isPinned: await database.isPinned(id: nodeId))
     }
 
     /// Reverse filename sanitization (restore original characters for server).

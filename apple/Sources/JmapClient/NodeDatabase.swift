@@ -19,6 +19,12 @@ public actor NodeDatabase {
     // MARK: - Schema
 
     private static func registerMigrations(in migrator: inout DatabaseMigrator) {
+        migrator.registerMigration("v2_pinned_nodes") { db in
+            // Local-only pin state; kept in a separate table so it survives node-table resets.
+            try db.create(table: "pinned_nodes", ifNotExists: true) { t in
+                t.column("nodeId", .text).primaryKey()
+            }
+        }
         migrator.registerMigration("v1_initial") { db in
             try db.create(table: "nodes", ifNotExists: true) { t in
                 t.column("id", .text).primaryKey()
@@ -189,6 +195,39 @@ public actor NodeDatabase {
             try db.execute(sql: "DELETE FROM nodes")
             try db.execute(sql: "DELETE FROM sync_state WHERE key = 'stateToken'")
         }
+    }
+
+    // MARK: - Pin State (local-only, survives node-table resets)
+
+    public func isPinned(id: String) -> Bool {
+        (try? pool.read { db in
+            try Int.fetchOne(
+                db, sql: "SELECT COUNT(*) FROM pinned_nodes WHERE nodeId = ?",
+                arguments: [id]) ?? 0
+        }) == 1
+    }
+
+    public func setPinned(id: String, pinned: Bool) {
+        try? pool.write { db in
+            if pinned {
+                try db.execute(
+                    sql: "INSERT OR IGNORE INTO pinned_nodes (nodeId) VALUES (?)",
+                    arguments: [id])
+            } else {
+                try db.execute(
+                    sql: "DELETE FROM pinned_nodes WHERE nodeId = ?",
+                    arguments: [id])
+            }
+        }
+    }
+
+    /// Returns the set of all pinned node IDs. Used during enumeration to
+    /// batch-resolve contentPolicy without one query per item.
+    public var allPinnedIds: Set<String> {
+        (try? pool.read { db in
+            let rows = try Row.fetchAll(db, sql: "SELECT nodeId FROM pinned_nodes")
+            return Set(rows.map { $0["nodeId"] as String })
+        }) ?? []
     }
 
     public func children(of parentId: String) -> [(id: String, entry: NodeCacheEntry)] {

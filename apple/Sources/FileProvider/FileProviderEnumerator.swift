@@ -134,6 +134,7 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
         var effectiveTrashId: String? = nodes.trashId
         var allNodes: [FileNode] = []
         var finalState: String = ""
+        let pinnedIds = await database.allPinnedIds
 
         // BFS queue of folder IDs whose children need to be fetched.
         var folderQueue: [String] = [nodes.homeId]
@@ -157,7 +158,8 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
 
                         if !node.isHome && !node.isRoot {
                             itemBatch.append(FileProviderItem(
-                                node: node, homeNodeId: nodes.homeId, trashNodeId: effectiveTrashId))
+                                node: node, homeNodeId: nodes.homeId, trashNodeId: effectiveTrashId,
+                                isPinned: pinnedIds.contains(node.id)))
                             if itemBatch.count >= itemBatchSize {
                                 observer.didEnumerate(itemBatch)
                                 itemBatch.removeAll()
@@ -209,6 +211,7 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
         let parentId = resolveParentId(containerIdentifier, nodes: nodes)
 
         let children = await database.children(of: parentId)
+        let pinnedIds = await database.allPinnedIds
 
         let currentStateToken = await database.stateToken ?? ""
         if children.isEmpty && currentStateToken.isEmpty {
@@ -219,7 +222,8 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
             let fetched = childrenByParent[parentId] ?? []
             for node in fetched { await database.upsertFromServer(node) }
             let items = fetched.map {
-                FileProviderItem(node: $0, homeNodeId: nodes.homeId, trashNodeId: nodes.trashId)
+                FileProviderItem(node: $0, homeNodeId: nodes.homeId, trashNodeId: nodes.trashId,
+                                 isPinned: pinnedIds.contains($0.id))
             }
             observer.didEnumerate(items)
             observer.finishEnumerating(upTo: nil)
@@ -227,7 +231,8 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
         }
 
         let items = children.map { (id, entry) in
-            FileProviderItem(nodeId: id, entry: entry, homeNodeId: nodes.homeId, trashNodeId: nodes.trashId)
+            FileProviderItem(nodeId: id, entry: entry, homeNodeId: nodes.homeId, trashNodeId: nodes.trashId,
+                             isPinned: pinnedIds.contains(id))
         }
         observer.didEnumerate(items)
         observer.finishEnumerating(upTo: nil)
