@@ -74,7 +74,7 @@ Tracks progress against the requirements in `../use-cases.txt`. Status key:
 | Clean, maintainable code | Partial | Ongoing |
 | Single source of truth, edge-triggered UI | Done | SQLite + Darwin notifications + UserDefaults KVO |
 | Allow user to "refresh" / force re-sync | Done | `cleanAccount` |
-| Clear bug reports and diagnostic log export | Partial | `DiagnosticsView` exports account/node text report; no os_log capture or traffic log ZIP bundle |
+| Clear bug reports and diagnostic log export | Partial | `DiagnosticsView` exports account/node stats + status JSONs + last 50 KB of JMAP traffic log as a shareable `.txt`; os_log capture requires Console.app (sandbox restriction) |
 | Roadmap document | Done | This file |
 | Bug log | Done | `BUGS.md` |
 | Tests | Done | 135 tests passing (JmapClientTests, SyncEngineTests, NodeDatabaseTests, etc.) |
@@ -85,8 +85,7 @@ Tracks progress against the requirements in `../use-cases.txt`. Status key:
 ## Remaining work (priority order)
 
 1. **Sparkle package** — add Sparkle SPM dependency + `SUFeedURL`/`SUPublicEDKey` in Info.plist to fully activate auto-updates (wiring is done)
-2. **Diagnostics bundle** — capture os_log entries + traffic log into a ZIP for support
-3. **PACC full RFC discovery** — remove Fastmail-hardcoded fallback; discover any server
-4. **`keepDownloaded` pin** — let user mark files/folders to always stay hydrated
-5. **Distribution pipeline** — DMG / notarised package + appcast for Sparkle
-6. **Uninstall cleanup** — script or helper to remove FileProvider domains + app group data
+2. **PACC full RFC discovery** — remove Fastmail-hardcoded fallback; discover any server
+3. **`keepDownloaded` pin** — let user mark files/folders to always stay hydrated
+4. **Distribution pipeline** — DMG / notarised package + appcast for Sparkle
+5. **Uninstall cleanup** — script or helper to remove FileProvider domains + app group data
