@@ -255,9 +255,9 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
             // After 5 consecutive failures something is broken — stop looping and surface an error.
             if failCount >= 5 {
                 #if canImport(os)
-                logger.error("[\(self.accountId, privacy: .public)] enumerateChanges: \(failCount) consecutive failures with no state token — halting retry loop")
+                logger.error("[\(self.accountId, privacy: .public)] enumerateChanges: \(failCount) consecutive failures with no state token — sync halted, reset cache to repair")
                 #endif
-                await database.setEnumerationFailureCount(0)
+                statusWriter?.setError("Sync halted after repeated failures. Reset cache to repair.")
                 observer.finishEnumeratingWithError(NSFileProviderError(.cannotSynchronize))
                 return
             }
