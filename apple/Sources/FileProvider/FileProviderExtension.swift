@@ -144,7 +144,9 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
         }
 
         // Build all infrastructure synchronously (no self needed).
-        let _sessionManager = SessionManager(sessionURL: sessionURL, tokenProvider: tokenProvider)
+        let sessionCacheURL = effectiveContainerURL.appendingPathComponent("session-\(acctId).json")
+        let _sessionManager = SessionManager(sessionURL: sessionURL, tokenProvider: tokenProvider,
+                                             diskCacheURL: sessionCacheURL)
         let _client = JmapClient(
             sessionManager: _sessionManager, tokenProvider: tokenProvider,
             requestWillSend: { url, body in

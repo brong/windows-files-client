@@ -5,14 +5,20 @@ public actor SessionManager {
     private let sessionURL: URL
     private let tokenProvider: TokenProvider
     private var cachedSession: JmapSession?
+    private let diskCacheURL: URL?
     private let decoder: JSONDecoder
 
     private let urlSession: URLSession
 
+    /// - Parameter diskCacheURL: Optional path to persist the session document between
+    ///   process launches. On warm start the cached session is returned without a network
+    ///   round-trip. Pass nil to disable persistence (in-memory cache only).
     public init(sessionURL: URL, tokenProvider: TokenProvider,
+                diskCacheURL: URL? = nil,
                 protocolClasses: [AnyClass]? = nil) {
         self.sessionURL = sessionURL
         self.tokenProvider = tokenProvider
+        self.diskCacheURL = diskCacheURL
 
         if let protocols = protocolClasses {
             let config = URLSessionConfiguration.default
@@ -43,9 +49,16 @@ public actor SessionManager {
     }
 
     /// Fetch or return cached session.
+    /// Order: in-memory cache → disk cache → network fetch.
     public func session() async throws -> JmapSession {
         if let cached = cachedSession {
             return cached
+        }
+        if let url = diskCacheURL,
+           let data = try? Data(contentsOf: url),
+           let session = try? decoder.decode(JmapSession.self, from: data) {
+            cachedSession = session
+            return session
         }
         return try await refreshSession()
     }
@@ -70,6 +83,9 @@ public actor SessionManager {
             let session = try decoder.decode(JmapSession.self, from: data)
             guard session.hasFileNode else {
                 throw JmapError.missingCapability("FileNode")
+            }
+            if let url = diskCacheURL {
+                try? data.write(to: url, options: .atomic)
             }
             cachedSession = session
             return session
