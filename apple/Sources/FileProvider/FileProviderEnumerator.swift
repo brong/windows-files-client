@@ -57,7 +57,7 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
         let db = database
         Task.detached {
             let stateToken = await db.stateToken
-            if let token = stateToken, let data = token.data(using: .utf8) {
+            if let token = stateToken, !token.isEmpty, let data = token.data(using: .utf8) {
                 completionHandler(NSFileProviderSyncAnchor(data))
             } else {
                 completionHandler(nil)
@@ -238,8 +238,21 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
         for observer: NSFileProviderChangeObserver,
         from syncAnchor: NSFileProviderSyncAnchor
     ) async throws {
-        guard let stateToken = String(data: syncAnchor.rawValue, encoding: .utf8) else {
-            throw NSFileProviderError(.syncAnchorExpired)
+        guard let stateToken = String(data: syncAnchor.rawValue, encoding: .utf8),
+              !stateToken.isEmpty else {
+            observer.finishEnumeratingWithError(NSFileProviderError(.syncAnchorExpired))
+            return
+        }
+
+        // If our database has no state token the anchor is stale from our side —
+        // force a full re-enumeration rather than reporting "no changes" with an empty DB.
+        let dbToken = await database.stateToken ?? ""
+        guard !dbToken.isEmpty else {
+            #if canImport(os)
+            logger.info("[\(self.accountId, privacy: .public)] enumerateChanges: DB has no state token — requesting full re-enumeration")
+            #endif
+            observer.finishEnumeratingWithError(NSFileProviderError(.syncAnchorExpired))
+            return
         }
 
         #if canImport(os)

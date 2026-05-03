@@ -389,8 +389,14 @@ class AppState: ObservableObject {
     func removeLogin(_ loginId: String) async {
         guard let login = logins.first(where: { $0.loginId == loginId }) else { return }
 
-        for acct in login.accounts where acct.isSynced {
-            await removeDomain(accountId: acct.accountId)
+        for acct in login.accounts {
+            if acct.isSynced {
+                await removeDomain(accountId: acct.accountId)
+            } else {
+                // Not synced so no FileProvider domain to remove, but the extension
+                // may have created database/cache files — clean those up too.
+                await purgeAccountFiles(accountId: acct.accountId)
+            }
         }
 
         // Remove login credential
@@ -605,6 +611,27 @@ class AppState: ObservableObject {
         }
     }
 
+    /// Delete all local files for an account without touching the FileProvider domain.
+    /// Used for accounts that were never synced (no registered domain).
+    private func purgeAccountFiles(accountId: String) async {
+        guard let containerURL = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: Self.appGroupId) else { return }
+        let nodeCacheDir = containerURL
+            .appendingPathComponent("NodeCache", isDirectory: true)
+            .appendingPathComponent(accountId, isDirectory: true)
+        try? FileManager.default.removeItem(at: nodeCacheDir)
+        let blobDir = containerURL.appendingPathComponent("blobs-\(accountId)")
+        try? FileManager.default.removeItem(at: blobDir)
+        let sessionCache = containerURL.appendingPathComponent("session-\(accountId).json")
+        try? FileManager.default.removeItem(at: sessionCache)
+        let statusFile = containerURL.appendingPathComponent("status-\(accountId).json")
+        try? FileManager.default.removeItem(at: statusFile)
+        defaults?.removeObject(forKey: "loginForAccount-\(accountId)")
+        defaults?.removeObject(forKey: "sessionURL-\(accountId)")
+        defaults?.removeObject(forKey: "authType-\(accountId)")
+        RoleCache.clear(accountId: accountId, defaults: defaults)
+    }
+
     private func removeDomain(accountId: String) async {
         do {
             let domain = NSFileProviderDomain(
@@ -623,6 +650,9 @@ class AppState: ObservableObject {
             try? FileManager.default.removeItem(at: nodeCacheDir)
             let blobDir = containerURL.appendingPathComponent("blobs-\(accountId)")
             try? FileManager.default.removeItem(at: blobDir)
+            // Session document disk cache
+            let sessionCache = containerURL.appendingPathComponent("session-\(accountId).json")
+            try? FileManager.default.removeItem(at: sessionCache)
             // Extension status file
             let statusFile = containerURL.appendingPathComponent("status-\(accountId).json")
             try? FileManager.default.removeItem(at: statusFile)
