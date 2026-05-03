@@ -274,11 +274,6 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
         #endif
 
         let activityId = "sync:\(accountId):changes"
-        let label = accountName.isEmpty ? "Checking for changes" : "Checking for changes (\(accountName))"
-        statusWriter?.setSyncing()
-        await activityTracker?.start(
-            id: activityId, accountId: accountId,
-            fileName: label, action: .sync)
 
         do {
             let nodes = try await specialNodes.value
@@ -298,9 +293,15 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
             let newAnchor = NSFileProviderSyncAnchor(newToken.data(using: .utf8)!)
             let totalChanges = updatedNodes.count + deletedIds.count
             if totalChanges > 0 {
+                // Only report syncing/activity when there are actual changes to apply.
+                // Routine no-op polls must not flash the status — it causes visual noise
+                // because the extension process is killed and restarted frequently.
+                let label = accountName.isEmpty ? "Applying changes" : "Applying changes (\(accountName))"
+                statusWriter?.setSyncing()
+                await activityTracker?.start(
+                    id: activityId, accountId: accountId,
+                    fileName: label, action: .sync)
                 await activityTracker?.complete(id: activityId)
-            } else {
-                await activityTracker?.remove(id: activityId)
             }
             statusWriter?.setIdle()
             #if canImport(os)
