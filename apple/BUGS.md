@@ -88,6 +88,8 @@ Status: **Open** | **Fixed** | **Mitigated** (workaround in place, root cause no
 
 - **`privacy: .public` omitted** — every interpolated value in a logger call needs it
 - **`await` inside `&&`/`||`** — always hoist to `let` first
-- **Extension process is transient** — never rely on in-memory state surviving between requests; persist to disk
+- **Extension process is transient** — never rely on in-memory state surviving between requests; persist to disk. The extension is killed and restarted roughly every 60 seconds (visible as repeated SSE "cancelled" errors in the log with new PIDs). Every extension restart triggers a change poll. Design accordingly.
 - **Two caches, one truth** — our DB and the system's FileProvider metadata cache can diverge; state token changes must keep both in sync
 - **Retry paths need backoff** — any error handler that triggers a network call needs a cap
+- **`try? removeItem` is not a reliable state reset** — silently fails when the target file is open by another process. Always reset persistent state via its own API (e.g. write `""` to the DB) rather than relying on file deletion.
+- **Status should reflect user-visible work only** — don't set "Syncing" before knowing there is something to sync. Routine no-op polls are implementation details; showing them as "Syncing" creates noise and erodes trust in the status indicator.
