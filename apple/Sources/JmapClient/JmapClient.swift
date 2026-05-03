@@ -572,10 +572,6 @@ public actor JmapClient {
             throw JmapError.invalidResponse
         }
 
-        let fileSize = try FileManager.default.attributesOfItem(
-            atPath: fileURL.path
-        )[.size] as? Int64 ?? 0
-
         var request = URLRequest(url: uploadURL)
         request.httpMethod = "POST"
         request.setValue(contentType, forHTTPHeaderField: "Content-Type")
