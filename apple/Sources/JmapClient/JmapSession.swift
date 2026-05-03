@@ -96,6 +96,9 @@ public actor SessionManager {
         }
     }
 
+    /// The state token of the currently cached session, if any.
+    public var cachedState: String? { cachedSession?.state }
+
     /// Invalidate the cached session.
     public func invalidate() {
         cachedSession = nil

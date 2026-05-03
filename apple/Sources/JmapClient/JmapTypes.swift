@@ -22,6 +22,7 @@ public enum JmapCapability {
 
 /// JMAP session response (RFC 8620 §2).
 public struct JmapSession: Codable, Sendable {
+    public let state: String
     public let apiUrl: String
     public let downloadUrl: String
     public let uploadUrl: String

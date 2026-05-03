@@ -98,6 +98,15 @@ public actor JmapClient {
 
         let response = try decoder.decode(JmapResponse.self, from: data)
 
+        // If the server's sessionState differs from our cached session, the session
+        // document has changed (new capabilities, URLs, etc.) — invalidate so the
+        // next call re-fetches it.
+        if let responseState = response.sessionState,
+           let cachedState = await sessionManager.cachedState,
+           responseState != cachedState {
+            await sessionManager.invalidate()
+        }
+
         // Filter out the piggybacked response — callers don't need it
         if accessedBatch.isEmpty {
             return response.methodResponses
