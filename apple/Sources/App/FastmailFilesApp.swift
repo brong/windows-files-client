@@ -602,10 +602,25 @@ class AppState: ObservableObject {
                 displayName: domainName
             )
             try await NSFileProviderManager.add(domain)
-            // Signal the system to call enumerateItems on the working set immediately.
-            // Without this, the system may retain a cached anchor from a previous
-            // registration and call enumerateChanges before enumerateItems, leaving
-            // Finder empty until the next push event triggers a re-check.
+
+            if let containerURL = FileManager.default.containerURL(
+                forSecurityApplicationGroupIdentifier: Self.appGroupId) {
+                // Belt-and-suspenders: clear the state token so enumerateWorkingSet is
+                // forced on the next extension wake. removeDomain tries to delete the
+                // whole NodeCache directory, but that can fail silently when the extension
+                // process still has the SQLite file open. Writing "" via the DB API is
+                // atomic and survives that race.
+                let db = NodeDatabase(containerURL: containerURL, accountId: accountId)
+                await db.setStateToken("")
+                await db.setEnumerationFailureCount(0)
+
+                // Pre-write a syncing status so the UI can't show "Up to date" before
+                // enumerateWorkingSet has actually run.
+                let writer = ExtensionStatusWriter(containerURL: containerURL, accountId: accountId)
+                writer.setSyncing()
+            }
+
+            // Signal the system to drive enumerateItems on the working set.
             NSFileProviderManager(for: domain)?.signalEnumerator(for: .workingSet) { _ in }
         } catch {
             // Clean up mapping on failure

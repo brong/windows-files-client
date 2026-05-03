@@ -43,15 +43,16 @@ Status: **Open** | **Fixed** | **Mitigated** (workaround in place, root cause no
 ---
 
 ## BUG-005 — Finder empty after account remove + re-add
-**Status:** Mitigated (commit b2d5cc8 + signalEnumerator fix)
+**Status:** Fixed
 **Symptom:** After removing an account and re-adding it, Finder shows the domain in the sidebar but no files/folders appear, despite the extension reporting "Up to date".
-**Root cause (confirmed partial):** Three contributing issues:
-  1. `currentSyncAnchor` returned a non-nil anchor for empty-string state tokens (`"".data(using:)` is non-nil `Data()`), so the system called `enumerateChanges` instead of `enumerateItems`.
-  2. `performChangeEnumeration` returned "no changes" when the DB was empty (fetchChanges returns `([], [])` with no state token), tricking the system into thinking it was up-to-date with an empty cache.
-  3. `removeDomain` was not deleting `session-{accountId}.json`.
-**Root cause (suspected, addressed):** Even after the above fixes, the system may call `enumerateChanges` before `enumerateItems` because it retains a cached anchor from the previous domain registration. Fixed by calling `NSFileProviderManager.signalEnumerator(for: .workingSet)` immediately after `NSFileProviderManager.add(domain)` in `registerDomain`, which forces `enumerateItems`.
-**Fix applied:** `currentSyncAnchor` treats `""` same as nil. `performChangeEnumeration` returns `syncAnchorExpired` when DB has no state token. `session-{accountId}.json` deleted on remove. `signalEnumerator(for: .workingSet)` called after domain add.
-**Lesson:** FileProvider state lives in two places: our SQLite DB and the system's own metadata cache. After removing a domain, the system's cache is cleared but ours persists. If we return a valid anchor, the system skips `enumerateItems` and Finder stays empty. Always clear the state token (or the whole DB) before removing a domain. And always signal after re-adding.
+**Root cause:** `removeDomain` tries to delete the NodeCache directory, but this silently fails when the extension process still has the SQLite file open. The stale DB retains the old state token. `currentSyncAnchor` returns non-nil, so the system calls `enumerateChanges` instead of `enumerateItems`. `performChangeEnumeration` runs, finds no server changes, calls `setIdle()` → "Up to date" in the UI. But the system's FileProvider item cache is empty (cleared when the domain was removed), so Finder shows nothing.
+**Fix applied:**
+  1. `registerDomain` now explicitly opens NodeDatabase and sets the state token to `""` via the DB API (atomic SQLite write, survives the directory-deletion race).
+  2. `registerDomain` pre-writes a "syncing" status file so the UI cannot show "Up to date" before `enumerateWorkingSet` has actually run.
+  3. `currentSyncAnchor` treats `""` same as nil (earlier fix) so the empty token → nil anchor → system calls `enumerateItems`.
+  4. `performChangeEnumeration` returns `syncAnchorExpired` when DB state token is empty (earlier fix) as a second guard.
+  5. `signalEnumerator(for: .workingSet)` called after domain add.
+**Lesson:** `try? removeItem` is not a reliable way to reset state — it silently fails when the target is in use. Always reset persistent state via its own API (write "" to the DB) before relying on file deletion. And never let the extension report "idle" before the initial `enumerateWorkingSet` has completed.
 
 ---
 
