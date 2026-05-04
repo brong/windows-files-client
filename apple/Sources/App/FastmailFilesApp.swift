@@ -213,12 +213,20 @@ class AppState: ObservableObject {
         guard let containerURL = FileManager.default.containerURL(
             forSecurityApplicationGroupIdentifier: Self.appGroupId) else { return }
         let reader = ExtensionStatusReader(containerURL: containerURL)
+        let knownAccountIds = Set(logins.flatMap { $0.accounts.map { $0.accountId } })
         var newStatuses: [String: ExtensionStatus] = [:]
         let now = Date()
         for var status in reader.allStatuses() {
-            // If the status file is > 5 minutes stale and shows syncing/initializing
-            // with zero active ops, the extension was killed mid-operation and has not
-            // restarted. Normalize to idle so we don't show perpetual spinning.
+            // Delete status files for accounts that no longer exist (removed accounts
+            // whose cleanup failed, or accounts from old registrations after re-add).
+            if !knownAccountIds.contains(status.accountId) {
+                let orphan = containerURL.appendingPathComponent("status-\(status.accountId).json")
+                try? FileManager.default.removeItem(at: orphan)
+                continue
+            }
+            // Normalize stale syncing/initializing with no active ops to idle.
+            // Extension killed mid-BFS leaves syncing on disk; if it hasn't been
+            // driven in > 5 min there is no live activity to show.
             if now.timeIntervalSince(status.updatedAt) > 300,
                (status.state == .syncing || status.state == .initializing),
                status.activeOperationCount == 0 {
