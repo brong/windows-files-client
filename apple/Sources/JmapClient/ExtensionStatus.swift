@@ -119,13 +119,16 @@ public final class ExtensionStatusWriter: @unchecked Sendable {
 
     public func setIdle(nodeCount: Int? = nil) {
         update {
-            $0.state = .idle
+            // Only transition to idle if no operations are in flight.
+            // Zeroing counts here races with concurrent uploads/downloads whose
+            // setActivityCounts calls run on a different Task.
+            if $0.activeOperationCount == 0 && $0.pendingOperationCount == 0 {
+                $0.state = .idle
+                $0.operationHints = []
+            }
             $0.error = nil
             $0.lastSyncTime = Date()
             if let count = nodeCount { $0.nodeCount = count }
-            $0.activeOperationCount = 0
-            $0.pendingOperationCount = 0
-            $0.operationHints = []
         }
     }
 
@@ -134,13 +137,14 @@ public final class ExtensionStatusWriter: @unchecked Sendable {
     }
 
     /// Update operation counts and hints from ActivityTracker.
-    /// Auto-transitions state: idle→syncing when active>0.
+    /// Auto-transitions: idle→syncing when active>0; syncing→idle when both drain to 0.
     public func setActivityCounts(active: Int, pending: Int, hints: [ExtensionStatus.OperationHint]) {
         update {
             $0.activeOperationCount = active
             $0.pendingOperationCount = pending
             $0.operationHints = hints
             if active > 0, $0.state == .idle { $0.state = .syncing }
+            if active == 0, pending == 0, $0.state == .syncing { $0.state = .idle }
         }
     }
 
