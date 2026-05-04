@@ -134,6 +134,15 @@ These are situations where our SQLite database and the system's FileProvider met
 
 ---
 
+## BUG-009 — Stale "syncing" status file causes perpetual spinner
+**Status:** Fixed
+**Symptom:** Menu bar shows "Syncing" indefinitely even though all accounts are idle. Restarting the app doesn't help.
+**Root cause:** The extension writes `state: syncing` at the start of `enumerateWorkingSet`. If the extension process is killed before the BFS finishes (and thus before `setIdle()` is called), the status file remains on disk with `state: syncing`. If the system never re-wakes that extension (because the user hasn't opened its Finder folder), the file stays stale indefinitely. The app reads all status files without checking freshness, so it derives "Syncing" from the stale file.
+**Fix:** `reloadExtensionStatuses()` in the app now normalizes any status with `state == .syncing || .initializing` and `activeOperationCount == 0` that hasn't been updated in > 5 minutes to `state = .idle`. Live extensions always write back within seconds of being driven; a 5-minute-old "syncing" status with zero active ops is definitionally stale.
+**Lesson:** Status files have a freshness window. An extension that is not being driven will not update its status file. The app must treat old syncing-with-no-ops statuses as idle — never show a spinner indefinitely when there is no evidence of live activity.
+
+---
+
 ## Recurring mistakes to watch for
 
 - **`privacy: .public` omitted** — every interpolated value in a logger call needs it

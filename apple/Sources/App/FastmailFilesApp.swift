@@ -214,7 +214,16 @@ class AppState: ObservableObject {
             forSecurityApplicationGroupIdentifier: Self.appGroupId) else { return }
         let reader = ExtensionStatusReader(containerURL: containerURL)
         var newStatuses: [String: ExtensionStatus] = [:]
-        for status in reader.allStatuses() {
+        let now = Date()
+        for var status in reader.allStatuses() {
+            // If the status file is > 5 minutes stale and shows syncing/initializing
+            // with zero active ops, the extension was killed mid-operation and has not
+            // restarted. Normalize to idle so we don't show perpetual spinning.
+            if now.timeIntervalSince(status.updatedAt) > 300,
+               (status.state == .syncing || status.state == .initializing),
+               status.activeOperationCount == 0 {
+                status.state = .idle
+            }
             newStatuses[status.accountId] = status
         }
         extensionStatuses = newStatuses
