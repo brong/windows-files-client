@@ -62,18 +62,24 @@ public actor SyncEngine {
 
     /// Fetch incremental changes since the last known state token.
     ///
-    /// Returns `([], [])` immediately when no state token is set — this happens
+    /// Applies all node writes to the database **without** advancing the state token.
+    /// The caller is responsible for writing `newState` to the database *after*
+    /// successfully signaling the changes to the FileProvider system.  This ordering
+    /// guarantees that any kill between DB write and system signal leaves the old
+    /// token intact, so the next restart re-applies the same changes idempotently.
+    ///
+    /// Returns `([], [], "")` immediately when no state token is set — this happens
     /// before the first full enumeration completes and is not an error.
     ///
     /// Throws `JmapError.cannotCalculateChanges` when the server cannot diff
-    /// from the stored token (it has been too long since the last sync). The
-    /// caller should clear the state token and trigger a fresh enumeration.
-    public func fetchChanges() async throws -> (updated: [FileNode], deleted: [String]) {
+    /// from the stored token (too old).  The caller should clear the state token
+    /// and trigger a fresh enumeration.
+    public func fetchChanges() async throws -> (updated: [FileNode], deleted: [String], newState: String) {
         guard let stateToken = await database.stateToken, !stateToken.isEmpty else {
             #if canImport(os)
             logger.info("[\(self.accountId, privacy: .public)] fetchChanges: no state token yet — skipping")
             #endif
-            return ([], [])
+            return ([], [], "")
         }
         #if canImport(os)
         logger.info("[\(self.accountId, privacy: .public)] fetchChanges: sinceState=\(stateToken, privacy: .public)")
@@ -89,11 +95,11 @@ public actor SyncEngine {
         if !changes.destroyed.isEmpty {
             await database.remove(nodeIds: changes.destroyed)
         }
-        await database.setStateToken(changes.newState)
-        try? await database.save()
+        // State token is NOT written here. The caller writes it after finishEnumeratingChanges
+        // so that a kill at any point leaves the DB in a re-applicable state.
         #if canImport(os)
-        logger.info("[\(self.accountId, privacy: .public)] fetchChanges: done — \(created.count) created, \(updated.count) updated, \(changes.destroyed.count) deleted, newState=\(changes.newState, privacy: .public) (stateChanged=\(stateToken != changes.newState, privacy: .public))")
+        logger.info("[\(self.accountId, privacy: .public)] fetchChanges: done — \(created.count) created, \(updated.count) updated, \(changes.destroyed.count) deleted, newState=\(changes.newState, privacy: .public)")
         #endif
-        return (allUpdated, changes.destroyed)
+        return (allUpdated, changes.destroyed, changes.newState)
     }
 }

@@ -113,8 +113,8 @@ public final class FileProviderItem: NSObject, NSFileProviderItem {
     /// Pinned items stay downloaded regardless of storage pressure (Finder shows
     /// "Keep Downloaded" / "Remove from Everywhere" in the context menu).
     /// Unpinned items are eligible for eviction when storage is needed.
-    public var contentPolicy: NSFileProviderItemContentPolicy {
-        pinned ? .downloadEagerlyAndKeepDownloaded : .downloadEligibleForEncryptedStorage
+    public var contentPolicy: NSFileProviderContentPolicy {
+        pinned ? .downloadEagerlyAndKeepDownloaded : .downloadLazily
     }
 
     public var creationDate: Date? {

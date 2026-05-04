@@ -185,6 +185,7 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
             await database.setStateToken(finalState)
             try await database.save()
 
+            await database.cleanupOrphanedPins()
             await database.setEnumerationFailureCount(0)
             await activityTracker?.complete(id: activityId)
             statusWriter?.setIdle(nodeCount: allNodes.count)
@@ -282,9 +283,9 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
 
         do {
             let nodes = try await specialNodes.value
-            // SyncEngine.fetchChanges handles the JMAP protocol + database update.
-            // The enumerator is responsible for the FileProvider observer callbacks only.
-            let (updatedNodes, deletedIds) = try await syncEngine.fetchChanges()
+            // fetchChanges applies all node writes to the DB but does NOT advance the
+            // state token — that is our responsibility, and we do it last (see below).
+            let (updatedNodes, deletedIds, newState) = try await syncEngine.fetchChanges()
 
             let updatedItems = updatedNodes.filter { !$0.isHome && !$0.isRoot }.map {
                 FileProviderItem(node: $0, homeNodeId: nodes.homeId, trashNodeId: nodes.trashId)
@@ -294,8 +295,10 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
             let deletedIdentifiers = deletedIds.map { NSFileProviderItemIdentifier($0) }
             if !deletedIdentifiers.isEmpty { observer.didDeleteItems(withIdentifiers: deletedIdentifiers) }
 
-            let newToken = await database.stateToken ?? stateToken
-            let newAnchor = NSFileProviderSyncAnchor(newToken.data(using: .utf8)!)
+            // Use the server's new state as the anchor. Fall back to the system's
+            // incoming anchor if fetchChanges returned nothing (no-op poll).
+            let effectiveNewState = newState.isEmpty ? stateToken : newState
+            let newAnchor = NSFileProviderSyncAnchor(effectiveNewState.data(using: .utf8)!)
             let totalChanges = updatedNodes.count + deletedIds.count
             if totalChanges > 0 {
                 // Only report syncing/activity when there are actual changes to apply.
@@ -310,9 +313,17 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
             }
             statusWriter?.setIdle()
             #if canImport(os)
-            logger.info("[\(self.accountId, privacy: .public)] enumerateChanges done — \(updatedNodes.count) updated, \(deletedIds.count) deleted, newAnchor=\(newToken, privacy: .public)")
+            logger.info("[\(self.accountId, privacy: .public)] enumerateChanges done — \(updatedNodes.count) updated, \(deletedIds.count) deleted, newAnchor=\(effectiveNewState, privacy: .public)")
             #endif
             observer.finishEnumeratingChanges(upTo: newAnchor, moreComing: false)
+
+            // Commit the new state token only after the system has acknowledged the
+            // changes. If the extension is killed between the DB writes above and this
+            // line, the old token stays in the DB and the next restart re-applies the
+            // same changes via idempotent upserts/removes — no data is lost or doubled.
+            if !newState.isEmpty {
+                await database.setStateToken(newState)
+            }
 
         } catch JmapError.cannotCalculateChanges {
             await activityTracker?.remove(id: activityId)

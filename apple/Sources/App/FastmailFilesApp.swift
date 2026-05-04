@@ -223,6 +223,10 @@ class AppState: ObservableObject {
 
     init() {
         self.defaults = UserDefaults(suiteName: Self.appGroupId)
+        if let containerURL = FileManager.default.containerURL(
+                forSecurityApplicationGroupIdentifier: Self.appGroupId) {
+            TrafficLog.shared.configure(containerURL: containerURL)
+        }
         loadState()
         Task { await checkAllConnections() }
         startObservers()

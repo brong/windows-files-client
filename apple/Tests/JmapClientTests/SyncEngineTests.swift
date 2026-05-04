@@ -114,10 +114,11 @@ extension NetworkTests {
         let (db, _) = try makeTmpDB()
 
         let engine = SyncEngine(client: makeSyncClient(), database: db, accountId: "u123")
-        let (updated, deleted) = try await engine.fetchChanges()
+        let (updated, deleted, newState) = try await engine.fetchChanges()
 
         #expect(updated.isEmpty)
         #expect(deleted.isEmpty)
+        #expect(newState.isEmpty)
     }
 
     @Test func fetchChangesUpdatesDBAndReturnsNodes() async throws {
@@ -145,12 +146,14 @@ extension NetworkTests {
         defer { MockURLProtocol.handler = nil }
 
         let engine = SyncEngine(client: makeSyncClient(), database: db, accountId: "u123")
-        let (updated, deleted) = try await engine.fetchChanges()
+        let (updated, deleted, newState) = try await engine.fetchChanges()
 
         #expect(updated.count == 1)
         #expect(updated[0].id == "N1")
         #expect(deleted == ["N-old"])
-        #expect(await db.stateToken == "state-new")
+        #expect(newState == "state-new")
+        // State token NOT advanced by fetchChanges — caller commits it after signaling the system
+        #expect(await db.stateToken == "state-old")
         #expect(await db.entry(for: "N1")?.name == "new.txt")
     }
 

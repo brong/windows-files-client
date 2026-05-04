@@ -26,3 +26,17 @@ public struct SHA1Context {
         return Data(digest).base64EncodedString()
     }
 }
+
+/// Compute SHA1 digest of a file by streaming it in 64 KB chunks.
+/// Avoids loading the entire file into memory.
+public func sha1OfFile(_ url: URL) throws -> String {
+    let fileHandle = try FileHandle(forReadingFrom: url)
+    defer { try? fileHandle.close() }
+    var ctx = SHA1Context()
+    while true {
+        let chunk = fileHandle.readData(ofLength: 65536)
+        if chunk.isEmpty { break }
+        ctx.update(chunk)
+    }
+    return ctx.finalize()
+}

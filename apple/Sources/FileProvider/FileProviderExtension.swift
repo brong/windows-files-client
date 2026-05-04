@@ -147,13 +147,8 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
         let sessionCacheURL = effectiveContainerURL.appendingPathComponent("session-\(acctId).json")
         let _sessionManager = SessionManager(sessionURL: sessionURL, tokenProvider: tokenProvider,
                                              diskCacheURL: sessionCacheURL)
-        let _client = JmapClient(
-            sessionManager: _sessionManager, tokenProvider: tokenProvider,
-            requestWillSend: { url, body in
-                TrafficLog.shared.log("→ POST \(url.absoluteString)\n\(TrafficLog.formatBody(body))")
-            }, responseDidReceive: { url, status, body in
-                TrafficLog.shared.log("← \(status) \(url.absoluteString)\n\(TrafficLog.formatBody(body))")
-            })
+        TrafficLog.shared.configure(containerURL: effectiveContainerURL)
+        let _client = JmapClient(sessionManager: _sessionManager, tokenProvider: tokenProvider)
         let _database = NodeDatabase(containerURL: effectiveContainerURL, accountId: acctId)
         let _activityTracker = ActivityTracker(containerURL: effectiveContainerURL)
         let _statusWriter = ExtensionStatusWriter(containerURL: effectiveContainerURL, accountId: acctId)
@@ -420,16 +415,40 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
 
                     await activityTracker.markActive(id: activityId)
                     let contentType = itemTemplate.contentType?.preferredMIMEType ?? "application/octet-stream"
-                    let blob = try await client.uploadBlobChunked(
-                        accountId: accountId,
-                        fileURL: contentURL,
-                        contentType: contentType
-                    ) { uploaded, total in
-                        if total > 0 {
-                            let pct = Double(uploaded) / Double(total)
-                            progress.completedUnitCount = Int64(pct * 80)
-                            Task { await self.activityTracker.updateProgress(id: activityId, progress: pct * 0.8) }
+
+                    // Detect retry: if a node with this name already exists in our DB, the previous
+                    // createItem may have succeeded but died before calling completionHandler.
+                    // If the server still holds that blob with the same content (verified via SHA1),
+                    // skip the re-upload entirely — the content hasn't changed.
+                    let existingBlobId: String? = await {
+                        guard let existingNodeId = await database.nodeId(forName: fileName, parentId: parentId) else { return nil }
+                        return await database.entry(for: existingNodeId)?.blobId
+                    }()
+                    let reusedBlobId: String? = await {
+                        guard let candidateBlobId = existingBlobId,
+                              let localSha1 = try? sha1OfFile(contentURL) else { return nil }
+                        return (try? await client.blobHasDigest(
+                            accountId: accountId, blobId: candidateBlobId, sha1: localSha1)) == true
+                            ? candidateBlobId : nil
+                    }()
+
+                    let blobId: String
+                    if let reused = reusedBlobId {
+                        blobId = reused
+                        progress.completedUnitCount = 80
+                    } else {
+                        let blob = try await client.uploadBlobChunked(
+                            accountId: accountId,
+                            fileURL: contentURL,
+                            contentType: contentType
+                        ) { uploaded, total in
+                            if total > 0 {
+                                let pct = Double(uploaded) / Double(total)
+                                progress.completedUnitCount = Int64(pct * 80)
+                                Task { await self.activityTracker.updateProgress(id: activityId, progress: pct * 0.8) }
+                            }
                         }
+                        blobId = blob.blobId
                     }
 
                     await activityTracker.updateProgress(id: activityId, progress: 0.9)
@@ -437,7 +456,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                         accountId: accountId,
                         parentId: parentId,
                         name: fileName,
-                        blobId: blob.blobId,
+                        blobId: blobId,
                         type: contentType,
                         created: itemTemplate.creationDate ?? nil,
                         modified: itemTemplate.contentModificationDate ?? nil,
@@ -451,7 +470,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                     let entry = NodeCacheEntry(
                         parentId: node.parentId ?? parentId,
                         name: node.name ?? fileName,
-                        blobId: node.blobId ?? blob.blobId,
+                        blobId: node.blobId ?? blobId,
                         size: node.size ?? ((try? FileManager.default.attributesOfItem(
                             atPath: contentURL.path)[.size] as? Int) ?? 0),
                         modified: node.modified ?? (itemTemplate.contentModificationDate ?? nil),
@@ -517,10 +536,12 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                     }
 
                     await activityTracker.markActive(id: activityId)
-                    let blob = try await client.uploadBlobChunked(
+                    let currentBlobId = await database.entry(for: nodeId)?.blobId
+                    let blob = try await client.uploadBlobDelta(
                         accountId: accountId,
                         fileURL: contentURL,
-                        contentType: contentType
+                        contentType: contentType,
+                        oldBlobId: currentBlobId
                     ) { uploaded, total in
                         if total > 0 {
                             let pct = Double(uploaded) / Double(total)
@@ -595,15 +616,16 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                 // framework keeps them hydrated. Eager download is gated on bandwidth:
                 // it runs only on unrestricted connections so it never competes with an
                 // interactive file open on cellular / Low Data Mode.
-                if changedFields.contains(.contentPolicy) {
+                do {
                     let wantsPinned = item.contentPolicy == .downloadEagerlyAndKeepDownloaded
                     await database.setPinned(id: currentNodeId, pinned: wantsPinned)
-                    if wantsPinned && (await bandwidthPolicy.allowsBackgroundDownload) {
+                    let allowsDownload = await bandwidthPolicy.allowsBackgroundDownload
+                    if wantsPinned && allowsDownload {
                         // Ask the framework to hydrate now; it will schedule behind any
                         // in-flight interactive downloads automatically.
                         let identifier = NSFileProviderItemIdentifier(currentNodeId)
                         NSFileProviderManager(for: domain)?
-                            .requestDownloadForItems(withIdentifiers: [identifier]) { _ in }
+                            .requestDownloadForItem(withIdentifier: identifier) { _ in }
                     }
                 }
 
@@ -857,73 +879,3 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
 
 /// Simple file-based traffic logger for the FileProvider extension.
 /// Writes to the shared App Group container so the app or `tail -f` can read it.
-final class TrafficLog: Sendable {
-    static let shared = TrafficLog()
-
-    private let logger = Logger(subsystem: "com.fastmail.files", category: "JMAP")
-    private let fileURL: URL?
-    private let lock = NSLock()
-
-    private init() {
-        fileURL = FileManager.default
-            .containerURL(forSecurityApplicationGroupIdentifier: "BJL34Q426G.com.fastmail.files")?
-            .appendingPathComponent("jmap-traffic.log")
-        // Truncate on each extension launch so the file doesn't grow unbounded
-        if let url = fileURL { try? "".write(to: url, atomically: false, encoding: .utf8) }
-    }
-
-    func log(_ message: String) {
-        logger.info("\(message, privacy: .public)")
-        guard let url = fileURL else { return }
-        let line = message + "\n---\n"
-        lock.lock()
-        if let handle = try? FileHandle(forWritingTo: url) {
-            handle.seekToEndOfFile()
-            handle.write(Data(line.utf8))
-            handle.closeFile()
-        } else {
-            try? line.write(to: url, atomically: false, encoding: .utf8)
-        }
-        lock.unlock()
-    }
-
-    /// Format a JMAP body for logging, extracting method calls/responses.
-    static func formatBody(_ data: Data) -> String {
-        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return String(data: data, encoding: .utf8) ?? "(\(data.count) bytes)"
-        }
-
-        var opts: JSONSerialization.WritingOptions = [.prettyPrinted, .sortedKeys]
-        if #available(macOS 13, *) {
-            opts.insert(.withoutEscapingSlashes)
-        }
-
-        // Extract method calls or responses
-        let key = obj["methodCalls"] != nil ? "methodCalls" : (obj["methodResponses"] != nil ? "methodResponses" : nil)
-        if let key = key, let methods = obj[key] as? [[Any]] {
-            var lines: [String] = []
-            for method in methods {
-                guard method.count >= 3,
-                      let name = method[0] as? String,
-                      let callId = method[2] as? String else { continue }
-                if let argsData = try? JSONSerialization.data(withJSONObject: method[1], options: opts),
-                   var argsStr = String(data: argsData, encoding: .utf8) {
-                    argsStr = argsStr.replacingOccurrences(of: "\\[\\s*\\]", with: "[]", options: .regularExpression)
-                    argsStr = argsStr.replacingOccurrences(of: "\\{\\s*\\}", with: "{}", options: .regularExpression)
-                    lines.append("  \(name) #\(callId)\n    \(argsStr.replacingOccurrences(of: "\n", with: "\n    "))")
-                } else {
-                    lines.append("  \(name) #\(callId)")
-                }
-            }
-            return lines.joined(separator: "\n")
-        }
-
-        // Non-JMAP — compact
-        if let data = try? JSONSerialization.data(withJSONObject: obj, options: opts),
-           let str = String(data: data, encoding: .utf8) {
-            let maxLen = 1000
-            return str.count > maxLen ? String(str.prefix(maxLen)) + "..." : str
-        }
-        return "(\(data.count) bytes)"
-    }
-}

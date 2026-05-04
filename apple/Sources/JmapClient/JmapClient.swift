@@ -90,10 +90,16 @@ public actor JmapClient {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let bodyData = try encoder.encode(body)
         request.httpBody = bodyData
-        if let url = request.url { requestWillSend?(url, bodyData) }
+        if let url = request.url {
+            let cb = requestWillSend ?? { u, d in TrafficLog.shared.log("→ POST \(u.absoluteString)\n\(TrafficLog.formatBody(d))") }
+            cb(url, bodyData)
+        }
 
         let (data, httpResponse) = try await authorizedRequest(request, session: interactiveSession)
-        if let url = request.url { responseDidReceive?(url, httpResponse.statusCode, data) }
+        if let url = request.url {
+            let cb = responseDidReceive ?? { u, s, d in TrafficLog.shared.log("← \(s) \(u.absoluteString)\n\(TrafficLog.formatBody(d))") }
+            cb(url, httpResponse.statusCode, data)
+        }
         try checkHTTPStatus(httpResponse, data: data)
 
         let response = try decoder.decode(JmapResponse.self, from: data)
@@ -946,6 +952,41 @@ public actor JmapClient {
         return BlobUploadResponse(blobId: blobId, size: size, type: contentType)
     }
 
+    /// Check whether a blob already exists on the server with the given SHA1 digest.
+    ///
+    /// Used by `createItem` to detect a successful upload from a prior extension process
+    /// that was killed before its `completionHandler` could fire. If the blob is still there
+    /// with matching content, we skip the re-upload entirely.
+    ///
+    /// Returns false (not true) if blob2 capability is absent, or if the network call fails —
+    /// the caller falls through to a normal upload in both cases.
+    public func blobHasDigest(accountId: String, blobId: String, sha1: String) async throws -> Bool {
+        let session = try await sessionManager.session()
+        guard session.hasBlob2(accountId: accountId) else { return false }
+
+        let responses = try await call([
+            JmapMethodCall(
+                name: "Blob/get",
+                args: [
+                    "accountId": AnyCodable(accountId),
+                    "ids": AnyCodable([AnyCodable(blobId)]),
+                    "properties": AnyCodable(["id", "digest:sha"].map { AnyCodable($0) }),
+                ],
+                callId: "b0"
+            ),
+        ], using: [JmapCapability.core, JmapCapability.blob2])
+
+        guard let response = responses.first,
+              response.count >= 3,
+              response[2].stringValue == "b0",
+              let argsDict = response[1].dictValue,
+              let list = argsDict["list"]?.arrayValue,
+              let blob = list.first?.dictValue
+        else { return false }
+
+        return blob["digest:sha"]?.stringValue == sha1
+    }
+
     /// Download a blob to a temporary file. Returns the temp file URL.
     public func downloadBlob(
         accountId: String,
@@ -1199,17 +1240,11 @@ public actor JmapClient {
         let token = try await getToken()
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
 
-        if let onBytesSent = onBytesSent {
-            // Delegate-based upload for progress reporting
-            return try await ProgressUploader.upload(request: request, fromFile: fileURL,
-                                                     session: urlSession, onBytesSent: onBytesSent)
-        }
-
-        let (data, response) = try await urlSession.upload(for: request, fromFile: fileURL)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw JmapError.invalidResponse
-        }
-        return (data, httpResponse)
+        // Always use the delegate path so stall detection fires on every upload,
+        // regardless of whether the caller needs progress callbacks.
+        return try await ProgressUploader.upload(
+            request: request, fromFile: fileURL, session: urlSession,
+            onBytesSent: onBytesSent ?? { _, _ in })
     }
 
     private func authorizedDownload(
@@ -1291,7 +1326,7 @@ public actor JmapClient {
 
         let bgConfig = URLSessionConfiguration.default
         bgConfig.httpMaximumConnectionsPerHost = 4
-        bgConfig.timeoutIntervalForRequest = 120
+        // No timeoutIntervalForRequest — ProgressUploader's stall detector handles this.
         if let protocols = protocolClasses {
             bgConfig.protocolClasses = protocols
         }

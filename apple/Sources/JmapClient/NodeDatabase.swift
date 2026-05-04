@@ -207,6 +207,18 @@ public actor NodeDatabase {
         }) == 1
     }
 
+    /// Remove pinned_nodes entries whose nodeId no longer exists in nodes.
+    /// Called after a full BFS completes so stale pins from a previous account
+    /// incarnation (different node IDs) don't accumulate indefinitely.
+    public func cleanupOrphanedPins() {
+        try? pool.write { db in
+            try db.execute(sql: """
+                DELETE FROM pinned_nodes
+                WHERE nodeId NOT IN (SELECT id FROM nodes)
+            """)
+        }
+    }
+
     public func setPinned(id: String, pinned: Bool) {
         try? pool.write { db in
             if pinned {
@@ -228,6 +240,18 @@ public actor NodeDatabase {
             let rows = try Row.fetchAll(db, sql: "SELECT nodeId FROM pinned_nodes")
             return Set(rows.map { $0["nodeId"] as String })
         }) ?? []
+    }
+
+    /// Look up the node ID of an item by exact name and parent folder.
+    /// Used to detect prior successful uploads whose completionHandler was never called.
+    public func nodeId(forName name: String, parentId: String) -> String? {
+        try? pool.read { db in
+            try String.fetchOne(
+                db,
+                sql: "SELECT id FROM nodes WHERE parentId = ? AND name = ?",
+                arguments: [parentId, name]
+            )
+        }
     }
 
     public func children(of parentId: String) -> [(id: String, entry: NodeCacheEntry)] {

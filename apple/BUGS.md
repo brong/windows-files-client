@@ -91,13 +91,13 @@ These are situations where our SQLite database and the system's FileProvider met
 ### 1 — Extension killed between DB write and `completionHandler`
 **Scenario:** `createItem` or `modifyItem` writes the new node to the DB (via `upsertFromServer`), then the extension is killed before calling `completionHandler(item, ...)`.
 **Result:** DB has the node; system cache does not. System will retry the operation.
-**Current mitigation:** On retry the server call is re-issued. For `modifyItem` (rename/move) the server returns success again and the DB is re-written — idempotent. For `createItem` see scenario 2.
+**Current mitigation:** On retry the server call is re-issued. For `modifyItem` (rename/move) the server returns success again and the DB is re-written — idempotent. For `createItem` see scenario 2 (now fixed).
 
-### 2 — `createItem` retry creates a duplicate ⚠️ DANGEROUS
+### 2 — `createItem` retry blob deduplication
 **Scenario:** `createItem` succeeds on the server and in our DB, extension dies before `completionHandler`. System retries → we call `FileNode/set create` again → a second node with the same name is created on the server (or an error if `onExists` rejects it).
 **Result:** Two files on the server where the user intended one, or a spurious error on the retry. If the retry gets a new node ID, DB ends up with two entries for the same local file.
-**Current mitigation:** `compareCaseInsensitively: true` and `onExists: "rename"` in some paths reduces collisions. Not fully resolved — idempotency key (e.g. include a client-generated UUID in the create and deduplicate on retry) would fix this properly.
-**Status:** Open. Low frequency (extension must die in a specific 50–200 ms window), but possible.
+**Fix applied:** Before uploading, `createItem` checks the DB for an existing node with the same (name, parentId). If found, it computes the local file's SHA1 and verifies via `Blob/get + digest:sha` that the server still holds that blob with matching content. If so, the re-upload is skipped and the existing blobId is reused. `onExists: "replace"` on `FileNode/set create` then makes the node creation idempotent. Combined, this means a retry either returns the same node (blob still on server) or creates a fresh one after a clean upload — never a duplicate.
+**Status:** Fixed.
 
 ### 3 — `deleteItem` (move to trash) succeeds on server, DB delete fails
 **Scenario:** `client.updateNode(parentId: trashId)` succeeds. DB write (`upsertFromServer` / `remove`) then throws or extension dies.
@@ -107,7 +107,8 @@ These are situations where our SQLite database and the system's FileProvider met
 ### 4 — `modifyItem` content upload succeeds, `updateNodeContent` fails
 **Scenario:** Blob is uploaded and stored on the server. `FileNode/set update { blobId }` then fails (network, auth, etc.).
 **Result:** A blob exists on the server that nothing references. The file content on the server is stale (old blobId). Our DB still has the old blobId.
-**Current mitigation:** On retry we re-upload the blob and re-call `updateNodeContent`. The orphaned blob is cleaned up by the server's GC. Not dangerous for user data.
+**Fix applied:** `modifyItem` now calls `uploadBlobDelta(oldBlobId: currentBlobIdFromDB)` instead of `uploadBlobChunked`. On retry, the delta upload fetches the previously-uploaded blob's chunk structure from the server, compares SHA1 hashes, and reuses all matching chunks — so if the file hasn't changed since the failed attempt, no bytes are re-uploaded. The orphaned blob from the first attempt is still GC'd by the server, but the retry is now cheap.
+**Status:** Fixed (retry is now delta-aware; orphaned blob cleanup is server-side as before).
 
 ### 5 — Partial `enumerateWorkingSet` BFS
 **Scenario:** BFS fetches some pages then crashes or is killed mid-way. `stateToken` is only written on full success.
@@ -122,12 +123,14 @@ These are situations where our SQLite database and the system's FileProvider met
 ### 7 — Pin state orphaned after account remove + re-add
 **Scenario:** `pinned_nodes` table is local-only and not cleared by a node-table reset or domain removal. After re-add, the BFS may assign different node IDs (unlikely but possible if server state changed).
 **Result:** `pinned_nodes` contains IDs that no longer exist in `nodes`. `contentPolicy` lookups return false (correct: no match). Orphaned rows are harmless but accumulate.
-**Current mitigation:** Harmless — `isPinned(id:)` returns false for unknown IDs. Could add a periodic cleanup (`DELETE FROM pinned_nodes WHERE nodeId NOT IN (SELECT id FROM nodes)`), but not urgent.
+**Fix applied:** `NodeDatabase.cleanupOrphanedPins()` runs a single `DELETE FROM pinned_nodes WHERE nodeId NOT IN (SELECT id FROM nodes)` after each successful `enumerateWorkingSet` BFS completes. Orphaned rows are pruned automatically after every full re-enumeration.
+**Status:** Fixed.
 
 ### 8 — `enumerateChanges` returns items not yet in DB
-**Scenario:** Server reports a node as created/updated. We call `FileNode/get`, get the node back, write to DB, then call `observer.didUpdate(item)`. If `item(for:identifier:)` is called by the system before the DB write is committed (race with `database.save()`), it fetches a stale or missing entry.
+**Scenario:** Server reports a node as created/updated. We call `FileNode/get`, get the node back, write to DB, then call `observer.didUpdate(item)`. If `item(for:identifier:)` is called by the system before the DB write is committed, it fetches a stale or missing entry.
 **Result:** System gets a `noSuchItem` error for an item it just received as an update. Typically causes a brief Finder glitch; system retries.
-**Current mitigation:** Low probability due to actor isolation. `database.save()` is called before `observer.finishEnumeratingChanges`. Not fully eliminated — a more robust fix would pass the fully-written items directly rather than relying on a subsequent `item(for:)` lookup.
+**Fix applied:** `SyncEngine.fetchChanges()` now returns the new state token without writing it to the DB. `performChangeEnumeration` writes the token to DB only *after* `observer.finishEnumeratingChanges` succeeds. This gives the commit ordering: (1) apply node writes idempotently, (2) signal system, (3) advance state token. A kill at any point before step 3 leaves the old token in DB; the next restart re-fetches and re-applies the same changes (upserts and removes are both idempotent). The DB writes in step 1 happen before `observer.didUpdate`, so `item(for:)` lookups always find the node in the DB when the system calls back.
+**Status:** Fixed.
 
 ---
 
