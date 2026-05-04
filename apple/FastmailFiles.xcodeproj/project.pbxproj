@@ -10,6 +10,11 @@
 		01CD54C5900646D896D50B47 /* FastmailFilesApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 054924ACAC670250C31DF3D2 /* FastmailFilesApp.swift */; };
 		BB00111100000000000BBD01 /* DiagnosticsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB00111100000000000AA01 /* DiagnosticsView.swift */; };
 		BB00111100000000000BBD02 /* UpdateManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB00111100000000000AA02 /* UpdateManager.swift */; };
+		CC11223344556677889900A1 /* CredentialStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC11223344556677889900B1 /* CredentialStore.swift */; };
+		CC11223344556677889900A2 /* AccountStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC11223344556677889900B2 /* AccountStore.swift */; };
+		CC11223344556677889900A3 /* DomainRegistrar.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC11223344556677889900B3 /* DomainRegistrar.swift */; };
+		CC11223344556677889900A4 /* StatusMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC11223344556677889900B4 /* StatusMonitor.swift */; };
+		CC11223344556677889900A5 /* AppViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC11223344556677889900B5 /* AppViewModel.swift */; };
 		0F38DB4C08F36708EB3B2274 /* JmapClient in Frameworks */ = {isa = PBXBuildFile; productRef = 454F3DDC48B644011C0444EA /* JmapClient */; };
 		4F0C378D5D46F806C36D9034 /* FileProvider.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 50DD1E0837F22C43815E2FB8 /* FileProvider.framework */; };
 		8A63835D72FE8F0771B1259D /* JmapClient in Frameworks */ = {isa = PBXBuildFile; productRef = D1570E748A7CBC329B08D346 /* JmapClient */; };
@@ -61,6 +66,11 @@
 		054924ACAC670250C31DF3D2 /* FastmailFilesApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FastmailFilesApp.swift; sourceTree = "<group>"; };
 		BB00111100000000000AA01 /* DiagnosticsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsView.swift; sourceTree = "<group>"; };
 		BB00111100000000000AA02 /* UpdateManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateManager.swift; sourceTree = "<group>"; };
+		CC11223344556677889900B1 /* CredentialStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CredentialStore.swift; sourceTree = "<group>"; };
+		CC11223344556677889900B2 /* AccountStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountStore.swift; sourceTree = "<group>"; };
+		CC11223344556677889900B3 /* DomainRegistrar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DomainRegistrar.swift; sourceTree = "<group>"; };
+		CC11223344556677889900B4 /* StatusMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusMonitor.swift; sourceTree = "<group>"; };
+		CC11223344556677889900B5 /* AppViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppViewModel.swift; sourceTree = "<group>"; };
 		22E24E8899D6F4E64FCDE7A4 /* FileProviderExtension.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileProviderExtension.swift; sourceTree = "<group>"; };
 		50DD1E0837F22C43815E2FB8 /* FileProvider.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = FileProvider.framework; path = System/Library/Frameworks/FileProvider.framework; sourceTree = SDKROOT; };
 		58DD94B8668AAEFD671FF123 /* Fastmail Files.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Fastmail Files.app"; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -136,6 +146,11 @@
 			isa = PBXGroup;
 			children = (
 				054924ACAC670250C31DF3D2 /* FastmailFilesApp.swift */,
+				CC11223344556677889900B5 /* AppViewModel.swift */,
+				CC11223344556677889900B1 /* CredentialStore.swift */,
+				CC11223344556677889900B2 /* AccountStore.swift */,
+				CC11223344556677889900B3 /* DomainRegistrar.swift */,
+				CC11223344556677889900B4 /* StatusMonitor.swift */,
 				BB00111100000000000AA01 /* DiagnosticsView.swift */,
 				AB90E03CDE401BD27EF72145 /* Info.plist */,
 				9DA41B9C56D4EEA74C31ED58 /* MenuBarView.swift */,
@@ -259,6 +274,11 @@
 			buildActionMask = 2147483647;
 			files = (
 				01CD54C5900646D896D50B47 /* FastmailFilesApp.swift in Sources */,
+				CC11223344556677889900A5 /* AppViewModel.swift in Sources */,
+				CC11223344556677889900A1 /* CredentialStore.swift in Sources */,
+				CC11223344556677889900A2 /* AccountStore.swift in Sources */,
+				CC11223344556677889900A3 /* DomainRegistrar.swift in Sources */,
+				CC11223344556677889900A4 /* StatusMonitor.swift in Sources */,
 				BB00111100000000000BBD01 /* DiagnosticsView.swift in Sources */,
 				8E2D11B1A1A5FD2DDAA44F3B /* MenuBarView.swift in Sources */,
 				A22B603EDD492089EAC68A7F /* SettingsView.swift in Sources */,

@@ -4,7 +4,7 @@ import JmapClient
 
 #if os(macOS)
 struct MenuBarView: View {
-    @ObservedObject var appState: AppState
+    @ObservedObject var appState: AppViewModel
     @ObservedObject var updateManager: UpdateManager
     @Environment(\.openWindow) private var openWindow
 

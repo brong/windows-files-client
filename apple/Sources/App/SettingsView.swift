@@ -49,7 +49,7 @@ private enum ConfirmAction: Identifiable {
 }
 
 struct SettingsView: View {
-    @ObservedObject var appState: AppState
+    @ObservedObject var appState: AppViewModel
     @State private var orphanedDomains: [NSFileProviderDomain] = []
     @State private var confirmAction: ConfirmAction?
 
@@ -428,7 +428,7 @@ struct DiscoveredAccount: Identifiable {
 }
 
 struct AddAccountView: View {
-    @ObservedObject var appState: AppState
+    @ObservedObject var appState: AppViewModel
     @State private var email = ""
     @State private var showAdvanced = false
     @State private var sessionURL = "https://api.fastmail.com/jmap/session"
@@ -937,7 +937,7 @@ private func startOAuthCallbackServer(
 // MARK: - Activity View
 
 struct ActivityView: View {
-    @ObservedObject var appState: AppState
+    @ObservedObject var appState: AppViewModel
 
     private var activities: [ActivityTracker.Activity] {
         appState.activitySnapshot?.activities ?? []
@@ -1094,7 +1094,7 @@ private struct EmailContentTypeModifier: ViewModifier {
 }
 
 struct ContentView: View {
-    @ObservedObject var appState: AppState
+    @ObservedObject var appState: AppViewModel
 
     var body: some View {
         NavigationView {

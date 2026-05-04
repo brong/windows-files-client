@@ -6,7 +6,7 @@ import AppKit
 
 #if os(macOS)
 struct DiagnosticsView: View {
-    @ObservedObject var appState: AppState
+    @ObservedObject var appState: AppViewModel
     @State private var reportURL: URL?
     @State private var isBuilding = false
     @State private var buildError: String?
@@ -76,7 +76,7 @@ struct DiagnosticsView: View {
         lines.append("")
 
         let containerURL = FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier: AppState.appGroupId)
+            forSecurityApplicationGroupIdentifier: AppViewModel.appGroupId)
 
         // Accounts + DB stats
         lines.append("=== Accounts ===")
