@@ -18,7 +18,22 @@ public actor NodeDatabase {
 
     // MARK: - Schema
 
+    /// After this many consecutive failures the extension stops auto-retrying and
+    /// requires the user to explicitly press Retry in the menu bar.
+    public static let uploadFailureThreshold = 5
+
     private static func registerMigrations(in migrator: inout DatabaseMigrator) {
+        migrator.registerMigration("v3_upload_failures") { db in
+            // Per-item failure tracking. Keyed by the FileProvider item identifier
+            // (system-assigned for new files, server nodeId for modifications).
+            // Kept separate from nodes so it survives node-table resets and also
+            // covers in-flight creates that don't have a server nodeId yet.
+            try db.create(table: "upload_failures", ifNotExists: true) { t in
+                t.column("itemIdentifier", .text).primaryKey()
+                t.column("failureCount", .integer).notNull().defaults(to: 0)
+                t.column("lastError", .text).notNull().defaults(to: "")
+            }
+        }
         migrator.registerMigration("v2_pinned_nodes") { db in
             // Local-only pin state; kept in a separate table so it survives node-table resets.
             try db.create(table: "pinned_nodes", ifNotExists: true) { t in
@@ -241,6 +256,53 @@ public actor NodeDatabase {
             return Set(rows.map { $0["nodeId"] as String })
         }) ?? []
     }
+
+    // MARK: - Upload Failure Tracking
+
+    /// Record a failure for the given item. Returns the new consecutive failure count.
+    @discardableResult
+    public func incrementUploadFailure(itemIdentifier: String, error: String) -> Int {
+        (try? pool.write { db in
+            try db.execute(sql: """
+                INSERT INTO upload_failures (itemIdentifier, failureCount, lastError)
+                VALUES (?, 1, ?)
+                ON CONFLICT(itemIdentifier) DO UPDATE SET
+                    failureCount = failureCount + 1,
+                    lastError    = excluded.lastError
+            """, arguments: [itemIdentifier, error])
+            return try Int.fetchOne(
+                db, sql: "SELECT failureCount FROM upload_failures WHERE itemIdentifier = ?",
+                arguments: [itemIdentifier]) ?? 1
+        }) ?? 1
+    }
+
+    /// Clear the failure record for an item (called on successful upload).
+    public func resetUploadFailure(itemIdentifier: String) {
+        try? pool.write { db in
+            try db.execute(
+                sql: "DELETE FROM upload_failures WHERE itemIdentifier = ?",
+                arguments: [itemIdentifier])
+        }
+    }
+
+    /// Clear all failure records (called when the user presses Retry in the menu bar).
+    public func resetAllUploadFailures() {
+        try? pool.write { db in
+            try db.execute(sql: "DELETE FROM upload_failures")
+        }
+    }
+
+    /// Number of items that have hit the failure threshold and need user action.
+    public var blockedUploadCount: Int {
+        (try? pool.read { db in
+            try Int.fetchOne(
+                db,
+                sql: "SELECT COUNT(*) FROM upload_failures WHERE failureCount >= ?",
+                arguments: [Self.uploadFailureThreshold]) ?? 0
+        }) ?? 0
+    }
+
+    /// MARK: - Node Lookup
 
     /// Look up the node ID of an item by exact name and parent folder.
     /// Used to detect prior successful uploads whose completionHandler was never called.

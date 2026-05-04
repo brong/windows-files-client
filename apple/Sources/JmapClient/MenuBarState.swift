@@ -64,7 +64,7 @@ public enum MenuBarState: Equatable {
     }
 
     /// Derives MenuBarState from raw activity and status data.
-    /// Priority order: error > pending > syncing > offline > idle
+    /// Priority order: error > blockedUploads > pending > syncing > offline > idle
     public static func derive(
         pendingCount: Int,
         activeCount: Int,
@@ -75,6 +75,14 @@ public enum MenuBarState: Equatable {
         // actionable by the user and must not be silently hidden.
         if let errorStatus = extensionStatuses.first(where: { $0.state == .error }) {
             return .error(message: errorStatus.error ?? "Sync error")
+        }
+
+        // Blocked uploads: files queued by the user but stuck after repeated failures.
+        // Shown as an error because the user must take action (press Retry).
+        let totalBlocked = extensionStatuses.reduce(0) { $0 + $1.blockedUploadCount }
+        if totalBlocked > 0 {
+            let noun = totalBlocked == 1 ? "upload" : "uploads"
+            return .error(message: "\(totalBlocked) \(noun) stuck — press Retry")
         }
 
         if !isOnline { return .offline }

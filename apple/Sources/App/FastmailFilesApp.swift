@@ -561,6 +561,31 @@ class AppState: ObservableObject {
         NSFileProviderManager(for: domain)?.signalEnumerator(for: .workingSet) { _ in }
     }
 
+    var totalBlockedUploadCount: Int {
+        extensionStatuses.values.reduce(0) { $0 + $1.blockedUploadCount }
+    }
+
+    /// Clear all upload failure records for an account and re-trigger the system
+    /// so it retries the stuck items.
+    func retryBlockedUploads(for accountId: String) {
+        guard let containerURL = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: Self.appGroupId) else { return }
+        Task {
+            let db = NodeDatabase(containerURL: containerURL, accountId: accountId)
+            await db.resetAllUploadFailures()
+            // Signal the working set so the system re-drives the pending creates/modifies.
+            let domain = NSFileProviderDomain(
+                identifier: NSFileProviderDomainIdentifier(rawValue: accountId), displayName: "")
+            NSFileProviderManager(for: domain)?.signalEnumerator(for: .workingSet) { _ in }
+        }
+    }
+
+    func retryAllBlockedUploads() {
+        for status in extensionStatuses.values where status.blockedUploadCount > 0 {
+            retryBlockedUploads(for: status.accountId)
+        }
+    }
+
     func refreshQuota(for accountId: String) {
         guard let login = logins.first(where: { $0.accounts.contains { $0.accountId == accountId } }),
               let url = URL(string: login.sessionURL) else { return }

@@ -16,6 +16,8 @@ public struct ExtensionStatus: Codable, Sendable {
     public var pendingOperationCount: Int
     /// Up to 5 operation hints for menu bar detail display.
     public var operationHints: [OperationHint]
+    /// Uploads that have failed repeatedly and are waiting for the user to press Retry.
+    public var blockedUploadCount: Int
 
     public enum State: String, Codable, Sendable {
         case initializing   // extension just started, loading cache
@@ -48,6 +50,7 @@ public struct ExtensionStatus: Codable, Sendable {
         self.activeOperationCount = 0
         self.pendingOperationCount = 0
         self.operationHints = []
+        self.blockedUploadCount = 0
     }
 
     public init(from decoder: Decoder) throws {
@@ -61,6 +64,7 @@ public struct ExtensionStatus: Codable, Sendable {
         activeOperationCount = (try? container.decodeIfPresent(Int.self, forKey: .activeOperationCount)) ?? 0
         pendingOperationCount = (try? container.decodeIfPresent(Int.self, forKey: .pendingOperationCount)) ?? 0
         operationHints = (try? container.decodeIfPresent([OperationHint].self, forKey: .operationHints)) ?? []
+        blockedUploadCount = (try? container.decodeIfPresent(Int.self, forKey: .blockedUploadCount)) ?? 0
     }
 }
 
@@ -123,6 +127,10 @@ public final class ExtensionStatusWriter: @unchecked Sendable {
             $0.pendingOperationCount = 0
             $0.operationHints = []
         }
+    }
+
+    public func setBlockedUploadCount(_ count: Int) {
+        update { $0.blockedUploadCount = count }
     }
 
     /// Update operation counts and hints from ActivityTracker.

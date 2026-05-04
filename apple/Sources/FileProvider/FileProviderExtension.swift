@@ -482,6 +482,8 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                     try await database.save()
 
                     await activityTracker.complete(id: activityId)
+                    await database.resetUploadFailure(itemIdentifier: itemTemplate.itemIdentifier.rawValue)
+                    statusWriter.setBlockedUploadCount(await database.blockedUploadCount)
 
                     let item = FileProviderItem(
                         nodeId: node.id, entry: entry,
@@ -489,10 +491,16 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                     completionHandler(item, [], false, nil)
                 }
             } catch {
-                // Mark any in-flight upload as failed
                 let failId = "ul:\(accountId):\(desanitizeFilename(itemTemplate.filename))"
                 await activityTracker.fail(id: failId, error: error.localizedDescription)
-                completionHandler(nil, [], false, mapError(error))
+                let failCount = await database.incrementUploadFailure(
+                    itemIdentifier: itemTemplate.itemIdentifier.rawValue,
+                    error: error.localizedDescription)
+                statusWriter.setBlockedUploadCount(await database.blockedUploadCount)
+                let mapped = failCount >= NodeDatabase.uploadFailureThreshold
+                    ? NSFileProviderError(.cannotSynchronize) as NSError
+                    : mapError(error)
+                completionHandler(nil, [], false, mapped)
             }
         }
 
@@ -642,9 +650,18 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                     nodeId: currentNodeId, entry: entry,
                     homeNodeId: nodes.homeId, trashNodeId: nodes.trashId,
                     isPinned: isPinned)
+                await database.resetUploadFailure(itemIdentifier: item.itemIdentifier.rawValue)
+                statusWriter.setBlockedUploadCount(await database.blockedUploadCount)
                 completionHandler(resultItem, [], false, nil)
             } catch {
-                completionHandler(nil, [], false, mapError(error))
+                let failCount = await database.incrementUploadFailure(
+                    itemIdentifier: item.itemIdentifier.rawValue,
+                    error: error.localizedDescription)
+                statusWriter.setBlockedUploadCount(await database.blockedUploadCount)
+                let mapped = failCount >= NodeDatabase.uploadFailureThreshold
+                    ? NSFileProviderError(.cannotSynchronize) as NSError
+                    : mapError(error)
+                completionHandler(nil, [], false, mapped)
             }
         }
 

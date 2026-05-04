@@ -35,6 +35,19 @@ struct MenuBarView: View {
                 openSettings()
             }
         } else {
+            // Blocked uploads — shown above everything else so the user can't miss it
+            let blocked = appState.totalBlockedUploadCount
+            if blocked > 0 {
+                Button {
+                    appState.retryAllBlockedUploads()
+                } label: {
+                    let noun = blocked == 1 ? "upload" : "uploads"
+                    Label("Retry \(blocked) stuck \(noun)", systemImage: "exclamationmark.arrow.triangle.2.circlepath")
+                        .foregroundColor(.red)
+                }
+                Divider()
+            }
+
             // Active/pending operations section — shown when operations are in flight
             if !appState.activeOperationHints.isEmpty {
                 operationSection(hints: appState.activeOperationHints)
