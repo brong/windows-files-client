@@ -1215,13 +1215,27 @@ public actor JmapClient {
         return destURL
     }
 
+    /// Returns true if the server supports Direct HTTP Write for this account.
+    /// Requires a live session (may trigger session fetch if not yet cached).
+    public func hasDirectWrite(accountId: String) async throws -> Bool {
+        let session = try await sessionManager.session()
+        return session.hasDirectWrite(accountId: accountId)
+    }
+
     /// Direct HTTP Write: PUT to webWriteUrlTemplate/{id} to replace file content.
-    /// Returns the new (blobId, size, type). Only for small files (< 16 MB).
+    ///
+    /// The PUT updates blobId/size/type on the server in one round-trip. Because the
+    /// spec does not define a way to carry the modified timestamp in the PUT, this
+    /// method follows up with a FileNode/set update to set modified — keeping the
+    /// two-step protocol entirely within JmapClient so the caller sees one operation.
+    ///
+    /// Suitable for files < 16 MB. Returns the new (blobId, size, type).
     public func directWrite(
         accountId: String,
         nodeId: String,
         fileURL: URL,
-        contentType: String
+        contentType: String,
+        modified: Date? = nil
     ) async throws -> BlobUploadResponse {
         let session = try await sessionManager.session()
         guard let template = session.webWriteUrlTemplate(accountId: accountId) else {
@@ -1241,7 +1255,25 @@ public actor JmapClient {
             request, fromFile: fileURL, session: backgroundSession)
         try checkHTTPStatus(httpResponse, data: data)
 
-        return try decoder.decode(BlobUploadResponse.self, from: data)
+        let blob = try decoder.decode(BlobUploadResponse.self, from: data)
+
+        // Set modified separately — the PUT does not carry a timestamp.
+        // Send null if no client timestamp so the server stamps it with current time.
+        let modifiedField: AnyCodable = modified.map {
+            AnyCodable(ISO8601DateFormatter().string(from: $0))
+        } ?? AnyCodable(NSNull())
+        let tsResponses = try await call([
+            JmapMethodCall(name: "FileNode/set", args: [
+                "accountId": AnyCodable(accountId),
+                "update": [nodeId: AnyCodable(["modified": modifiedField])],
+            ], callId: "ts0"),
+        ])
+        let tsResponse = try extractResponse(FileNodeSetResponse.self, from: tsResponses, callId: "ts0")
+        if let error = tsResponse.notUpdated?[nodeId] {
+            throw JmapError.serverError(error.type, error.description)
+        }
+
+        return blob
     }
 
     /// Convert a blob using Blob/convert with ImageConvertRecipe.

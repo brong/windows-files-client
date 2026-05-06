@@ -75,6 +75,34 @@ private func readRequestBody(_ request: URLRequest) -> String {
     return String(data: data, encoding: .utf8) ?? ""
 }
 
+private let testSessionWithDirectWrite = """
+{
+    "state": "test-session-state-1",
+    "apiUrl": "https://api.example.com/jmap/",
+    "downloadUrl": "https://api.example.com/jmap/download/{accountId}/{blobId}/{name}",
+    "uploadUrl": "https://api.example.com/jmap/upload/{accountId}/",
+    "eventSourceUrl": "https://api.example.com/jmap/eventsource/",
+    "capabilities": {
+        "urn:ietf:params:jmap:core": {},
+        "https://www.fastmail.com/dev/filenode": {}
+    },
+    "accounts": {
+        "u123": {
+            "name": "test@example.com",
+            "isPersonal": true,
+            "accountCapabilities": {
+                "https://www.fastmail.com/dev/filenode": {
+                    "webWriteUrlTemplate": "https://write.example.com/write/{id}"
+                }
+            }
+        }
+    },
+    "primaryAccounts": {
+        "https://www.fastmail.com/dev/filenode": "u123"
+    }
+}
+"""
+
 private let testSessionWithQuota = """
 {
     "state": "test-session-state-1",
@@ -551,6 +579,120 @@ extension NetworkTests {
         let home = try await client.findHomeNode(accountId: "u123")
         #expect(home.id == "M-home")
         #expect(callCount == 2)
+    }
+
+    // MARK: - hasDirectWrite
+
+    @Test func hasDirectWriteReturnsFalseWhenCapabilityAbsent() async throws {
+        let client = makeTestClient()
+        MockURLProtocol.handler = { request in
+            jsonResponse(url: request.url!, json: testSessionJSON)
+        }
+        defer { MockURLProtocol.handler = nil }
+        let result = try await client.hasDirectWrite(accountId: "u123")
+        #expect(result == false)
+    }
+
+    @Test func hasDirectWriteReturnsTrueWhenTemplatePresent() async throws {
+        let client = makeTestClient()
+        MockURLProtocol.handler = { request in
+            jsonResponse(url: request.url!, json: testSessionWithDirectWrite)
+        }
+        defer { MockURLProtocol.handler = nil }
+        let result = try await client.hasDirectWrite(accountId: "u123")
+        #expect(result == true)
+    }
+
+    // MARK: - directWrite
+
+    @Test func directWritePutsToCorrectURLAndSetsModified() async throws {
+        let client = makeTestClient()
+
+        nonisolated(unsafe) var requests: [(String, String)] = []  // (method, path)
+        nonisolated(unsafe) var capturedPutBody = Data()
+
+        MockURLProtocol.handler = { request in
+            let url = request.url!
+            let method = request.httpMethod ?? "GET"
+            requests.append((method, url.absoluteString))
+
+            if url.absoluteString.contains("session") {
+                return jsonResponse(url: url, json: testSessionWithDirectWrite)
+            }
+            if method == "PUT" {
+                // Capture body for assertion; read from stream
+                if let stream = request.httpBodyStream {
+                    stream.open()
+                    var buf = [UInt8](repeating: 0, count: 4096)
+                    while stream.hasBytesAvailable {
+                        let n = stream.read(&buf, maxLength: buf.count)
+                        if n > 0 { capturedPutBody.append(contentsOf: buf[..<n]) }
+                    }
+                    stream.close()
+                } else if let body = request.httpBody {
+                    capturedPutBody = body
+                }
+                return jsonResponse(url: url, json: """
+                {"blobId":"B-new","size":11,"type":"text/plain"}
+                """)
+            }
+            // FileNode/set for modified timestamp
+            return jsonResponse(url: url, json: """
+            {"methodResponses":[
+                ["FileNode/set",{"accountId":"u123","updated":{"N1":null}},"ts0"]
+            ],"sessionState":"ss1"}
+            """)
+        }
+        defer { MockURLProtocol.handler = nil }
+
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("dw-test.txt")
+        try "hello world".data(using: .utf8)!.write(to: tmp)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let modified = Date(timeIntervalSince1970: 1_700_000_000)
+        let blob = try await client.directWrite(
+            accountId: "u123",
+            nodeId: "N1",
+            fileURL: tmp,
+            contentType: "text/plain",
+            modified: modified
+        )
+
+        #expect(blob.blobId == "B-new")
+        #expect(blob.size == 11)
+
+        // Verify PUT went to the correct URL (template expanded with nodeId)
+        let putRequest = requests.first { $0.0 == "PUT" }
+        #expect(putRequest?.1 == "https://write.example.com/write/N1")
+
+        // Verify PUT body contains file content
+        #expect(String(data: capturedPutBody, encoding: .utf8) == "hello world")
+
+        // Verify FileNode/set for modified was sent
+        let jmapRequest = requests.first { $0.0 == "POST" && $0.1.contains("jmap") }
+        #expect(jmapRequest != nil)
+    }
+
+    @Test func directWriteThrowsWhenServerLacksCapability() async throws {
+        let client = makeTestClient()
+        MockURLProtocol.handler = { request in
+            jsonResponse(url: request.url!, json: testSessionJSON)
+        }
+        defer { MockURLProtocol.handler = nil }
+
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("dw-no-cap.txt")
+        try "x".data(using: .utf8)!.write(to: tmp)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        do {
+            _ = try await client.directWrite(
+                accountId: "u123", nodeId: "N1",
+                fileURL: tmp, contentType: "text/plain"
+            )
+            Issue.record("Expected throw but succeeded")
+        } catch JmapError.serverError(let type, _) {
+            #expect(type == "notSupported")
+        }
     }
 }
 }

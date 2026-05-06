@@ -646,35 +646,50 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                         throw JmapError.rateLimited
                     }
 
-                    let currentBlobId = await database.entry(for: nodeId)?.blobId
-                    let modUploadId: String = {
-                        let sz = (try? FileManager.default.attributesOfItem(atPath: contentURL.path)[.size] as? Int64) ?? 0
-                        let ms = (try? FileManager.default.attributesOfItem(atPath: contentURL.path)[.modificationDate] as? Date)?
-                            .timeIntervalSince1970 ?? 0
-                        return "modify:\(accountId):\(nodeId):\(sz):\(Int64(ms * 1000))"
-                    }()
-                    let blob = try await client.uploadBlobDelta(
-                        accountId: accountId,
-                        fileURL: contentURL,
-                        contentType: contentType,
-                        oldBlobId: currentBlobId,
-                        uploadId: modUploadId
-                    ) { uploaded, total in
-                        if total > 0 {
-                            let pct = Double(uploaded) / Double(total)
-                            Task { await self.activityTracker.updateProgress(id: activityId, progress: pct * 0.8) }
+                    let blob: BlobUploadResponse
+                    let directWriteLimit = 16 * 1024 * 1024
+                    if fileSize < directWriteLimit,
+                       (try? await client.hasDirectWrite(accountId: accountId)) == true {
+                        // Small file + server supports direct write: single PUT replaces
+                        // content and updates blobId/size/type in one HTTP round-trip.
+                        blob = try await client.directWrite(
+                            accountId: accountId,
+                            nodeId: nodeId,
+                            fileURL: contentURL,
+                            contentType: contentType,
+                            modified: item.contentModificationDate
+                        )
+                    } else {
+                        let currentBlobId = await database.entry(for: nodeId)?.blobId
+                        let modUploadId: String = {
+                            let sz = (try? FileManager.default.attributesOfItem(atPath: contentURL.path)[.size] as? Int64) ?? 0
+                            let ms = (try? FileManager.default.attributesOfItem(atPath: contentURL.path)[.modificationDate] as? Date)?
+                                .timeIntervalSince1970 ?? 0
+                            return "modify:\(accountId):\(nodeId):\(sz):\(Int64(ms * 1000))"
+                        }()
+                        blob = try await client.uploadBlobDelta(
+                            accountId: accountId,
+                            fileURL: contentURL,
+                            contentType: contentType,
+                            oldBlobId: currentBlobId,
+                            uploadId: modUploadId
+                        ) { uploaded, total in
+                            if total > 0 {
+                                let pct = Double(uploaded) / Double(total)
+                                Task { await self.activityTracker.updateProgress(id: activityId, progress: pct * 0.8) }
+                            }
                         }
-                    }
-                    progress.completedUnitCount = 60
+                        progress.completedUnitCount = 60
 
-                    // v10: blobId is mutable — update directly, node ID stays the same
-                    try await client.updateNodeContent(
-                        accountId: accountId,
-                        nodeId: nodeId,
-                        blobId: blob.blobId,
-                        type: contentType,
-                        modified: item.contentModificationDate ?? nil
-                    )
+                        // v10: blobId is mutable — update directly, node ID stays the same
+                        try await client.updateNodeContent(
+                            accountId: accountId,
+                            nodeId: nodeId,
+                            blobId: blob.blobId,
+                            type: contentType,
+                            modified: item.contentModificationDate
+                        )
+                    }
                     progress.completedUnitCount = 80
 
                     // Update database with new blob info (node ID unchanged)
@@ -684,7 +699,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                             name: entry.name,
                             blobId: blob.blobId,
                             size: blob.size,
-                            modified: item.contentModificationDate ?? nil,
+                            modified: item.contentModificationDate,
                             isFolder: false,
                             type: contentType,
                             myRights: entry.myRights
