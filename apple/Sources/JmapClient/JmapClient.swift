@@ -3,6 +3,48 @@ import Foundation
 import os
 #endif
 
+// MARK: - UploadChunkStore
+
+/// Persistence callbacks for resumable chunked uploads.
+/// Wire to NodeDatabase in production; pass nil to disable chunk-level resume.
+public struct UploadChunkStore: Sendable {
+    /// Returns (chunkIndex, blobId, sha1) for all already-completed chunks of this upload.
+    public let completedChunks: @Sendable (_ uploadId: String) async -> [(index: Int, blobId: String, sha1: String)]
+    /// Called (via taskIdSink) just before a background upload task starts.
+    public let startChunk: @Sendable (_ uploadId: String, _ chunkIndex: Int, _ taskId: Int) async -> Void
+    /// Called after a chunk upload returns a blobId from the server.
+    public let completeChunk: @Sendable (_ uploadId: String, _ chunkIndex: Int, _ blobId: String, _ sha1: String) async -> Void
+    /// Called after Blob/set combine succeeds — cleans up the session's rows.
+    public let clearUpload: @Sendable (_ uploadId: String) async -> Void
+    /// Look up a cached blobId for a chunk with this SHA1 (content-addressed dedup).
+    /// Returns nil on miss — caller must upload and then call cacheChunkSha1.
+    /// Safe to use even if the server is not content-addressed: a stale blobId causes
+    /// a Blob/set failure which the upload path recovers from by re-uploading.
+    public let cachedBlobId: @Sendable (_ sha1: String) async -> String?
+    /// Persist a SHA1→blobId mapping so future uploads can skip identical content.
+    /// On servers where the same bytes can yield different blobIds, only the most
+    /// recently uploaded id is stored; older entries are silently replaced.
+    public let cacheChunkSha1: @Sendable (_ sha1: String, _ blobId: String) async -> Void
+
+    public init(
+        completedChunks: @escaping @Sendable (_ uploadId: String) async -> [(index: Int, blobId: String, sha1: String)],
+        startChunk: @escaping @Sendable (_ uploadId: String, _ chunkIndex: Int, _ taskId: Int) async -> Void,
+        completeChunk: @escaping @Sendable (_ uploadId: String, _ chunkIndex: Int, _ blobId: String, _ sha1: String) async -> Void,
+        clearUpload: @escaping @Sendable (_ uploadId: String) async -> Void,
+        cachedBlobId: @escaping @Sendable (_ sha1: String) async -> String? = { _ in nil },
+        cacheChunkSha1: @escaping @Sendable (_ sha1: String, _ blobId: String) async -> Void = { _, _ in }
+    ) {
+        self.completedChunks = completedChunks
+        self.startChunk = startChunk
+        self.completeChunk = completeChunk
+        self.clearUpload = clearUpload
+        self.cachedBlobId = cachedBlobId
+        self.cacheChunkSha1 = cacheChunkSha1
+    }
+}
+
+// MARK: - JmapClient
+
 /// JMAP API client for FileNode operations.
 ///
 /// All JMAP method calls go through this client. It handles request
@@ -32,6 +74,19 @@ public actor JmapClient {
 
     /// Optional hook called with (URL, statusCode, responseData) after each JMAP API response.
     nonisolated public let responseDidReceive: (@Sendable (URL, Int, Data) -> Void)?
+
+    /// Directory used for temporary chunk files during uploads.
+    /// Defaults to the system temp dir; override in the extension to use the App Group container
+    /// so that orphaned chunks survive a process kill and can be swept on next startup.
+    private let temporaryDirectory: URL
+
+    /// Background URLSession wrapper for chunk uploads. When set, chunk HTTP POSTs run in
+    /// nsurlsessiond and survive extension process kills. When nil, the regular session is used.
+    private let backgroundUploader: BackgroundUploader?
+
+    /// Persistence hooks for resumable chunked uploads. When set, completed chunk blobIds are
+    /// written to the database so a restarted extension can skip already-uploaded chunks.
+    public let chunkStore: UploadChunkStore?
 
     /// Pending accessed timestamps to piggyback on the next JMAP call.
     private var pendingAccessed: [String: Date] = [:]
@@ -436,6 +491,9 @@ public actor JmapClient {
             if error.type == "forbidden" {
                 throw JmapError.forbidden(error.description)
             }
+            if error.type == "alreadyExists" {
+                throw JmapError.alreadyExists
+            }
             throw JmapError.serverError(error.type, error.description)
         }
 
@@ -485,6 +543,9 @@ public actor JmapClient {
             }
             if error.type == "forbidden" {
                 throw JmapError.forbidden(error.description)
+            }
+            if error.type == "alreadyExists" {
+                throw JmapError.alreadyExists
             }
             throw JmapError.serverError(error.type, error.description)
         }
@@ -595,6 +656,45 @@ public actor JmapClient {
 
     private static let minChunkSize = 1_048_576        // 1 MB
     private static let maxChunkSize = 67_108_864        // 64 MB
+
+    /// Read `length` bytes from `source` in 1 MB buffers, computing SHA1 hashes incrementally.
+    ///
+    /// - Parameter destURL: Write output here. Pass `nil` for hash-only (skips file write),
+    ///   used when resuming: completed chunks still need to contribute to the overall SHA1.
+    /// - Returns: Per-chunk SHA1 (base64), or nil if source was already at EOF.
+    private static func processChunk(
+        from source: FileHandle,
+        to destURL: URL?,
+        length: Int,
+        updating overallHash: inout SHA1Context
+    ) throws -> String? {
+        let bufferSize = 1_048_576  // 1 MB
+        var dest: FileHandle? = nil
+        if let destURL {
+            FileManager.default.createFile(atPath: destURL.path, contents: nil)
+            dest = try FileHandle(forWritingTo: destURL)
+        }
+        var chunkHash = SHA1Context()
+        var bytesRead = 0
+        var remaining = length
+        while remaining > 0 {
+            let n = min(bufferSize, remaining)
+            let buf = source.readData(ofLength: n)
+            guard !buf.isEmpty else { break }
+            chunkHash.update(buf)
+            overallHash.update(buf)
+            dest?.write(buf)
+            bytesRead += buf.count
+            remaining -= buf.count
+        }
+        try? dest?.close()
+        guard bytesRead > 0 else {
+            if let destURL { try? FileManager.default.removeItem(at: destURL) }
+            return nil
+        }
+        return chunkHash.finalize()
+    }
+
     private static let defaultChunkSize = 67_108_864    // 64 MB
     private static let chunkThreshold = 5_000_000       // 5 MB — files smaller than this skip chunking
 
@@ -604,6 +704,7 @@ public actor JmapClient {
         accountId: String,
         fileURL: URL,
         contentType: String,
+        uploadId: String? = nil,
         progress: (@Sendable (Int64, Int64) -> Void)? = nil
     ) async throws -> BlobUploadResponse {
         let session = try await sessionManager.session()
@@ -636,64 +737,118 @@ public actor JmapClient {
         while Int(fileSize) / chunkSize + 1 > maxDataSources && chunkSize < Int(fileSize) {
             chunkSize *= 2
         }
-        chunkSize = max(Self.minChunkSize, min(chunkSize, max(Self.maxChunkSize, Int(fileSize))))
+        chunkSize = min(max(Self.minChunkSize, chunkSize), Self.maxChunkSize)  // BUG-014 fix
 
         guard let uploadURL = session.uploadURL(accountId: accountId) else {
             throw JmapError.invalidResponse
         }
 
-        // Read file and upload chunks
+        // Load already-completed chunks from a prior attempt that was killed mid-upload.
+        var resumedChunks: [Int: (blobId: String, sha1: String)] = [:]
+        if let uploadId, let store = chunkStore {
+            for chunk in await store.completedChunks(uploadId) {
+                resumedChunks[chunk.index] = (chunk.blobId, chunk.sha1)
+            }
+        }
+
         let fileHandle = try FileHandle(forReadingFrom: fileURL)
         defer { try? fileHandle.close() }
 
         var chunkBlobIds: [(blobId: String, sha1: String)] = []
         var totalUploaded: Int64 = 0
-
-        // Incremental SHA1 for overall file digest
+        var chunkIndex = 0
         var overallHashContext = SHA1Context()
 
         while totalUploaded < fileSize {
             let remaining = Int(fileSize - totalUploaded)
             let thisChunkSize = min(chunkSize, remaining)
 
-            guard let chunkData = fileHandle.readData(ofLength: thisChunkSize) as Data?,
-                  !chunkData.isEmpty else { break }
-
-            // Hash this chunk
-            let chunkSha1 = sha1Digest(chunkData)
-            overallHashContext.update(chunkData)
+            if let resumed = resumedChunks[chunkIndex] {
+                // This chunk already completed in a previous attempt. Hash the bytes (needed
+                // for the overall SHA1) but skip the upload — no bandwidth consumed.
+                guard (try Self.processChunk(
+                    from: fileHandle, to: nil,
+                    length: thisChunkSize, updating: &overallHashContext)) != nil else { break }
+                chunkBlobIds.append(resumed)
+                totalUploaded += Int64(thisChunkSize)
+                chunkIndex += 1
+                progress?(totalUploaded, fileSize)
+                continue
+            }
 
             // Report progress at chunk start (smooths out the jumps)
             progress?(totalUploaded, fileSize)
 
-            // Upload chunk
-            let tempChunkFile = FileManager.default.temporaryDirectory
-                .appendingPathComponent(UUID().uuidString)
-            try chunkData.write(to: tempChunkFile)
+            // Process chunk: hash + write in 1 MB buffers to stay within ~2 MB peak RAM.
+            let tempChunkFile = temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            guard let chunkSha1 = try Self.processChunk(
+                from: fileHandle, to: tempChunkFile,
+                length: thisChunkSize, updating: &overallHashContext) else { break }
             defer { try? FileManager.default.removeItem(at: tempChunkFile) }
 
-            var request = URLRequest(url: uploadURL)
-            request.httpMethod = "POST"
-            request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+            // SHA1 cache hit: this exact chunk content is already on the server.
+            // Reuse the blobId directly without any network traffic.
+            if let store = chunkStore, let cachedId = await store.cachedBlobId(chunkSha1) {
+                chunkBlobIds.append((cachedId, chunkSha1))
+                totalUploaded += Int64(thisChunkSize)
+                chunkIndex += 1
+                progress?(totalUploaded, fileSize)
+                continue  // defer above removes tempChunkFile
+            }
 
-            let chunkNum = chunkBlobIds.count + 1
+            let totalChunks = Int(fileSize) / chunkSize + 1
+            requestWillSend?(uploadURL, "chunk \(chunkIndex + 1)/\(totalChunks): \(thisChunkSize) bytes".data(using: .utf8)!)
+
             let chunkBaseOffset = totalUploaded
-            requestWillSend?(uploadURL, "chunk \(chunkNum)/\(Int(fileSize) / chunkSize + 1): \(thisChunkSize) bytes".data(using: .utf8)!)
+            let (data, httpResponse): (Data, HTTPURLResponse)
+            if let bgUploader = backgroundUploader {
+                // Background session path: task survives extension process kill.
+                // Add auth token now — background sessions can't retry with a new token.
+                let token = try await getToken()
+                var authedRequest = URLRequest(url: uploadURL)
+                authedRequest.httpMethod = "POST"
+                authedRequest.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+                authedRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
 
-            let (data, httpResponse) = try await authorizedUpload(
-                request, fromFile: tempChunkFile, session: backgroundSession,
-                onBytesSent: { bytesSent, totalExpected in
-                    // Report overall progress: bytes sent so far across all chunks
-                    let overallSent = chunkBaseOffset + bytesSent
-                    progress?(overallSent, fileSize)
-                })
+                let capturedUploadId = uploadId
+                let capturedChunkIndex = chunkIndex
+                let capturedStore = chunkStore
+                (data, httpResponse) = try await bgUploader.upload(
+                    request: authedRequest,
+                    fromFile: tempChunkFile
+                ) { @Sendable taskId in
+                    if let uid = capturedUploadId, let store = capturedStore {
+                        Task { await store.startChunk(uid, capturedChunkIndex, taskId) }
+                    }
+                }
+            } else {
+                var req = URLRequest(url: uploadURL)
+                req.httpMethod = "POST"
+                req.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+                (data, httpResponse) = try await authorizedUpload(
+                    req, fromFile: tempChunkFile, session: backgroundSession,
+                    onBytesSent: { bytesSent, _ in
+                        progress?(chunkBaseOffset + bytesSent, fileSize)
+                    })
+            }
+
             responseDidReceive?(uploadURL, httpResponse.statusCode, data)
             try checkHTTPStatus(httpResponse, data: data)
 
             let uploadResponse = try decoder.decode(BlobUploadResponse.self, from: data)
-            chunkBlobIds.append((uploadResponse.blobId, chunkSha1))
 
+            // Persist completion so a future restart can skip this chunk.
+            if let uploadId, let store = chunkStore {
+                await store.completeChunk(uploadId, chunkIndex, uploadResponse.blobId, chunkSha1)
+            }
+            // Cache SHA1→blobId for cross-upload deduplication.
+            if let store = chunkStore {
+                await store.cacheChunkSha1(chunkSha1, uploadResponse.blobId)
+            }
+
+            chunkBlobIds.append((uploadResponse.blobId, chunkSha1))
             totalUploaded += Int64(thisChunkSize)
+            chunkIndex += 1
         }
 
         // If only one chunk, no need to combine
@@ -743,6 +898,11 @@ public actor JmapClient {
             throw JmapError.serverError("blobUpload", "Failed to combine chunks")
         }
 
+        // Blob/set succeeded — clear the chunk rows so they don't accumulate.
+        if let uploadId, let store = chunkStore {
+            await store.clearUpload(uploadId)
+        }
+
         let size = combined["size"]?.intValue ?? Int(fileSize)
         return BlobUploadResponse(blobId: blobId, size: size, type: contentType)
     }
@@ -755,6 +915,7 @@ public actor JmapClient {
         fileURL: URL,
         contentType: String,
         oldBlobId: String?,
+        uploadId: String? = nil,
         progress: (@Sendable (Int64, Int64) -> Void)? = nil
     ) async throws -> BlobUploadResponse {
         let session = try await sessionManager.session()
@@ -764,7 +925,7 @@ public actor JmapClient {
               session.hasBlob2(accountId: accountId) else {
             return try await uploadBlobChunked(
                 accountId: accountId, fileURL: fileURL,
-                contentType: contentType, progress: progress)
+                contentType: contentType, uploadId: uploadId, progress: progress)
         }
 
         let fileSize = try FileManager.default.attributesOfItem(
@@ -811,6 +972,17 @@ public actor JmapClient {
             // Fall back to full upload
         }
 
+        // Populate SHA1 cache from server chunks — these are live blobs referenced by an
+        // existing FileNode, so their blobIds are valid. Future uploads with overlapping
+        // content (other files, re-uploads of this file) can reuse them without network I/O.
+        if let serverChunks, let store = chunkStore {
+            for chunk in serverChunks {
+                if let digest = chunk.digestSha {
+                    await store.cacheChunkSha1(digest, chunk.blobId)
+                }
+            }
+        }
+
         guard let serverChunks = serverChunks, !serverChunks.isEmpty else {
             return try await uploadBlobChunked(
                 accountId: accountId, fileURL: fileURL,
@@ -834,23 +1006,23 @@ public actor JmapClient {
             guard totalUploaded < fileSize else { break }
             let thisChunkSize = min(serverChunk.size, Int(fileSize - totalUploaded))
 
-            guard let chunkData = fileHandle.readData(ofLength: thisChunkSize) as Data?,
-                  !chunkData.isEmpty else { break }
-
-            let chunkSha1 = sha1Digest(chunkData)
-            overallHashContext.update(chunkData)
+            // Stream the chunk to a temp file in 1 MB buffers for both the reuse check and upload.
+            let tempChunkFile = temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            guard let chunkSha1 = try Self.processChunk(
+                from: fileHandle, to: tempChunkFile,
+                length: thisChunkSize, updating: &overallHashContext) else { break }
+            defer { try? FileManager.default.removeItem(at: tempChunkFile) }
 
             if let serverDigest = serverChunk.digestSha, chunkSha1 == serverDigest {
-                // Reuse server chunk
+                // Reuse server chunk — temp file is cleaned up by defer above
                 chunkBlobIds.append((serverChunk.blobId, chunkSha1))
+                reusedChunks += 1
+            } else if let store = chunkStore, let cachedId = await store.cachedBlobId(chunkSha1) {
+                // SHA1 cache hit — another file already uploaded this exact content
+                chunkBlobIds.append((cachedId, chunkSha1))
                 reusedChunks += 1
             } else {
                 // Upload new chunk
-                let tempChunkFile = FileManager.default.temporaryDirectory
-                    .appendingPathComponent(UUID().uuidString)
-                try chunkData.write(to: tempChunkFile)
-                defer { try? FileManager.default.removeItem(at: tempChunkFile) }
-
                 var request = URLRequest(url: uploadURL)
                 request.httpMethod = "POST"
                 request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
@@ -860,6 +1032,9 @@ public actor JmapClient {
                 try checkHTTPStatus(httpResponse, data: data)
 
                 let uploadResponse = try decoder.decode(BlobUploadResponse.self, from: data)
+                if let store = chunkStore {
+                    await store.cacheChunkSha1(chunkSha1, uploadResponse.blobId)
+                }
                 chunkBlobIds.append((uploadResponse.blobId, chunkSha1))
             }
 
@@ -873,27 +1048,29 @@ public actor JmapClient {
             let remaining = Int(fileSize - totalUploaded)
             let thisChunkSize = min(defaultChunk, remaining)
 
-            guard let chunkData = fileHandle.readData(ofLength: thisChunkSize) as Data?,
-                  !chunkData.isEmpty else { break }
-
-            let chunkSha1 = sha1Digest(chunkData)
-            overallHashContext.update(chunkData)
-
-            let tempChunkFile = FileManager.default.temporaryDirectory
-                .appendingPathComponent(UUID().uuidString)
-            try chunkData.write(to: tempChunkFile)
+            let tempChunkFile = temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            guard let chunkSha1 = try Self.processChunk(
+                from: fileHandle, to: tempChunkFile,
+                length: thisChunkSize, updating: &overallHashContext) else { break }
             defer { try? FileManager.default.removeItem(at: tempChunkFile) }
 
-            var request = URLRequest(url: uploadURL)
-            request.httpMethod = "POST"
-            request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+            if let store = chunkStore, let cachedId = await store.cachedBlobId(chunkSha1) {
+                chunkBlobIds.append((cachedId, chunkSha1))
+            } else {
+                var request = URLRequest(url: uploadURL)
+                request.httpMethod = "POST"
+                request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
 
-            let (data, httpResponse) = try await authorizedUpload(
-                request, fromFile: tempChunkFile, session: backgroundSession)
-            try checkHTTPStatus(httpResponse, data: data)
+                let (data, httpResponse) = try await authorizedUpload(
+                    request, fromFile: tempChunkFile, session: backgroundSession)
+                try checkHTTPStatus(httpResponse, data: data)
 
-            let uploadResponse = try decoder.decode(BlobUploadResponse.self, from: data)
-            chunkBlobIds.append((uploadResponse.blobId, chunkSha1))
+                let uploadResponse = try decoder.decode(BlobUploadResponse.self, from: data)
+                if let store = chunkStore {
+                    await store.cacheChunkSha1(chunkSha1, uploadResponse.blobId)
+                }
+                chunkBlobIds.append((uploadResponse.blobId, chunkSha1))
+            }
 
             totalUploaded += Int64(thisChunkSize)
             progress?(totalUploaded, fileSize)
@@ -1000,22 +1177,40 @@ public actor JmapClient {
         guard let downloadURL = session.downloadURL(
             accountId: accountId, blobId: blobId, name: name, type: type)
         else {
+            TrafficLog.shared.log("← ERR download [\(accountId)] could not construct download URL for blobId=\(blobId) name=\(name)")
             throw JmapError.invalidResponse
         }
 
         var request = URLRequest(url: downloadURL)
-        request.setValue("application/octet-stream", forHTTPHeaderField: "Accept")
+        request.setValue("*/*", forHTTPHeaderField: "Accept")
+
+        TrafficLog.shared.log("→ GET download [\(accountId)] \(downloadURL.absoluteString)")
 
         // Use interactive session for downloads (user-initiated)
         let (tempURL, httpResponse) = try await authorizedDownload(
             request, session: interactiveSession)
-        try checkHTTPStatus(httpResponse, data: nil)
+
+        TrafficLog.shared.log("← \(httpResponse.statusCode) download [\(accountId)] Content-Type: \(httpResponse.value(forHTTPHeaderField: "Content-Type") ?? "?") Content-Length: \(httpResponse.value(forHTTPHeaderField: "Content-Length") ?? "chunked")")
+
+        guard httpResponse.statusCode >= 200 && httpResponse.statusCode < 300 else {
+            // Read the error body from the downloaded temp file for diagnostics, then clean up.
+            let errorBody = (try? Data(contentsOf: tempURL)).flatMap { String(data: $0, encoding: .utf8) }
+            try? FileManager.default.removeItem(at: tempURL)
+            TrafficLog.shared.log("← \(httpResponse.statusCode) download [\(accountId)] body: \(errorBody?.prefix(500) ?? "(empty)")")
+            try checkHTTPStatus(httpResponse, data: errorBody.flatMap { $0.data(using: .utf8) })
+            return tempURL // unreachable — checkHTTPStatus always throws for non-2xx
+        }
 
         // Move to destination directory with unique name
         let destURL = destinationDir
             .appendingPathComponent(UUID().uuidString)
             .appendingPathExtension("download")
-        try FileManager.default.moveItem(at: tempURL, to: destURL)
+        do {
+            try FileManager.default.moveItem(at: tempURL, to: destURL)
+        } catch {
+            try? FileManager.default.removeItem(at: tempURL)
+            throw error
+        }
 
         return destURL
     }
@@ -1286,8 +1481,14 @@ public actor JmapClient {
     /// - Parameter responseDidReceive: Optional hook called after each JMAP API response.
     public init(sessionManager: SessionManager, tokenProvider: TokenProvider,
                 protocolClasses: [AnyClass]? = nil,
+                temporaryDirectory: URL = FileManager.default.temporaryDirectory,
+                backgroundUploader: BackgroundUploader? = nil,
+                chunkStore: UploadChunkStore? = nil,
                 requestWillSend: (@Sendable (URL, Data) -> Void)? = nil,
                 responseDidReceive: (@Sendable (URL, Int, Data) -> Void)? = nil) {
+        self.temporaryDirectory = temporaryDirectory
+        self.backgroundUploader = backgroundUploader
+        self.chunkStore = chunkStore
         self.sessionManager = sessionManager
         self.tokenGetter = { try await tokenProvider.currentToken() }
         if let oauthProvider = tokenProvider as? OAuthTokenProvider {

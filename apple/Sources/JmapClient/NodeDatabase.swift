@@ -23,6 +23,47 @@ public actor NodeDatabase {
     public static let uploadFailureThreshold = 5
 
     private static func registerMigrations(in migrator: inout DatabaseMigrator) {
+        migrator.registerMigration("v5_sha1_cache") { db in
+            // Content-addressed chunk cache: maps SHA1 → blobId for already-uploaded data.
+            // Enables two optimisations:
+            //   1. Skip re-uploading a chunk whose bytes were already sent in a prior upload.
+            //   2. Reuse chunks from any file when the same bytes appear again (dedup).
+            // last_seen is updated on every cache hit so actively-used entries survive sweeps.
+            //
+            // NOTE: sha1 is PRIMARY KEY (one blobId per content hash). This relies on the
+            // Fastmail server using content-addressed storage where blobId == SHA1 of the
+            // content, so the same bytes always map to the same blobId. On a generic JMAP
+            // server this is not guaranteed — the same sha1 could map to multiple distinct
+            // blobIds — but because we always overwrite with the most-recently-uploaded id
+            // (ON CONFLICT DO UPDATE), the cached entry is always a recently live blob.
+            // If a cached blobId turns out to be GC'd, the Blob/set call fails and the
+            // caller falls back to re-uploading that chunk.
+            try db.create(table: "sha1_cache", ifNotExists: true) { t in
+                t.column("sha1", .text).primaryKey()
+                t.column("blob_id", .text).notNull()
+                t.column("last_seen", .double).notNull().defaults(to: 0)
+            }
+        }
+        migrator.registerMigration("v4_upload_chunks") { db in
+            // Per-chunk upload state for resumable chunked uploads.
+            // Keyed by (upload_id, chunk_index). blob_id is NULL until the chunk completes.
+            // task_id is the URLSessionTask.taskIdentifier — used to match orphaned background
+            // session completions (tasks that finished after the extension was killed) back to
+            // their chunk so the blobId can be persisted without re-uploading.
+            try db.create(table: "upload_chunks", ifNotExists: true) { t in
+                t.column("upload_id", .text).notNull()
+                t.column("chunk_index", .integer).notNull()
+                t.column("task_id", .integer)
+                t.column("blob_id", .text)
+                t.column("sha1", .text)
+                t.column("created_at", .double).notNull().defaults(sql: "(strftime('%s','now'))")
+                t.primaryKey(["upload_id", "chunk_index"])
+            }
+            try db.create(
+                index: "idx_upload_chunks_task_id", on: "upload_chunks",
+                columns: ["task_id"], ifNotExists: true
+            )
+        }
         migrator.registerMigration("v3_upload_failures") { db in
             // Per-item failure tracking. Keyed by the FileProvider item identifier
             // (system-assigned for new files, server nodeId for modifications).
@@ -300,6 +341,126 @@ public actor NodeDatabase {
                 sql: "SELECT COUNT(*) FROM upload_failures WHERE failureCount >= ?",
                 arguments: [Self.uploadFailureThreshold]) ?? 0
         }) ?? 0
+    }
+
+    // MARK: - Resumable Upload Chunk State
+
+    /// All completed chunks for the given upload session (blob_id IS NOT NULL).
+    public func completedUploadChunks(uploadId: String) -> [(index: Int, blobId: String, sha1: String)] {
+        (try? pool.read { db in
+            let rows = try Row.fetchAll(
+                db,
+                sql: "SELECT chunk_index, blob_id, sha1 FROM upload_chunks WHERE upload_id = ? AND blob_id IS NOT NULL ORDER BY chunk_index",
+                arguments: [uploadId]
+            )
+            return rows.compactMap { row -> (Int, String, String)? in
+                guard let blobId = row["blob_id"] as String?,
+                      let sha1 = row["sha1"] as String? else { return nil }
+                return (row["chunk_index"] as Int, blobId, sha1)
+            }
+        }) ?? []
+    }
+
+    /// Record that a background upload task has been started for a chunk.
+    /// Called synchronously in the taskIdSink callback before the task starts.
+    public func startUploadChunk(uploadId: String, index: Int, taskId: Int) {
+        try? pool.write { db in
+            try db.execute(
+                sql: "INSERT OR REPLACE INTO upload_chunks (upload_id, chunk_index, task_id) VALUES (?, ?, ?)",
+                arguments: [uploadId, index, taskId]
+            )
+        }
+    }
+
+    /// Record that a chunk upload completed successfully.
+    public func completeUploadChunk(uploadId: String, index: Int, blobId: String, sha1: String) {
+        try? pool.write { db in
+            try db.execute(
+                sql: """
+                    INSERT INTO upload_chunks (upload_id, chunk_index, blob_id, sha1)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(upload_id, chunk_index) DO UPDATE SET blob_id = excluded.blob_id, sha1 = excluded.sha1
+                """,
+                arguments: [uploadId, index, blobId, sha1]
+            )
+        }
+    }
+
+    /// Mark a chunk complete using only its task ID (for orphaned background session completions).
+    /// Returns true if the task ID was found and the row updated.
+    @discardableResult
+    public func completeUploadChunkByTaskId(_ taskId: Int, blobId: String, sha1: String) -> Bool {
+        (try? pool.write { db in
+            try db.execute(
+                sql: "UPDATE upload_chunks SET blob_id = ?, sha1 = ? WHERE task_id = ?",
+                arguments: [blobId, sha1, taskId]
+            )
+            return db.changesCount > 0
+        }) ?? false
+    }
+
+    /// Remove all chunk rows for an upload session after it completes successfully.
+    public func clearUploadSession(uploadId: String) {
+        try? pool.write { db in
+            try db.execute(
+                sql: "DELETE FROM upload_chunks WHERE upload_id = ?",
+                arguments: [uploadId]
+            )
+        }
+    }
+
+    /// Remove upload sessions older than `maxAge` seconds (default 7 days).
+    /// Called at extension startup to prevent the table from growing indefinitely.
+    public func sweepOldUploadSessions(maxAge: TimeInterval = 7 * 86400) {
+        let cutoff = Date().timeIntervalSince1970 - maxAge
+        try? pool.write { db in
+            try db.execute(
+                sql: "DELETE FROM upload_chunks WHERE created_at < ?",
+                arguments: [cutoff]
+            )
+        }
+    }
+
+    // MARK: - SHA1→blobId Cache
+
+    /// Look up a cached blobId for the given chunk SHA1, updating last_seen if found.
+    public func cachedBlobId(forSha1 sha1: String) -> String? {
+        try? pool.write { db in
+            guard let blobId = try String.fetchOne(
+                db, sql: "SELECT blob_id FROM sha1_cache WHERE sha1 = ?", arguments: [sha1]
+            ) else { return nil }
+            let now = Date().timeIntervalSince1970
+            try db.execute(
+                sql: "UPDATE sha1_cache SET last_seen = ? WHERE sha1 = ?",
+                arguments: [now, sha1]
+            )
+            return blobId
+        }
+    }
+
+    /// Store or update a SHA1→blobId mapping.
+    public func cacheChunkSha1(_ sha1: String, blobId: String) {
+        let now = Date().timeIntervalSince1970
+        try? pool.write { db in
+            try db.execute(
+                sql: """
+                    INSERT INTO sha1_cache (sha1, blob_id, last_seen) VALUES (?, ?, ?)
+                    ON CONFLICT(sha1) DO UPDATE SET blob_id = excluded.blob_id, last_seen = excluded.last_seen
+                """,
+                arguments: [sha1, blobId, now]
+            )
+        }
+    }
+
+    /// Remove entries not accessed in `maxAge` seconds (default 30 days).
+    public func sweepSha1Cache(maxAge: TimeInterval = 30 * 86400) {
+        let cutoff = Date().timeIntervalSince1970 - maxAge
+        try? pool.write { db in
+            try db.execute(
+                sql: "DELETE FROM sha1_cache WHERE last_seen < ?",
+                arguments: [cutoff]
+            )
+        }
     }
 
     /// MARK: - Node Lookup

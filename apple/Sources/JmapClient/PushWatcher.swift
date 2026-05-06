@@ -94,6 +94,11 @@ public actor PushWatcher {
         self.accountId = accountId
     }
 
+    /// Set the delegate. Must be called before `start()`.
+    public func setDelegate(_ delegate: (any PushWatcherDelegate)?) {
+        self.delegate = delegate
+    }
+
     /// Start the SSE connection. Reconnects automatically with backoff.
     public func start() {
         guard task == nil else { return }
@@ -152,10 +157,15 @@ public actor PushWatcher {
         let token = try await tokenProvider.currentToken()
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
 
+        TrafficLog.shared.log("→ SSE [\(accountId)] \(url.absoluteString)")
+
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
         guard let httpResponse = response as? HTTPURLResponse,
               httpResponse.statusCode == 200
         else {
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            let ct = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Type") ?? "?"
+            TrafficLog.shared.log("← \(status) SSE [\(accountId)] Content-Type: \(ct)")
             if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 401 {
                 // Invalidate token and session so next retry refreshes OAuth
                 if let oauthProvider = tokenProvider as? OAuthTokenProvider {
@@ -167,6 +177,10 @@ public actor PushWatcher {
             throw JmapError.invalidResponse
         }
 
+        let ct = httpResponse.value(forHTTPHeaderField: "Content-Type") ?? "?"
+        let cl = httpResponse.value(forHTTPHeaderField: "Content-Length") ?? "chunked"
+        TrafficLog.shared.log("← 200 SSE [\(accountId)] Content-Type: \(ct) Content-Length: \(cl)")
+
         // Reset backoff on successful connection
         backoffSeconds = 1.0
         #if canImport(os)
@@ -175,14 +189,23 @@ public actor PushWatcher {
 
         // Parse SSE stream using the extracted parser
         var parser = SSEParser()
+        var lineCount = 0
 
         for try await line in bytes.lines {
             if Task.isCancelled { return }
+            lineCount += 1
 
             if let event = parser.feedLine(line) {
+                TrafficLog.shared.log("← SSE event [\(accountId)] type=\(event.type.isEmpty ? "(state)" : event.type) data=\(event.data.prefix(200))")
                 await handleEvent(event)
             }
         }
+        // If bytes.lines throws (network drop, server close), connectionLoop catches it and
+        // retries with backoff. The next connect() sends the cached token; if it was expired
+        // the server returns 401 on the initial response, which the handler above invalidates.
+        // We do NOT invalidate proactively here — a genuine network drop must not cycle the token.
+
+        TrafficLog.shared.log("← SSE closed [\(accountId)] after \(lineCount) lines")
     }
 
     private func handleEvent(_ event: SSEParser.Event) async {
