@@ -152,14 +152,17 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
                 if !state.isEmpty { finalState = state }
 
                 for parentId in batchParents {
-                    for node in childrenByParent[parentId] ?? [] {
+                    let siblings = childrenByParent[parentId] ?? []
+                    let suffixes = Self.caseCollisionSuffixes(for: siblings.map { $0.name })
+                    for (i, node) in siblings.enumerated() {
                         allNodes.append(node)
                         if node.isTrash { effectiveTrashId = node.id }
 
                         if !node.isHome && !node.isRoot {
                             itemBatch.append(FileProviderItem(
                                 node: node, homeNodeId: nodes.homeId, trashNodeId: effectiveTrashId,
-                                isPinned: pinnedIds.contains(node.id)))
+                                isPinned: pinnedIds.contains(node.id),
+                                filenameOverride: suffixes[i]))
                             if itemBatch.count >= itemBatchSize {
                                 observer.didEnumerate(itemBatch)
                                 itemBatch.removeAll()
@@ -209,6 +212,13 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
         startingAt page: NSFileProviderPage
     ) async throws {
         let nodes = try await specialNodes.value
+
+        // Account has no trash node — the trash container is always empty.
+        if containerIdentifier == .trashContainer && nodes.trashId == nil {
+            observer.finishEnumerating(upTo: nil)
+            return
+        }
+
         let parentId = resolveParentId(containerIdentifier, nodes: nodes)
 
         let children = await database.children(of: parentId)
@@ -231,9 +241,14 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
             return
         }
 
-        let items = children.map { (id, entry) in
-            FileProviderItem(nodeId: id, entry: entry, homeNodeId: nodes.homeId, trashNodeId: nodes.trashId,
-                             isPinned: pinnedIds.contains(id))
+        let names = children.map { $0.1.name }
+        let suffixes = Self.caseCollisionSuffixes(for: names)
+        let items = children.enumerated().map { (i, pair) in
+            let (id, entry) = pair
+            return FileProviderItem(nodeId: id, entry: entry,
+                                   homeNodeId: nodes.homeId, trashNodeId: nodes.trashId,
+                                   isPinned: pinnedIds.contains(id),
+                                   filenameOverride: suffixes[i])
         }
         observer.didEnumerate(items)
         observer.finishEnumerating(upTo: nil)
@@ -385,6 +400,12 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
         }
 
         throw JmapError.invalidResponse
+    }
+
+    // MARK: - Case-collision deduplication
+
+    static func caseCollisionSuffixes(for names: [String]) -> [String?] {
+        FilenameUtils.caseCollisionSuffixes(for: names)
     }
 
     /// Map internal errors to NSFileProviderError for the system.

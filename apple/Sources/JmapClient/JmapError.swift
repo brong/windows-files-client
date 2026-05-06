@@ -7,10 +7,15 @@ import FileProvider
 public enum JmapError: Error, Sendable {
     case invalidResponse
     case unauthorized
+    /// The OAuth refresh token was rejected with `invalid_grant` — typically because another
+    /// process (app or another extension instance) already consumed the rotating token first.
+    /// `OAuthTokenProvider` retries the keychain for fresh credentials before surfacing this.
+    case tokenRotated
     case httpError(Int, String?)
     case missingCapability(String)
     case serverError(String, String?)  // type, description
     case notFound(String)              // itemId
+    case alreadyExists                 // name collision (case-insensitive on case-sensitive server)
     case cannotCalculateChanges
     case forbidden(String?)
     case rateLimited
@@ -26,12 +31,12 @@ public enum JmapError: Error, Sendable {
             return code >= 500 || code == 429
         case .rateLimited, .invalidResponse:
             return true
-        case .unauthorized, .forbidden, .payloadTooLarge, .blobTooLarge,
+        case .unauthorized, .tokenRotated, .forbidden, .payloadTooLarge, .blobTooLarge,
              .missingCapability, .noAccountId, .keychainError:
             return false
         case .serverError(let type, _):
             return type != "forbidden"
-        case .notFound, .cannotCalculateChanges, .uploadFailed:
+        case .notFound, .alreadyExists, .cannotCalculateChanges, .uploadFailed:
             return false
         }
     }
@@ -43,12 +48,14 @@ extension JmapError {
     /// Exhaustive — compiler enforces that every new case is handled here.
     public var fileProviderError: NSError {
         switch self {
-        case .unauthorized, .forbidden:
+        case .unauthorized, .tokenRotated, .forbidden:
             return NSFileProviderError(.notAuthenticated) as NSError
         case .cannotCalculateChanges:
             return NSFileProviderError(.syncAnchorExpired) as NSError
         case .notFound:
             return NSFileProviderError(.noSuchItem) as NSError
+        case .alreadyExists:
+            return NSFileProviderError(.filenameCollision) as NSError
         case .httpError(let code, _) where code >= 500:
             return NSFileProviderError(.serverUnreachable) as NSError
         case .httpError, .rateLimited, .invalidResponse:
@@ -72,6 +79,8 @@ extension JmapError: LocalizedError {
             return "Invalid server response"
         case .unauthorized:
             return "Authentication required"
+        case .tokenRotated:
+            return "Refresh token already consumed by another process"
         case .httpError(let code, let body):
             return "HTTP \(code)\(body.map { ": \($0)" } ?? "")"
         case .missingCapability(let cap):
@@ -80,6 +89,8 @@ extension JmapError: LocalizedError {
             return "Server error: \(type)\(desc.map { " — \($0)" } ?? "")"
         case .notFound(let id):
             return "Item not found: \(id)"
+        case .alreadyExists:
+            return "An item with that name already exists"
         case .cannotCalculateChanges:
             return "State token expired, full sync required"
         case .forbidden(let desc):

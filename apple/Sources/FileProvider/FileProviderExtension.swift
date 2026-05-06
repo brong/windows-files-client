@@ -19,7 +19,7 @@ struct SpecialNodes {
 /// Lifecycle: the system launches this extension on demand and may terminate
 /// it at any time. All state is persisted to the App Group shared container.
 public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension,
-    NSFileProviderEnumerating, NSFileProviderThumbnailing
+    NSFileProviderEnumerating, NSFileProviderThumbnailing, PushWatcherDelegate
 {
     private let domain: NSFileProviderDomain
     private let database: NodeDatabase
@@ -32,6 +32,14 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
     private let activityTracker: ActivityTracker
     private let statusWriter: ExtensionStatusWriter
     private let bandwidthPolicy = BandwidthPolicy()
+    /// Guards against concurrent duplicate uploads for the same item identifier.
+    /// fileproviderd may call createItem/modifyItem concurrently for the same item on retry.
+    /// Uses NSLock + Dictionary (not actor) for synchronous access during init.
+    private let inFlightLock = NSLock()
+    private var inFlightUploads: [String: Task<Void, Never>] = [:]
+    /// Monotonically increasing per-key counter. Lets a completing task detect that a
+    /// newer task has already superseded it, so it skips deregistration.
+    private var inFlightGenerations: [String: Int] = [:]
     /// Resolved once on first use; all sync methods await this before touching the server.
     private let specialNodes: Task<SpecialNodes, Error>
     /// Guards `_isDomainBeingRemoved` against concurrent reads from deleteItem tasks
@@ -119,7 +127,16 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
         {
             let kcService = loginKeychainService
             let kcAccount = keychainAccount
+            // Lock file name: sanitise the login identifier so it's a valid filename.
+            // All extension instances for the same login share this lock, ensuring
+            // only one process hits the token endpoint at a time.
+            let safeName = kcAccount.unicodeScalars.map {
+                CharacterSet.alphanumerics.contains($0) ? String($0) : "_"
+            }.joined()
+            let lockFilePath = effectiveContainerURL
+                .appendingPathComponent("token-refresh-\(safeName).lock").path
             tokenProvider = OAuthTokenProvider(credential: credential,
+                lockFilePath: lockFilePath,
                 onTokenRefreshed: { updated in
                     let encoder = JSONEncoder()
                     encoder.dateEncodingStrategy = .iso8601
@@ -148,8 +165,50 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
         let _sessionManager = SessionManager(sessionURL: sessionURL, tokenProvider: tokenProvider,
                                              diskCacheURL: sessionCacheURL)
         TrafficLog.shared.configure(containerURL: effectiveContainerURL)
-        let _client = JmapClient(sessionManager: _sessionManager, tokenProvider: tokenProvider)
+
+        // Use App Group container tmp/ for chunk files so orphans survive a process kill.
+        let tmpDir = effectiveContainerURL.appendingPathComponent("tmp", isDirectory: true)
+        try? FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+
         let _database = NodeDatabase(containerURL: effectiveContainerURL, accountId: acctId)
+
+        // Sweep stale rows on every startup to prevent unbounded table growth.
+        // NodeDatabase is an actor; sweep in a detached Task so init stays synchronous.
+        Task { await _database.sweepOldUploadSessions() }
+        Task { await _database.sweepSha1Cache() }
+
+        // Background URLSession for chunk uploads — tasks run in nsurlsessiond and survive
+        // extension process kills. The session identifier must be stable across launches so
+        // reconnection works; use the account ID as the discriminator.
+        let bgUploader = BackgroundUploader(
+            identifier: "com.fastmail.files.upload.\(acctId)",
+            onOrphan: { taskId, data, response in
+                // A chunk task that completed after the extension was killed.
+                // Parse the blobId and persist it so the next retry can skip re-uploading.
+                guard response.statusCode == 200,
+                      let blobResponse = try? JSONDecoder().decode(BlobUploadResponse.self, from: data)
+                else { return }
+                // onOrphan is synchronous; hop to the actor via a Task.
+                Task { await _database.completeUploadChunkByTaskId(taskId, blobId: blobResponse.blobId, sha1: "") }
+                // sha1 is empty here — it was already incorporated into the overall hash before
+                // the task started. The DB row's sha1 field is only used for delta dedup, which
+                // can tolerate a missing value (it'll fall back to re-uploading that chunk).
+            }
+        )
+
+        let chunkStore = UploadChunkStore(
+            completedChunks: { uploadId in await _database.completedUploadChunks(uploadId: uploadId) },
+            startChunk: { uploadId, index, taskId in await _database.startUploadChunk(uploadId: uploadId, index: index, taskId: taskId) },
+            completeChunk: { uploadId, index, blobId, sha1 in await _database.completeUploadChunk(uploadId: uploadId, index: index, blobId: blobId, sha1: sha1) },
+            clearUpload: { uploadId in await _database.clearUploadSession(uploadId: uploadId) },
+            cachedBlobId: { sha1 in await _database.cachedBlobId(forSha1: sha1) },
+            cacheChunkSha1: { sha1, blobId in await _database.cacheChunkSha1(sha1, blobId: blobId) }
+        )
+
+        let _client = JmapClient(sessionManager: _sessionManager, tokenProvider: tokenProvider,
+                                 temporaryDirectory: tmpDir,
+                                 backgroundUploader: bgUploader,
+                                 chunkStore: chunkStore)
         let _activityTracker = ActivityTracker(containerURL: effectiveContainerURL)
         let _statusWriter = ExtensionStatusWriter(containerURL: effectiveContainerURL, accountId: acctId)
         let _syncEngine = SyncEngine(client: _client, database: _database, accountId: acctId)
@@ -286,15 +345,21 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                     throw JmapError.serverError("isFolder", "Cannot fetch contents of a folder")
                 }
 
-                // Interactive file-open always proceeds; background hydration respects bandwidth policy.
+                // Interactive file-open (user explicitly opened the file) proceeds on any
+                // non-offline connection. Background hydration (system pre-fetch) only runs
+                // on unrestricted (WiFi/ethernet) connections.
+                // On macOS < 13 / iOS < 16, isFileViewerRequest is unavailable; treat all
+                // fetchContents as interactive so users are never blocked from opening files.
                 let isInteractive: Bool
                 if #available(macOS 13.0, iOS 16.0, *) {
                     isInteractive = request.isFileViewerRequest
                 } else {
-                    isInteractive = false  // conservative: treat as background on older OS
+                    isInteractive = true
                 }
-                let backgroundAllowed = await bandwidthPolicy.allowsBackgroundDownload
-                if !isInteractive && !backgroundAllowed {
+                let allowed = isInteractive
+                    ? await bandwidthPolicy.allowsInteractiveDownload
+                    : await bandwidthPolicy.allowsBackgroundDownload
+                if !allowed {
                     throw JmapError.rateLimited  // retry when connection improves
                 }
 
@@ -338,6 +403,9 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
             } catch {
                 let activityId = "dl:\(accountId):\(itemIdentifier.rawValue)"
                 await activityTracker.fail(id: activityId, error: error.localizedDescription)
+                #if canImport(os)
+                logger.error("fetchContents [\(self.accountId, privacy: .public)] \(itemIdentifier.rawValue, privacy: .public) failed: \(error, privacy: .public)")
+                #endif
                 completionHandler(nil, nil, mapError(error))
             }
         }
@@ -361,9 +429,31 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
     ) -> Progress {
         let progress = Progress(totalUnitCount: 100)
 
-        Task {
+        // Generate a stable upload ID from the item identity + file content fingerprint.
+        // Stable across retries (same item + same file = same ID), changes when content changes.
+        let createUploadId: String = {
+            let fileSize = (try? FileManager.default.attributesOfItem(
+                atPath: (url ?? URL(fileURLWithPath: "")).path)[.size] as? Int64) ?? 0
+            let modMs = (try? FileManager.default.attributesOfItem(
+                atPath: (url ?? URL(fileURLWithPath: "")).path)[.modificationDate] as? Date)?
+                .timeIntervalSince1970 ?? 0
+            return "create:\(accountId):\(itemTemplate.itemIdentifier.rawValue):\(fileSize):\(Int64(modMs * 1000))"
+        }()
+
+        let dedupeKey = itemTemplate.itemIdentifier.rawValue
+        let inFlightGen = registerInFlight(key: dedupeKey)
+
+        let uploadTask = Task {
+            defer { deregisterInFlight(key: dedupeKey, generation: inFlightGen) }
             do {
                 let nodes = try await specialNodes.value
+
+                // Creating inside .trashContainer when no trash node exists is impossible.
+                if itemTemplate.parentItemIdentifier == .trashContainer && nodes.trashId == nil {
+                    completionHandler(nil, [], false, NSFileProviderError(.noSuchItem) as NSError)
+                    return
+                }
+
                 let parentId = resolveNodeId(itemTemplate.parentItemIdentifier, nodes: nodes)
 
                 if itemTemplate.contentType == .folder {
@@ -413,7 +503,6 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                         throw JmapError.rateLimited
                     }
 
-                    await activityTracker.markActive(id: activityId)
                     let contentType = itemTemplate.contentType?.preferredMIMEType ?? "application/octet-stream"
 
                     // Detect retry: if a node with this name already exists in our DB, the previous
@@ -440,7 +529,8 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                         let blob = try await client.uploadBlobChunked(
                             accountId: accountId,
                             fileURL: contentURL,
-                            contentType: contentType
+                            contentType: contentType,
+                            uploadId: createUploadId
                         ) { uploaded, total in
                             if total > 0 {
                                 let pct = Double(uploaded) / Double(total)
@@ -493,17 +583,26 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
             } catch {
                 let failId = "ul:\(accountId):\(desanitizeFilename(itemTemplate.filename))"
                 await activityTracker.fail(id: failId, error: error.localizedDescription)
-                let failCount = await database.incrementUploadFailure(
-                    itemIdentifier: itemTemplate.itemIdentifier.rawValue,
-                    error: error.localizedDescription)
-                statusWriter.setBlockedUploadCount(await database.blockedUploadCount)
-                let mapped = failCount >= NodeDatabase.uploadFailureThreshold
-                    ? NSFileProviderError(.cannotSynchronize) as NSError
-                    : mapError(error)
+                let mapped: Error
+                if isPermanentError(error) {
+                    // Permanent errors (e.g. alreadyExists → filenameCollision) must not be
+                    // swapped for cannotSynchronize — the system needs the specific code.
+                    mapped = mapError(error)
+                } else {
+                    let failCount = await database.incrementUploadFailure(
+                        itemIdentifier: itemTemplate.itemIdentifier.rawValue,
+                        error: error.localizedDescription)
+                    statusWriter.setBlockedUploadCount(await database.blockedUploadCount)
+                    mapped = failCount >= NodeDatabase.uploadFailureThreshold
+                        ? NSFileProviderError(.cannotSynchronize) as NSError
+                        : mapError(error)
+                }
                 completionHandler(nil, [], false, mapped)
             }
         }
 
+        setInFlight(key: dedupeKey, generation: inFlightGen, task: uploadTask)
+        progress.cancellationHandler = { uploadTask.cancel() }
         return progress
     }
 
@@ -520,7 +619,11 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
     ) -> Progress {
         let progress = Progress(totalUnitCount: 100)
 
-        Task {
+        let modifyDedupeKey = item.itemIdentifier.rawValue
+        let modifyInFlightGen = registerInFlight(key: modifyDedupeKey)
+
+        let modifyTask = Task {
+            defer { deregisterInFlight(key: modifyDedupeKey, generation: modifyInFlightGen) }
             do {
                 let nodes = try await specialNodes.value
                 let nodeId = item.itemIdentifier.rawValue
@@ -543,13 +646,19 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                         throw JmapError.rateLimited
                     }
 
-                    await activityTracker.markActive(id: activityId)
                     let currentBlobId = await database.entry(for: nodeId)?.blobId
+                    let modUploadId: String = {
+                        let sz = (try? FileManager.default.attributesOfItem(atPath: contentURL.path)[.size] as? Int64) ?? 0
+                        let ms = (try? FileManager.default.attributesOfItem(atPath: contentURL.path)[.modificationDate] as? Date)?
+                            .timeIntervalSince1970 ?? 0
+                        return "modify:\(accountId):\(nodeId):\(sz):\(Int64(ms * 1000))"
+                    }()
                     let blob = try await client.uploadBlobDelta(
                         accountId: accountId,
                         fileURL: contentURL,
                         contentType: contentType,
-                        oldBlobId: currentBlobId
+                        oldBlobId: currentBlobId,
+                        uploadId: modUploadId
                     ) { uploaded, total in
                         if total > 0 {
                             let pct = Double(uploaded) / Double(total)
@@ -598,8 +707,18 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
 
                 // Handle move (parent change)
                 if changedFields.contains(.parentItemIdentifier) {
-                    let newParentId = resolveNodeId(item.parentItemIdentifier, nodes: nodes)
-
+                    let newParentIdentifier = item.parentItemIdentifier
+                    if newParentIdentifier == .trashContainer && nodes.trashId == nil {
+                        // Moving to trash but account has no trash node — permanently delete.
+                        // Signal success with no resulting item (same as deleteItem does).
+                        try await client.destroyNode(accountId: accountId, nodeId: currentNodeId,
+                                                     removeChildren: false)
+                        await database.remove(nodeId: currentNodeId)
+                        try await database.save()
+                        completionHandler(nil, [], false, nil)
+                        return
+                    }
+                    let newParentId = resolveNodeId(newParentIdentifier, nodes: nodes)
                     if newParentId == nodes.trashId {
                         // Move to trash
                         try await client.updateNode(
@@ -654,17 +773,24 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                 statusWriter.setBlockedUploadCount(await database.blockedUploadCount)
                 completionHandler(resultItem, [], false, nil)
             } catch {
-                let failCount = await database.incrementUploadFailure(
-                    itemIdentifier: item.itemIdentifier.rawValue,
-                    error: error.localizedDescription)
-                statusWriter.setBlockedUploadCount(await database.blockedUploadCount)
-                let mapped = failCount >= NodeDatabase.uploadFailureThreshold
-                    ? NSFileProviderError(.cannotSynchronize) as NSError
-                    : mapError(error)
+                let mapped: Error
+                if isPermanentError(error) {
+                    mapped = mapError(error)
+                } else {
+                    let failCount = await database.incrementUploadFailure(
+                        itemIdentifier: item.itemIdentifier.rawValue,
+                        error: error.localizedDescription)
+                    statusWriter.setBlockedUploadCount(await database.blockedUploadCount)
+                    mapped = failCount >= NodeDatabase.uploadFailureThreshold
+                        ? NSFileProviderError(.cannotSynchronize) as NSError
+                        : mapError(error)
+                }
                 completionHandler(nil, [], false, mapped)
             }
         }
 
+        setInFlight(key: modifyDedupeKey, generation: modifyInFlightGen, task: modifyTask)
+        progress.cancellationHandler = { modifyTask.cancel() }
         return progress
     }
 
@@ -688,6 +814,14 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                 }
 
                 let nodes = try await specialNodes.value
+
+                // Re-check after the await: invalidate() runs on an arbitrary thread and
+                // may have set isDomainBeingRemoved while we were suspended above.
+                if isDomainBeingRemoved {
+                    completionHandler(nil)
+                    return
+                }
+
                 let nodeId = identifier.rawValue
 
                 let fileName = (await database.entry(for: nodeId))?.name ?? nodeId
@@ -695,6 +829,12 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                 await activityTracker.start(
                     id: activityId, accountId: accountId, fileName: fileName,
                     action: .delete)
+
+                // Final check immediately before the destructive server call.
+                guard !isDomainBeingRemoved else {
+                    completionHandler(nil)
+                    return
+                }
 
                 do {
                     if let trashId = nodes.trashId {
@@ -827,10 +967,59 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
 
     // MARK: - Private Helpers
 
+    // MARK: - In-flight Upload Guard
+
+    /// Cancel any existing in-flight upload for `key`, bump the generation, and return it.
+    /// Call this before creating the Task; store the returned generation for deregistration.
+    private func registerInFlight(key: String) -> Int {
+        inFlightLock.withLock {
+            inFlightUploads[key]?.cancel()
+            let gen = (inFlightGenerations[key] ?? 0) &+ 1
+            inFlightGenerations[key] = gen
+            return gen
+        }
+    }
+
+    /// Store the task after it has been created, but only if our generation is still current.
+    /// If a newer call came in between registerInFlight and here, the task is already superseded.
+    private func setInFlight(key: String, generation: Int, task: Task<Void, Never>) {
+        inFlightLock.withLock {
+            if inFlightGenerations[key] == generation {
+                inFlightUploads[key] = task
+            }
+        }
+    }
+
+    /// Remove the registration for `key` only if our generation is still current.
+    /// Called from a task's `defer` block so a superseded task doesn't evict a newer one.
+    private func deregisterInFlight(key: String, generation: Int) {
+        inFlightLock.withLock {
+            if inFlightGenerations[key] == generation {
+                inFlightUploads.removeValue(forKey: key)
+                inFlightGenerations.removeValue(forKey: key)
+            }
+        }
+    }
+
     private func startPushWatcher() async {
-        // Set up push delegate to signal working set enumerator
-        // The PushWatcher needs a delegate — we'll use a bridge object
+        await pushWatcher.setDelegate(self)
         await pushWatcher.start()
+    }
+
+    // MARK: - PushWatcherDelegate
+
+    public func pushWatcherDidReceiveChange(_ watcher: PushWatcher) async {
+        #if canImport(os)
+        logger.info("[\(self.accountId, privacy: .public)] SSE state change — signalling working set")
+        #endif
+        NSFileProviderManager(for: domain)?.signalEnumerator(for: .workingSet) { _ in }
+    }
+
+    public func pushWatcherDidReconnect(_ watcher: PushWatcher) async {
+        #if canImport(os)
+        logger.info("[\(self.accountId, privacy: .public)] SSE reconnected — signalling working set to catch up")
+        #endif
+        NSFileProviderManager(for: domain)?.signalEnumerator(for: .workingSet) { _ in }
     }
 
     /// Resolve a FileProvider item identifier to a JMAP nodeId.
@@ -849,7 +1038,17 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
         case .rootContainer:
             nodeId = nodes.homeId
         case .trashContainer:
-            nodeId = nodes.trashId ?? nodes.homeId
+            guard let trashId = nodes.trashId else {
+                // Account has no trash node — return a synthetic read-only empty container so
+                // the system gets .trashContainer back (not .rootContainer, which would itemMismatch).
+                let entry = NodeCacheEntry(parentId: nodes.homeId, name: "Trash",
+                                           isFolder: true,
+                                           myRights: FileNodeRights(mayRead: true, mayWrite: false))
+                return FileProviderItem(nodeId: "synthetic-trash", entry: entry,
+                                        homeNodeId: nodes.homeId, trashNodeId: nil,
+                                        isSyntheticTrash: true)
+            }
+            nodeId = trashId
         default:
             nodeId = identifier.rawValue
         }
@@ -872,12 +1071,8 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
             isPinned: await database.isPinned(id: nodeId))
     }
 
-    /// Reverse filename sanitization (restore original characters for server).
     private func desanitizeFilename(_ name: String) -> String {
-        var result = name
-        result = result.replacingOccurrences(of: "\u{2215}", with: "/") // DIVISION SLASH → /
-        result = result.replacingOccurrences(of: "\u{A789}", with: ":") // MODIFIER LETTER COLON → :
-        return result
+        FilenameUtils.desanitize(name)
     }
 
     /// Map errors to NSFileProviderError.
@@ -889,6 +1084,14 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
             return NSFileProviderError(.serverUnreachable)
         }
         return error
+    }
+
+    /// True for errors that are permanent — the system cannot recover by retrying.
+    /// These must be returned as-is rather than being swapped for `.cannotSynchronize`
+    /// when the upload failure threshold is reached.
+    private func isPermanentError(_ error: Error) -> Bool {
+        guard let jmapError = error as? JmapError else { return false }
+        return !jmapError.isRetriable
     }
 }
 

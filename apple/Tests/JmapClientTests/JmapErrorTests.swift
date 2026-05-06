@@ -23,6 +23,7 @@ import Testing
     #expect(!JmapError.noAccountId.isRetriable)
     #expect(!JmapError.keychainError(-25300).isRetriable)
     #expect(!JmapError.notFound("M1").isRetriable)
+    #expect(!JmapError.alreadyExists.isRetriable)
     #expect(!JmapError.cannotCalculateChanges.isRetriable)
     #expect(!JmapError.uploadFailed("disk full").isRetriable)
     #expect(!JmapError.serverError("forbidden", nil).isRetriable)
@@ -79,6 +80,12 @@ import Testing
 @Test func testMissingCapabilityMapsToNotAuthenticated() {
     let err = JmapError.missingCapability("urn:foo").fileProviderError
     #expect(err.code == NSFileProviderError.notAuthenticated.rawValue)
+}
+
+@Test func testAlreadyExistsMapsToFilenameCollision() {
+    let err = JmapError.alreadyExists.fileProviderError
+    #expect(err.domain == NSFileProviderErrorDomain)
+    #expect(err.code == NSFileProviderError.filenameCollision.rawValue)
 }
 
 @Test func testUploadFailedMapsToCannotSynchronize() {

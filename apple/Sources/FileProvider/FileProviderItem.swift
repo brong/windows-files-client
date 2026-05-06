@@ -10,15 +10,23 @@ public final class FileProviderItem: NSObject, NSFileProviderItem {
     private let homeNodeId: String
     private let trashNodeId: String?
     private let pinned: Bool
+    private let syntheticTrash: Bool
+    /// Overrides the displayed filename when two siblings are case-insensitively identical
+    /// (e.g., "FOO.txt" displayed as "FOO (2).txt" so both appear in Finder).
+    /// The real name stored on the server is always `entry.name`.
+    private let filenameOverride: String?
 
     public init(nodeId: String, entry: NodeCacheEntry,
                 homeNodeId: String, trashNodeId: String?,
-                isPinned: Bool = false) {
+                isPinned: Bool = false, isSyntheticTrash: Bool = false,
+                filenameOverride: String? = nil) {
         self.nodeId = nodeId
         self.entry = entry
         self.homeNodeId = homeNodeId
         self.trashNodeId = trashNodeId
         self.pinned = isPinned
+        self.syntheticTrash = isSyntheticTrash
+        self.filenameOverride = filenameOverride
     }
 
     /// Convenience init from a FileNode.
@@ -41,12 +49,9 @@ public final class FileProviderItem: NSObject, NSFileProviderItem {
     // MARK: - NSFileProviderItem
 
     public var itemIdentifier: NSFileProviderItemIdentifier {
-        if nodeId == homeNodeId {
-            return .rootContainer
-        }
-        if let trashId = trashNodeId, nodeId == trashId {
-            return .trashContainer
-        }
+        if syntheticTrash { return .trashContainer }
+        if nodeId == homeNodeId { return .rootContainer }
+        if let trashId = trashNodeId, nodeId == trashId { return .trashContainer }
         return NSFileProviderItemIdentifier(nodeId)
     }
 
@@ -64,7 +69,7 @@ public final class FileProviderItem: NSObject, NSFileProviderItem {
     }
 
     public var filename: String {
-        sanitizeFilename(entry.name)
+        sanitizeFilename(filenameOverride ?? entry.name)
     }
 
     public var contentType: UTType {
@@ -101,7 +106,9 @@ public final class FileProviderItem: NSObject, NSFileProviderItem {
         // contentVersion: blobId (changes when file content changes)
         // metadataVersion: name + parentId hash (changes on rename/move)
         let contentData = (entry.blobId ?? "folder").data(using: .utf8) ?? Data()
-        let metaString = "\(entry.name):\(entry.parentId ?? "root")"
+        // Use the displayed filename (not entry.name) so that adding/removing a
+        // case-collision suffix registers as a metadata change.
+        let metaString = "\(filename):\(entry.parentId ?? "root")"
         let metaData = metaString.data(using: .utf8) ?? Data()
         return NSFileProviderItemVersion(contentVersion: contentData, metadataVersion: metaData)
     }
@@ -127,14 +134,7 @@ public final class FileProviderItem: NSObject, NSFileProviderItem {
         entry.modified
     }
 
-    // MARK: - Filename Sanitization
-
-    /// Sanitize filenames for macOS/iOS.
-    /// Only `/` and `:` are problematic (`:` shows as `/` in Finder due to HFS+ legacy).
     private func sanitizeFilename(_ name: String) -> String {
-        var result = name
-        result = result.replacingOccurrences(of: "/", with: "\u{2215}") // DIVISION SLASH
-        result = result.replacingOccurrences(of: ":", with: "\u{A789}") // MODIFIER LETTER COLON
-        return result
+        FilenameUtils.sanitize(name)
     }
 }
