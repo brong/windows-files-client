@@ -249,6 +249,52 @@ extension NetworkTests {
         #expect(node.isFolder == true)
     }
 
+    @Test func createNodeWithOnExistsRenameReturnsServerAssignedName() async throws {
+        // When the server renames the node to avoid a collision, the response
+        // contains the actual name chosen. The conflict-copy path depends on this
+        // being correctly parsed and returned to the caller.
+        let client = makeTestClient()
+
+        nonisolated(unsafe) var capturedBody = ""
+        MockURLProtocol.handler = { request in
+            let url = request.url!
+            if url.path.contains("session") { return jsonResponse(url: url, json: testSessionJSON) }
+            capturedBody = readRequestBody(request)
+            // Server renames "doc.txt" → "doc (2).txt" due to collision
+            return jsonResponse(url: url, json: """
+            {"methodResponses":[
+                ["FileNode/set",{
+                    "accountId":"u123","oldState":"s1","newState":"s2",
+                    "created":{"c0":{
+                        "id":"N-conflict","parentId":"P1",
+                        "name":"doc (2).txt",
+                        "blobId":"B-conflict","size":42,"type":"text/plain",
+                        "created":null,"modified":null,"role":null,"myRights":null
+                    }}
+                },"s0"]
+            ],"sessionState":"ss1"}
+            """)
+        }
+        defer { MockURLProtocol.handler = nil }
+
+        let node = try await client.createNode(
+            accountId: "u123",
+            parentId: "P1",
+            name: "doc.txt",
+            blobId: "B-conflict",
+            type: "text/plain",
+            onExists: "rename"
+        )
+
+        // Verify the server-assigned name is returned (not the requested name)
+        #expect(node.id == "N-conflict")
+        #expect(node.name == "doc (2).txt")  // server renamed it
+
+        // Verify onExists: "rename" was sent in the request
+        #expect(capturedBody.contains("\"onExists\""))
+        #expect(capturedBody.contains("rename"))
+    }
+
     @Test func createNodeForbidden() async throws {
         let client = makeTestClient()
 

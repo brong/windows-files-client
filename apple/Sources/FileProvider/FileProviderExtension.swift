@@ -646,6 +646,64 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                         throw JmapError.rateLimited
                     }
 
+                    // Conflict detection: baseVersion.contentVersion encodes the blobId (as
+                    // UTF-8 bytes) that the system held when the user opened the file. If the
+                    // DB's current blobId differs, another device updated the server copy while
+                    // this edit was in progress.
+                    let baseContentBlobId = String(data: baseVersion.contentVersion, encoding: .utf8)
+                    let currentEntry = await database.entry(for: nodeId)
+                    let currentBlobId = currentEntry?.blobId
+
+                    if let base = baseContentBlobId, let current = currentBlobId, base != current {
+                        // Conflict: upload user's content as a new node in the same parent.
+                        // onExists: "rename" lets the server pick a non-colliding name
+                        // (e.g. "doc (2).txt") and tells us what it chose in the response.
+                        // We return that new item — the system renames the local file to match.
+                        let conflictBlob = try await client.uploadBlobDelta(
+                            accountId: accountId,
+                            fileURL: contentURL,
+                            contentType: contentType,
+                            oldBlobId: nil,
+                            uploadId: "conflict:\(accountId):\(nodeId)"
+                        ) { uploaded, total in
+                            if total > 0 {
+                                let pct = Double(uploaded) / Double(total)
+                                Task { await self.activityTracker.updateProgress(id: activityId, progress: pct * 0.8) }
+                            }
+                        }
+
+                        let parentId = currentEntry?.parentId ?? nodes.homeId
+                        let conflictNode = try await client.createNode(
+                            accountId: accountId,
+                            parentId: parentId,
+                            name: fileName,
+                            blobId: conflictBlob.blobId,
+                            type: contentType,
+                            modified: item.contentModificationDate,
+                            onExists: "rename"
+                        )
+
+                        let conflictEntry = NodeCacheEntry(
+                            parentId: conflictNode.parentId ?? parentId,
+                            name: conflictNode.name ?? fileName,
+                            blobId: conflictBlob.blobId,
+                            size: conflictBlob.size,
+                            modified: item.contentModificationDate,
+                            isFolder: false,
+                            type: contentType,
+                            myRights: currentEntry?.myRights
+                        )
+                        await database.upsert(nodeId: conflictNode.id, entry: conflictEntry)
+                        try await database.save()
+                        await activityTracker.complete(id: activityId)
+
+                        let conflictItem = FileProviderItem(
+                            nodeId: conflictNode.id, entry: conflictEntry,
+                            homeNodeId: nodes.homeId, trashNodeId: nodes.trashId)
+                        completionHandler(conflictItem, [], false, nil)
+                        return
+                    }
+
                     let blob: BlobUploadResponse
                     let directWriteLimit = 16 * 1024 * 1024
                     if fileSize < directWriteLimit,
