@@ -655,10 +655,9 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                     let currentBlobId = currentEntry?.blobId
 
                     if let base = baseContentBlobId, let current = currentBlobId, base != current {
-                        // Conflict: upload user's content as a new node in the same parent.
-                        // onExists: "rename" lets the server pick a non-colliding name
-                        // (e.g. "doc (2).txt") and tells us what it chose in the response.
-                        // We return that new item — the system renames the local file to match.
+                        // Conflict: another device updated the server copy while this edit was in
+                        // progress. Upload the user's content first (needed regardless of strategy),
+                        // then apply whichever resolution policy the user has chosen.
                         let conflictBlob = try await client.uploadBlobDelta(
                             accountId: accountId,
                             fileURL: contentURL,
@@ -673,6 +672,49 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                         }
 
                         let parentId = currentEntry?.parentId ?? nodes.homeId
+
+                        // "Newest wins" strategy: ask the server to apply the update only if our
+                        // modified timestamp is strictly newer than the existing node's modified.
+                        // onExists: "newest" — new protocol extension; server returns alreadyExists
+                        // in notUpdated when the condition fails. On success the node ID is stable.
+                        // On failure we fall through to the conflict-copy path below.
+                        if Self.conflictResolution() == .newestWins {
+                            do {
+                                try await client.updateNodeContent(
+                                    accountId: accountId,
+                                    nodeId: nodeId,
+                                    blobId: conflictBlob.blobId,
+                                    type: contentType,
+                                    modified: item.contentModificationDate,
+                                    onExists: "newest"
+                                )
+                                let winnerEntry = NodeCacheEntry(
+                                    parentId: currentEntry?.parentId ?? parentId,
+                                    name: currentEntry?.name ?? fileName,
+                                    blobId: conflictBlob.blobId,
+                                    size: conflictBlob.size,
+                                    modified: item.contentModificationDate,
+                                    isFolder: false,
+                                    type: contentType,
+                                    myRights: currentEntry?.myRights
+                                )
+                                await database.upsert(nodeId: nodeId, entry: winnerEntry)
+                                try await database.save()
+                                await activityTracker.complete(id: activityId)
+                                let winnerItem = FileProviderItem(
+                                    nodeId: nodeId, entry: winnerEntry,
+                                    homeNodeId: nodes.homeId, trashNodeId: nodes.trashId)
+                                completionHandler(winnerItem, [], false, nil)
+                                return
+                            } catch JmapError.alreadyExists {
+                                // Server copy is newer — fall through to conflict-copy path.
+                            }
+                        }
+
+                        // Conflict copy: create a new node in the same parent.
+                        // onExists: "rename" lets the server pick a non-colliding name
+                        // (e.g. "doc (2).txt") and tells us what it chose in the response.
+                        // We return that new item — the system renames the local file to match.
                         let conflictNode = try await client.createNode(
                             accountId: accountId,
                             parentId: parentId,
@@ -1165,6 +1207,22 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
     private func isPermanentError(_ error: Error) -> Bool {
         guard let jmapError = error as? JmapError else { return false }
         return !jmapError.isRetriable
+    }
+
+    // MARK: - Conflict Resolution
+
+    enum ConflictResolutionStrategy: String {
+        /// Keep both copies: user's content is saved under a server-assigned name.
+        case conflictCopy
+        /// Overwrite the server copy only if the local modified timestamp is newer;
+        /// fall back to conflict copy when the server is newer.
+        case newestWins
+    }
+
+    static func conflictResolution() -> ConflictResolutionStrategy {
+        let defaults = UserDefaults(suiteName: Self.appGroupId)
+        let raw = defaults?.string(forKey: "conflictResolution") ?? ""
+        return ConflictResolutionStrategy(rawValue: raw) ?? .conflictCopy
     }
 }
 

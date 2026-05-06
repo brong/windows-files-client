@@ -740,5 +740,75 @@ extension NetworkTests {
             #expect(type == "notSupported")
         }
     }
+
+    // MARK: - updateNodeContent with onExists: "newest"
+
+    @Test func updateNodeContentNewestSucceedsWhenLocalIsNewer() async throws {
+        // Server applies the update because our modified timestamp is newer.
+        // The request must include onExists: "newest" at the top level of FileNode/set.
+        let client = makeTestClient()
+
+        nonisolated(unsafe) var capturedBody = ""
+        MockURLProtocol.handler = { request in
+            let url = request.url!
+            if url.path.contains("session") { return jsonResponse(url: url, json: testSessionJSON) }
+            capturedBody = readRequestBody(request)
+            return jsonResponse(url: url, json: """
+            {"methodResponses":[
+                ["FileNode/set",{
+                    "accountId":"u123","oldState":"s1","newState":"s2",
+                    "updated":{"N1":{}}
+                },"s0"]
+            ],"sessionState":"ss1"}
+            """)
+        }
+        defer { MockURLProtocol.handler = nil }
+
+        try await client.updateNodeContent(
+            accountId: "u123",
+            nodeId: "N1",
+            blobId: "B-new",
+            type: "text/plain",
+            modified: Date(timeIntervalSinceReferenceDate: 1_000_000),
+            onExists: "newest"
+        )
+
+        #expect(capturedBody.contains("\"onExists\""))
+        #expect(capturedBody.contains("newest"))
+        #expect(capturedBody.contains("\"blobId\""))
+    }
+
+    @Test func updateNodeContentNewestThrowsAlreadyExistsWhenServerIsNewer() async throws {
+        // Server rejects the update because the existing node's modified is newer.
+        // The server returns alreadyExists in notUpdated; we must re-throw JmapError.alreadyExists.
+        let client = makeTestClient()
+
+        MockURLProtocol.handler = { request in
+            let url = request.url!
+            if url.path.contains("session") { return jsonResponse(url: url, json: testSessionJSON) }
+            return jsonResponse(url: url, json: """
+            {"methodResponses":[
+                ["FileNode/set",{
+                    "accountId":"u123","oldState":"s1","newState":"s1",
+                    "notUpdated":{"N1":{"type":"alreadyExists","description":"Server copy is newer"}}
+                },"s0"]
+            ],"sessionState":"ss1"}
+            """)
+        }
+        defer { MockURLProtocol.handler = nil }
+
+        do {
+            try await client.updateNodeContent(
+                accountId: "u123",
+                nodeId: "N1",
+                blobId: "B-new",
+                modified: Date(timeIntervalSinceReferenceDate: 900_000),
+                onExists: "newest"
+            )
+            Issue.record("Expected JmapError.alreadyExists but succeeded")
+        } catch JmapError.alreadyExists {
+            // Correct — server told us the existing copy is newer.
+        }
+    }
 }
 }

@@ -553,12 +553,18 @@ public actor JmapClient {
 
     /// Update a file's content by setting a new blobId (v10: blobId is now mutable).
     /// The node ID stays the same — no destroy+create needed.
+    ///
+    /// Pass `onExists: "newest"` to make the update conditional: the server only
+    /// applies it if the supplied `modified` timestamp is strictly newer than the
+    /// node's current `modified`. If the condition fails the server returns
+    /// `alreadyExists` in `notUpdated`, which is re-thrown as `JmapError.alreadyExists`.
     public func updateNodeContent(
         accountId: String,
         nodeId: String,
         blobId: String,
         type: String? = nil,
-        modified: Date? = nil
+        modified: Date? = nil,
+        onExists: String? = nil
     ) async throws {
         var updateFields: [String: AnyCodable] = [
             "blobId": AnyCodable(blobId),
@@ -571,26 +577,24 @@ public actor JmapClient {
             updateFields["modified"] = AnyCodable(NSNull())
         }
 
+        var setArgs: [String: AnyCodable] = [
+            "accountId": AnyCodable(accountId),
+            "update": [nodeId: AnyCodable(updateFields)],
+        ]
+        if let onExists = onExists {
+            setArgs["onExists"] = AnyCodable(onExists)
+        }
+
         let responses = try await call([
-            JmapMethodCall(
-                name: "FileNode/set",
-                args: [
-                    "accountId": AnyCodable(accountId),
-                    "update": [nodeId: AnyCodable(updateFields)],
-                ],
-                callId: "s0"
-            ),
+            JmapMethodCall(name: "FileNode/set", args: setArgs, callId: "s0"),
         ])
 
         let setResponse = try extractResponse(FileNodeSetResponse.self, from: responses, callId: "s0")
 
         if let error = setResponse.notUpdated?[nodeId] {
-            if error.type == "notFound" {
-                throw JmapError.notFound(nodeId)
-            }
-            if error.type == "forbidden" {
-                throw JmapError.forbidden(error.description)
-            }
+            if error.type == "notFound" { throw JmapError.notFound(nodeId) }
+            if error.type == "forbidden" { throw JmapError.forbidden(error.description) }
+            if error.type == "alreadyExists" { throw JmapError.alreadyExists }
             throw JmapError.serverError(error.type, error.description)
         }
     }

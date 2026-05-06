@@ -48,10 +48,19 @@ private enum ConfirmAction: Identifiable {
     }
 }
 
+#if os(macOS)
+private let appGroupId = "BJL34Q426G.com.fastmail.files"
+#else
+private let appGroupId = "group.com.fastmail.files"
+#endif
+
 struct SettingsView: View {
     @ObservedObject var appState: AppViewModel
     @State private var orphanedDomains: [NSFileProviderDomain] = []
     @State private var confirmAction: ConfirmAction?
+
+    @AppStorage("conflictResolution", store: UserDefaults(suiteName: appGroupId))
+    private var conflictResolution: String = "conflictCopy"
 
     var body: some View {
         VStack(spacing: 0) {
@@ -102,6 +111,27 @@ struct SettingsView: View {
                                 }
                                 .padding(.leading, 24)
                             }
+                        }
+                    }
+
+                    // Conflict resolution preference
+                    Divider()
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Conflict Resolution")
+                            .font(.headline)
+                        Text("When a file is edited on two devices simultaneously:")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Picker("", selection: $conflictResolution) {
+                            Text("Keep both copies (safe)").tag("conflictCopy")
+                            Text("Newest wins (overwrite older)").tag("newestWins")
+                        }
+                        .pickerStyle(.radioGroup)
+                        .labelsHidden()
+                        if conflictResolution == "newestWins" {
+                            Text("If the server copy is newer, your local edit is saved as a separate file instead.")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
                         }
                     }
 
