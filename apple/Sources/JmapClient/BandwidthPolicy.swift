@@ -63,6 +63,19 @@ public actor BandwidthPolicy {
         }
     }
 
+    /// True when SSE connections should be skipped and change detection left to
+    /// the sync engine's polling fallback. Constrained (Low Data Mode) and offline
+    /// connections are not worth maintaining a persistent SSE stream on.
+    public var skipSse: Bool { tier == .constrained || tier == .offline }
+
+    /// Minimum delay between SSE reconnect attempts for the current connection type.
+    /// On unrestricted connections PushWatcher uses its own exponential backoff.
+    /// On expensive (cellular) connections a 30-second floor avoids hammering the
+    /// server with repeated TLS handshakes on a metered link.
+    public var minSseReconnectDelay: Double {
+        tier == .expensive ? 30.0 : 0.0
+    }
+
     /// Override tier for testing without starting NWPathMonitor.
     func setTierForTesting(_ t: Tier) {
         tier = t

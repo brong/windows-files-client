@@ -83,3 +83,32 @@ import Testing
     #expect(!(await policy.allowsBackgroundDownload))
     #expect(!(await policy.allowsUpload(bytes: 1)))
 }
+
+// MARK: - SSE gating (skipSse / minSseReconnectDelay)
+
+@Test func testUnrestrictedAllowsSse() async {
+    let policy = BandwidthPolicy()
+    await policy.setTierForTesting(.unrestricted)
+    #expect(!(await policy.skipSse))
+    #expect(await policy.minSseReconnectDelay == 0.0)
+}
+
+@Test func testExpensiveAllowsSseWithFloor() async {
+    let policy = BandwidthPolicy()
+    await policy.setTierForTesting(.expensive)
+    #expect(!(await policy.skipSse))
+    #expect(await policy.minSseReconnectDelay == 30.0)
+}
+
+@Test func testConstrainedSkipsSse() async {
+    let policy = BandwidthPolicy()
+    await policy.setTierForTesting(.constrained)
+    #expect(await policy.skipSse)
+    #expect(await policy.minSseReconnectDelay == 0.0)  // irrelevant when skipSse
+}
+
+@Test func testOfflineSkipsSse() async {
+    let policy = BandwidthPolicy()
+    await policy.setTierForTesting(.offline)
+    #expect(await policy.skipSse)
+}

@@ -80,6 +80,7 @@ public actor PushWatcher {
     private let sessionManager: SessionManager
     private let tokenProvider: TokenProvider
     private let accountId: String
+    private let bandwidthPolicy: BandwidthPolicy?
     private var task: Task<Void, Never>?
     private var backoffSeconds: Double = 1.0
     private static let maxBackoff: Double = 60.0
@@ -88,10 +89,16 @@ public actor PushWatcher {
     private let logger = Logger(subsystem: "com.fastmail.files", category: "PushWatcher")
     #endif
 
-    public init(sessionManager: SessionManager, tokenProvider: TokenProvider, accountId: String) {
+    public init(
+        sessionManager: SessionManager,
+        tokenProvider: TokenProvider,
+        accountId: String,
+        bandwidthPolicy: BandwidthPolicy? = nil
+    ) {
         self.sessionManager = sessionManager
         self.tokenProvider = tokenProvider
         self.accountId = accountId
+        self.bandwidthPolicy = bandwidthPolicy
     }
 
     /// Set the delegate. Must be called before `start()`.
@@ -114,10 +121,25 @@ public actor PushWatcher {
 
     private func connectionLoop() async {
         while !Task.isCancelled {
+            // Bandwidth gate: skip SSE entirely on constrained/offline connections.
+            // The sync engine's polling loop covers change detection in the meantime,
+            // and we re-check every maxBackoff seconds in case conditions improve.
+            if await bandwidthPolicy?.skipSse == true {
+                #if canImport(os)
+                logger.info("[\(self.accountId, privacy: .public)] SSE skipped (constrained/offline) — relying on polling")
+                #endif
+                do {
+                    try await Task.sleep(nanoseconds: UInt64(Self.maxBackoff * 1_000_000_000))
+                } catch {
+                    return
+                }
+                continue
+            }
+
             do {
                 try await connect()
-                // If connect() returns normally, the connection was closed by the server.
-                // Signal the delegate to poll for any missed changes.
+                // connect() returned normally — server closed the stream.
+                // Signal the delegate to catch up on any missed changes.
                 await delegate?.pushWatcherDidReconnect(self)
             } catch is CancellationError {
                 return
@@ -127,11 +149,14 @@ public actor PushWatcher {
                 #endif
             }
 
-            // Exponential backoff
+            // Backoff: use the larger of the exponential error-backoff and the
+            // bandwidth-policy floor (30 s minimum on expensive/cellular connections).
+            let minDelay = await bandwidthPolicy?.minSseReconnectDelay ?? 0.0
+            let sleepSeconds = max(backoffSeconds, minDelay)
             do {
-                try await Task.sleep(nanoseconds: UInt64(backoffSeconds * 1_000_000_000))
+                try await Task.sleep(nanoseconds: UInt64(sleepSeconds * 1_000_000_000))
             } catch {
-                return // Cancelled
+                return
             }
             backoffSeconds = min(backoffSeconds * 2, Self.maxBackoff)
         }

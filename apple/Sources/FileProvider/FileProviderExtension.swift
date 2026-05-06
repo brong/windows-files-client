@@ -213,7 +213,8 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
         let _statusWriter = ExtensionStatusWriter(containerURL: effectiveContainerURL, accountId: acctId)
         let _syncEngine = SyncEngine(client: _client, database: _database, accountId: acctId)
         let _pushWatcher = PushWatcher(
-            sessionManager: _sessionManager, tokenProvider: tokenProvider, accountId: acctId)
+            sessionManager: _sessionManager, tokenProvider: tokenProvider, accountId: acctId,
+            bandwidthPolicy: bandwidthPolicy)
 
         // Assign stored properties.
         self.sessionManager = _sessionManager
@@ -333,7 +334,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
     ) -> Progress {
         let progress = Progress(totalUnitCount: 100)
 
-        Task {
+        let downloadTask = Task {
             do {
                 let nodes = try await specialNodes.value
                 let nodeId = itemIdentifier.rawValue
@@ -400,6 +401,12 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                     homeNodeId: nodes.homeId, trashNodeId: nodes.trashId,
                     isPinned: await database.isPinned(id: nodeId))
                 completionHandler(tempURL, item, nil)
+            } catch is CancellationError {
+                // The FileProvider system cancelled the download (e.g. user closed the
+                // file before it finished). Clean up activity and report cancellation.
+                let activityId = "dl:\(accountId):\(itemIdentifier.rawValue)"
+                await activityTracker.fail(id: activityId, error: "Cancelled")
+                completionHandler(nil, nil, NSError(domain: NSURLErrorDomain, code: NSURLErrorCancelled))
             } catch {
                 let activityId = "dl:\(accountId):\(itemIdentifier.rawValue)"
                 await activityTracker.fail(id: activityId, error: error.localizedDescription)
@@ -410,8 +417,10 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
             }
         }
 
+        // Cancelling the returned Progress cancels the underlying Swift Task, which
+        // propagates to URLSession.download(for:) via Swift's structured concurrency.
         progress.cancellationHandler = {
-            // TODO: Cancel in-flight download
+            downloadTask.cancel()
         }
 
         return progress
