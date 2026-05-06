@@ -13,17 +13,18 @@ This document records *why* each significant architectural, language, and protoc
 5. [Authentication: OAuth2 + flock(2) Refresh Serialization](#5-authentication-oauth2--flock2-refresh-serialization)
 6. [Sync Model: System-Driven vs Client Outbox](#6-sync-model-system-driven-vs-client-outbox)
 7. [Incremental Sync: FileNode/changes vs Full Re-enumeration](#7-incremental-sync-filenodechanges-vs-full-re-enumeration)
-8. [Change Notification: SSE + Polling Hybrid](#8-change-notification-sse--polling-hybrid)
-9. [Uploads: Chunked Blob/set + Delta Patch](#9-uploads-chunked-blobset--delta-patch)
-10. [Direct HTTP Write for Small Files](#10-direct-http-write-for-small-files)
-11. [Conflict Resolution: Two Strategies](#11-conflict-resolution-two-strategies)
-12. [Filename Normalization: NFC + Case Collision Deduplication](#12-filename-normalization-nfc--case-collision-deduplication)
-13. [Item Version: blobId as contentVersion](#13-item-version-blobid-as-contentversion)
-14. [Bandwidth Policy: NWPathMonitor Tiers](#14-bandwidth-policy-nwpathmonitor-tiers)
-15. [Progress and Cancellation: Task + cancellationHandler](#15-progress-and-cancellation-task--cancellationhandler)
-16. [SSE Reconnect: Bandwidth-Aware Backoff](#16-sse-reconnect-bandwidth-aware-backoff)
-17. [Dependency Management: Swift Package Manager](#17-dependency-management-swift-package-manager)
-18. [FUSE Code Isolation](#18-fuse-code-isolation)
+8. [Cold-Start Enumeration: BFS Tree Walk vs Flat Page Queries](#8-cold-start-enumeration-bfs-tree-walk-vs-flat-page-queries)
+9. [Change Notification: SSE + Polling Hybrid](#9-change-notification-sse--polling-hybrid)
+10. [Uploads: Chunked Blob/set + Delta Patch](#10-uploads-chunked-blobset--delta-patch)
+11. [Direct HTTP Write for Small Files](#11-direct-http-write-for-small-files)
+12. [Conflict Resolution: Two Strategies](#12-conflict-resolution-two-strategies)
+13. [Filename Normalization: NFC + Case Collision Deduplication](#13-filename-normalization-nfc--case-collision-deduplication)
+14. [Item Version: blobId as contentVersion](#14-item-version-blobid-as-contentversion)
+15. [Bandwidth Policy: NWPathMonitor Tiers](#15-bandwidth-policy-nwpathmonitor-tiers)
+16. [Progress and Cancellation: Task + cancellationHandler](#16-progress-and-cancellation-task--cancellationhandler)
+17. [SSE Reconnect: Bandwidth-Aware Backoff](#17-sse-reconnect-bandwidth-aware-backoff)
+18. [Dependency Management: Swift Package Manager](#18-dependency-management-swift-package-manager)
+19. [FUSE Code Isolation](#19-fuse-code-isolation)
 
 ---
 
@@ -204,7 +205,67 @@ At 50,000 nodes, full re-enumeration generates substantial API traffic and datab
 
 ---
 
-## 8. Change Notification: SSE + Polling Hybrid
+## 8. Cold-Start Enumeration: BFS Tree Walk vs Flat Page Queries
+
+**Chosen:** Breadth-first search (BFS) from the home node using batched `parentId` queries — up to 16 folders per HTTP request (32 JMAP method calls). Items are reported to the FileProvider system progressively as each BFS level arrives.
+
+**Alternatives considered:**
+
+| Option | Notes |
+|--------|-------|
+| Fetch all node IDs in pages, then fetch nodes by ID in pages | Two-pass; no progressive reporting; fetches orphans |
+| Fetch all folder nodes first, then fill each folder separately | Two-pass; still needs a second enumeration of folder children |
+| Single `FileNode/get` with no `ids` (fetch everything) | Not in spec; server would need to cap response size arbitrarily |
+| Depth-limited query via `filter: { depth: N }` | Not in the current spec |
+
+**The three approaches in detail:**
+
+*Flat page query (fetch all IDs → fetch all nodes):*
+```
+FileNode/query (position 0, limit 4096) → 50,000 IDs
+FileNode/get (ids: first 1024)
+FileNode/get (ids: next 1024)
+... (49 round-trips)
+```
+All 50,000 nodes arrive in one burst. Nothing can be shown to the user until the last page returns. Orphaned nodes (whose `parentId` points to a deleted folder) are fetched and stored — they consume DB space and are never reachable from the home root.
+
+*Directories-first, then fill:*
+```
+FileNode/query filter:{isFolder:true} → folder IDs
+FileNode/get (folder IDs in batches)
+  → then for each folder: FileNode/query filter:{parentId:X}
+```
+Requires two passes through the tree and still does not report progressively. The second pass is equivalent to the tree walk but without the BFS batching optimization. It also assumes that "isFolder" is an efficient filter — the spec does not guarantee this.
+
+*BFS tree walk (chosen):*
+```
+Batch 1: query+get children of [home]          → level 1 (immediate children of root)
+Batch 2: query+get children of [16 level-1 folders]  → level 2
+Batch 3: query+get children of [next 16 folders]     → ...
+```
+Each batch is one HTTP request containing up to 32 JMAP method calls (one `FileNode/query filter:{parentId}` + one `#ids`-referenced `FileNode/get` per folder). Items returned by each batch are reported to `NSFileProviderEnumerationObserver` immediately, so Finder starts showing the top of the tree within the first round-trip.
+
+**Why BFS tree walk:**
+
+*Progressive display.* Finder calls `observer.didEnumerate()` as items arrive. With the BFS approach, the home folder's contents appear in Finder after a single HTTP round-trip. The flat-page approach shows nothing until all 50,000 nodes have been fetched.
+
+*Orphan exclusion.* The BFS only visits nodes reachable from the home root. Orphaned nodes — files or folders whose `parentId` refers to a deleted ancestor — are naturally excluded. They would consume database space and confuse the FileProvider system if reported. The flat-page approach fetches every node in the account regardless of reachability.
+
+*Server-efficient queries.* The `use-cases.txt` spec explicitly lists `query by parentId` as an efficient server operation. Flat pagination over the full node set (`position`/`limit` without a filter) requires the server to scan the entire account's node table for each page, which is O(total nodes) per page rather than O(folder size).
+
+*No separate directory discovery pass.* The BFS discovers folders naturally — any node with `isFolder: true` encountered during the walk is enqueued for its own children query. No separate "fetch all folders first" step is needed.
+
+**Implementation detail — batching factor of 16:**
+
+The JMAP spec allows multiple method calls per request. Each folder needs a `FileNode/query` + `FileNode/get` pair (2 calls). The Core capability's `maxCallsInRequest` limit (typically 32–64) bounds how many pairs fit in one request. A batch size of 16 folders (32 calls) comfortably fits within the 32-call minimum limit and keeps individual HTTP requests small enough to avoid server-side timeouts on very large folders.
+
+**When the flat-page path is still present:**
+
+`queryAndGetAllNodes` (flat page + ID fetch) remains in `JmapClient` for two reasons: the `FileNode/changes` recovery path needs to fetch specific node IDs returned by the changes response, and it was used during early development before BFS was implemented. It is not called during normal enumeration.
+
+---
+
+## 9. Change Notification: SSE + Polling Hybrid
 
 **Chosen:** Server-Sent Events (SSE) on the JMAP `eventSourceUrl` for near-real-time notification; a 15-minute polling loop as a backstop.
 
@@ -229,7 +290,7 @@ Push notifications require a permanent server-side component to issue tokens and
 
 ---
 
-## 9. Uploads: Chunked Blob/set + Delta Patch
+## 10. Uploads: Chunked Blob/set + Delta Patch
 
 **Chosen:** Chunk files into `chunkSize`-sized blobs, upload each independently via `Blob/set`, then combine. For content edits, compute an xdelta3 binary diff and upload only the patch via `Blob/convert Delta/Patch`.
 
@@ -255,7 +316,7 @@ The delta upload falls back to a full chunked upload if the patch computation fa
 
 ---
 
-## 10. Direct HTTP Write for Small Files
+## 11. Direct HTTP Write for Small Files
 
 **Chosen:** `PUT {webWriteUrlTemplate}/{id}` for files under 16 MB when the server capability is present; JMAP `Blob/set + FileNode/set update` for larger files.
 
@@ -280,7 +341,7 @@ The spec (§4.1) says the PUT updates only `blobId`, `size`, and `type`. `modifi
 
 ---
 
-## 11. Conflict Resolution: Two Strategies
+## 12. Conflict Resolution: Two Strategies
 
 **Chosen:** Default "conflict copy" via `onExists: "rename"` (creates a new file with a server-assigned non-colliding name); opt-in "newest wins" via `onExists: "newest"` (server-side conditional update, new protocol extension).
 
@@ -310,7 +371,7 @@ Merge requires understanding the file's internal format. It is well-defined for 
 
 ---
 
-## 12. Filename Normalization: NFC + Case Collision Deduplication
+## 13. Filename Normalization: NFC + Case Collision Deduplication
 
 **Chosen:** NFC normalization on all names flowing between the server and the local filesystem; ` (N)` suffix injection for siblings whose names are case-identical on a case-insensitive filesystem.
 
@@ -340,7 +401,7 @@ A server might have both an NFD "café.txt" and an NFC "café.txt" (different by
 
 ---
 
-## 13. Item Version: blobId as contentVersion
+## 14. Item Version: blobId as contentVersion
 
 **Chosen:** `NSFileProviderItemVersion.contentVersion` = UTF-8 bytes of the server blobId. `metadataVersion` = hash of the node's metadata fields.
 
@@ -361,7 +422,7 @@ In `modifyItem`, `baseVersion.contentVersion` (decoded as UTF-8) gives the blobI
 
 ---
 
-## 14. Bandwidth Policy: NWPathMonitor Tiers
+## 15. Bandwidth Policy: NWPathMonitor Tiers
 
 **Chosen:** `NWPathMonitor` with four tiers: unrestricted (WiFi/ethernet), expensive (cellular/hotspot), constrained (Low Data Mode), offline. Per-operation gates enforce the policy.
 
@@ -388,7 +449,7 @@ A global sync pause would be simpler but would block user-initiated opens on cel
 
 ---
 
-## 15. Progress and Cancellation: Task + cancellationHandler
+## 16. Progress and Cancellation: Task + cancellationHandler
 
 **Chosen:** `NSProgress` returned synchronously from FileProvider callbacks; a `let Task` stored before wiring `progress.cancellationHandler = { task.cancel() }`.
 
@@ -408,7 +469,7 @@ A global sync pause would be simpler but would block user-initiated opens on cel
 
 ---
 
-## 16. SSE Reconnect: Bandwidth-Aware Backoff
+## 17. SSE Reconnect: Bandwidth-Aware Backoff
 
 **Chosen:** Exponential backoff on errors (1s → 2s → ... → 60s); 30s minimum reconnect delay on expensive connections; SSE skipped entirely on constrained/offline (polling only).
 
@@ -431,7 +492,7 @@ On cellular, TLS handshake overhead is non-trivial (several kilobytes per connec
 
 ---
 
-## 17. Dependency Management: Swift Package Manager
+## 18. Dependency Management: Swift Package Manager
 
 **Chosen:** Swift Package Manager (`Package.swift`) with pinned dependencies in `Package.resolved`.
 
@@ -452,7 +513,7 @@ External dependencies are deliberately minimal: GRDB (SQLite ORM), Sparkle (auto
 
 ---
 
-## 18. FUSE Code Isolation
+## 19. FUSE Code Isolation
 
 **Chosen:** `FuseCLI/` is a separate executable target in `Package.swift`, not compiled into the extension or app targets.
 
