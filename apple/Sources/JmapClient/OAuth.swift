@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 #if canImport(CryptoKit)
 import CryptoKit
 #endif
@@ -270,11 +271,29 @@ public func oauthRefreshToken(
     let (data, response) = try await URLSession.shared.data(for: request)
     guard let httpResponse = response as? HTTPURLResponse,
           (200...299).contains(httpResponse.statusCode) else {
+        // RFC 6749 §5.2: token endpoint returns 400 with {"error": "invalid_grant"} when
+        // a rotating refresh token has already been consumed by another process.
+        if (response as? HTTPURLResponse)?.statusCode == 400,
+           let body = try? JSONDecoder().decode([String: String].self, from: data),
+           body["error"] == "invalid_grant" {
+            throw JmapError.tokenRotated
+        }
         throw JmapError.unauthorized
     }
 
     return try JSONDecoder().decode(OAuthTokenResponse.self, from: data)
 }
+
+// MARK: - flock shim
+//
+// Swift imports 'flock' as the struct type (struct flock, used with fcntl), which
+// shadows the BSD flock(2) syscall. @_silgen_name resolves to the actual C function.
+// BSD flock(2) has better per-fd semantics than POSIX record locks: the lock is owned
+// by the file description, not the process, so it auto-releases on process death or
+// fd close without the POSIX footgun of "close any fd to the file = release all locks".
+
+@_silgen_name("flock")
+private func _flock(_ fd: Int32, _ operation: Int32) -> Int32
 
 // MARK: - Refreshing Token Provider
 
@@ -286,7 +305,13 @@ public func oauthRefreshToken(
 /// If we use the new access token but crash before persisting the new refresh
 /// token, we're locked out on restart because the old refresh token is gone.
 ///
-/// The flow is: call token endpoint → persist new credential → update in-memory state.
+/// The flow is: acquire cross-process lock → check keychain → call token endpoint
+///              → persist new credential → update in-memory state → release lock.
+///
+/// The cross-process lock (flock on a shared file) ensures that when multiple
+/// extension instances share the same login, only one hits the token endpoint.
+/// The others block at the lock and read fresh credentials from keychain once
+/// the winner releases it — no polling, no races, no redundant HTTP requests.
 public actor OAuthTokenProvider: TokenProvider {
     private var accessToken: String
     private var refreshToken: String
@@ -295,14 +320,19 @@ public actor OAuthTokenProvider: TokenProvider {
     private var clientId: String
     private var expiresAt: Date
     private let refreshMargin: TimeInterval = 60 // refresh 60s before expiry
-    /// In-flight refresh task. Concurrent callers await this instead of starting a second refresh,
-    /// guaranteeing the use-case requirement: one refresh at a time, no token rewind.
+    /// In-flight refresh task. Same-process concurrent callers await this instead
+    /// of starting a second refresh — the cross-process flock handles other processes.
     private var refreshTask: Task<Void, Error>?
     private var onTokenRefreshed: (@Sendable (OAuthCredential) -> Void)?
     /// Optional callback to reload credential from keychain (e.g. after app reauthenticates).
     private var reloadCredential: (@Sendable () -> OAuthCredential?)?
+    /// File descriptor for the cross-process refresh lock file.
+    /// -1 = not opened (no lockFilePath supplied, or open failed).
+    private var lockFd: Int32 = -1
+    private let lockFilePath: String?
 
     public init(credential: OAuthCredential,
+                lockFilePath: String? = nil,
                 onTokenRefreshed: (@Sendable (OAuthCredential) -> Void)? = nil,
                 reloadCredential: (@Sendable () -> OAuthCredential?)? = nil) {
         self.accessToken = credential.accessToken
@@ -311,8 +341,13 @@ public actor OAuthTokenProvider: TokenProvider {
         self.tokenEndpoint = credential.tokenEndpoint
         self.clientId = credential.clientId
         self.expiresAt = credential.expiresAt
+        self.lockFilePath = lockFilePath
         self.onTokenRefreshed = onTokenRefreshed
         self.reloadCredential = reloadCredential
+    }
+
+    deinit {
+        if lockFd >= 0 { Darwin.close(lockFd) }
     }
 
     public func currentToken() async throws -> String {
@@ -339,35 +374,62 @@ public actor OAuthTokenProvider: TokenProvider {
     }
 
     /// Force a refresh (e.g., after 401).
-    /// Race-free: concurrent callers await the single in-flight refresh task rather
-    /// than each starting their own, guaranteeing no token rewind (use-cases.txt §OAuth).
     ///
-    /// Refresh strategy (handles multiple accounts sharing the same login):
-    /// 1. If a refresh is already in flight, wait for it — don't start a second one.
-    /// 2. Try to reload from keychain first — another process may have already refreshed.
-    /// 3. If keychain has a newer token (different from ours), use it without hitting the server.
-    /// 4. Otherwise, call the token endpoint to refresh.
-    /// 5. Persist new tokens BEFORE updating in-memory state (no rewind on crash).
-    /// 6. If refresh fails, try reloading from keychain one more time.
+    /// Two-level concurrency control:
+    /// - Same process: `refreshTask` single-flight guard — concurrent calls join the in-flight task.
+    /// - Cross process: `flock(LOCK_EX)` on a shared file — the winner refreshes and writes
+    ///   keychain; all other processes block at the lock and read fresh credentials when they
+    ///   get in. No polling, no redundant HTTP requests, no races.
     public func refresh() async throws {
-        // If a refresh is already running, join it — don't start a second one.
         if let existing = refreshTask {
             try await existing.value
             return
         }
 
-        let task = Task<Void, Error> { [weak self] in
-            guard let self else { return }
-            try await self.performRefresh()
+        let task = Task<Void, Error> {
+            try await self.withRefreshLock { try await self.performRefresh() }
         }
         refreshTask = task
         defer { refreshTask = nil }
         try await task.value
     }
 
+    /// Acquire the cross-process flock, run `body`, then release.
+    /// If the lock file is unavailable the body still runs — same-process guard still applies.
+    private func withRefreshLock<T>(_ body: () async throws -> T) async throws -> T {
+        openLockFileIfNeeded()
+        guard lockFd >= 0 else { return try await body() }
+
+        try await acquireFlock(fd: lockFd)
+        defer { _ = _flock(lockFd, LOCK_UN) }
+        return try await body()
+    }
+
+    /// Open (or create) the lock file. Write-once: safe to call multiple times.
+    private func openLockFileIfNeeded() {
+        guard lockFd < 0, let path = lockFilePath else { return }
+        lockFd = Darwin.open(path, O_RDWR | O_CREAT, 0o600)
+    }
+
+    /// Dispatch a blocking flock(LOCK_EX) to a background thread so the actor's
+    /// executor is free while we wait for another process to release the lock.
+    private func acquireFlock(fd: Int32) async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                if _flock(fd, LOCK_EX) == 0 {
+                    continuation.resume()
+                } else {
+                    let code = Darwin.errno
+                    continuation.resume(throwing: POSIXError(
+                        POSIXErrorCode(rawValue: code) ?? .EINVAL))
+                }
+            }
+        }
+    }
+
     private func performRefresh() async throws {
-        // Step 1: Check if another process already refreshed (e.g. another account
-        // in the same login, or the app's Reauthenticate flow).
+        // Check keychain first — if another process held the lock and refreshed
+        // while we were waiting, we find fresh tokens here and skip the HTTP call.
         if let reload = reloadCredential, let fresh = reload() {
             if fresh.accessToken != accessToken || fresh.refreshToken != refreshToken {
                 applyCredential(fresh)
@@ -375,7 +437,7 @@ public actor OAuthTokenProvider: TokenProvider {
             }
         }
 
-        // Step 2: We have the latest — refresh from the server.
+        // We hold the lock and have the latest credential — we're the refresher.
         do {
             let response = try await oauthRefreshToken(
                 tokenEndpoint: tokenEndpoint,
@@ -397,13 +459,24 @@ public actor OAuthTokenProvider: TokenProvider {
             // PERSIST FIRST — before updating in-memory state.
             onTokenRefreshed?(credential)
 
-            // NOW update in-memory state
+            // NOW update in-memory state.
             accessToken = response.accessToken
             refreshToken = newRefreshToken
             expiresAt = newExpiresAt
+        } catch JmapError.tokenRotated {
+            // invalid_grant with the lock held: should be impossible in normal operation
+            // (the lock serialises access so only one process calls the token endpoint).
+            // Fallback: one final keychain check in case the lock file wasn't configured.
+            if let reload = reloadCredential, let fresh = reload() {
+                if fresh.accessToken != accessToken || fresh.refreshToken != refreshToken {
+                    applyCredential(fresh)
+                    return
+                }
+            }
+            throw JmapError.unauthorized
         } catch {
-            // Step 3: Refresh failed — one more keychain check in case another
-            // process refreshed while we were waiting for the server response.
+            // Network or server failure — one keychain check in case the app process
+            // refreshed out-of-band (e.g. reauthentication flow) while this call failed.
             if let reload = reloadCredential, let fresh = reload() {
                 if fresh.accessToken != accessToken || fresh.refreshToken != refreshToken {
                     applyCredential(fresh)

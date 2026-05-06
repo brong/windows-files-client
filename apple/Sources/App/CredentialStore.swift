@@ -3,7 +3,7 @@ import JmapClient
 
 /// Handles all keychain operations for login credentials.
 /// Not an actor — keychain calls are synchronous.
-final class CredentialStore {
+final class CredentialStore: @unchecked Sendable {
     private let service = "com.fastmail.files.login"
     private let appGroupId: String
 

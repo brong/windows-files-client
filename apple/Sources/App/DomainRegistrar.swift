@@ -3,7 +3,7 @@ import FileProvider
 import JmapClient
 
 /// Manages NSFileProviderManager and file-cleanup operations.
-final class DomainRegistrar {
+final class DomainRegistrar: @unchecked Sendable {
     private let appGroupId: String
     private let defaults: UserDefaults?
 
