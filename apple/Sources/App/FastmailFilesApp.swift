@@ -101,6 +101,10 @@ struct LoginInfo: Codable, Identifiable {
 
     var id: String { loginId }
 
+    /// The globally-unique key for one account within this login.
+    /// Used as the NSFileProviderDomain identifier, file path prefix, and UserDefaults key prefix.
+    func domainId(for accountId: String) -> String { "\(loginId):\(accountId)" }
+
     var displayLabel: String {
         if let url = URL(string: sessionURL), let host = url.host {
             return "\(loginId) (\(host))"

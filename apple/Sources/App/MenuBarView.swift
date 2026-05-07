@@ -62,7 +62,7 @@ struct MenuBarView: View {
 
                 ForEach(login.accounts.filter { $0.isSynced }) { account in
                     Button {
-                        openInFinder(accountId: account.accountId)
+                        openInFinder(domainId: login.domainId(for: account.accountId))
                     } label: {
                         let status = appState.liveStatus(for: account.accountId)
                         Label {
@@ -76,8 +76,10 @@ struct MenuBarView: View {
             }
             Divider()
             Button("Sync All") {
-                for acct in appState.syncedAccounts {
-                    appState.syncNow(acct.accountId)
+                for login in appState.logins {
+                    for acct in login.accounts where acct.isSynced {
+                        appState.syncNow(loginId: login.loginId, accountId: acct.accountId)
+                    }
                 }
             }
         }
@@ -147,9 +149,9 @@ struct MenuBarView: View {
         openWindow(id: "diagnostics")
     }
 
-    private func openInFinder(accountId: String) {
+    private func openInFinder(domainId: String) {
         let domain = NSFileProviderDomain(
-            identifier: NSFileProviderDomainIdentifier(rawValue: accountId),
+            identifier: NSFileProviderDomainIdentifier(rawValue: domainId),
             displayName: "")
         if let manager = NSFileProviderManager(for: domain) {
             manager.getUserVisibleURL(for: .rootContainer) { url, _ in

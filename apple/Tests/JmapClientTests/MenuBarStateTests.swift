@@ -56,8 +56,8 @@ import Testing
 
 // MARK: - derive() priority
 
-private func makeStatus(_ accountId: String, state: ExtensionStatus.State, error: String? = nil) -> ExtensionStatus {
-    var s = ExtensionStatus(accountId: accountId, state: state, nodeCount: 0, error: error)
+private func makeStatus(_ domainId: String, state: ExtensionStatus.State, error: String? = nil) -> ExtensionStatus {
+    var s = ExtensionStatus(domainId: domainId, state: state, nodeCount: 0, error: error)
     return s
 }
 

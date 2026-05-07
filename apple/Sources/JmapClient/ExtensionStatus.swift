@@ -4,7 +4,9 @@ import Foundation
 /// Written to the shared App Group container by the extension,
 /// read by the app UI. This is the single source of truth for account status.
 public struct ExtensionStatus: Codable, Sendable {
-    public let accountId: String
+    /// Globally-unique key: "\(loginId):\(accountId)".
+    /// loginId = primaryEmail@serverHost, accountId = bare JMAP accountId.
+    public let domainId: String
     public var state: State
     public var lastSyncTime: Date?
     public var nodeCount: Int
@@ -39,9 +41,9 @@ public struct ExtensionStatus: Codable, Sendable {
         }
     }
 
-    public init(accountId: String, state: State = .initializing,
+    public init(domainId: String, state: State = .initializing,
                 nodeCount: Int = 0, error: String? = nil) {
-        self.accountId = accountId
+        self.domainId = domainId
         self.state = state
         self.lastSyncTime = nil
         self.nodeCount = nodeCount
@@ -55,7 +57,7 @@ public struct ExtensionStatus: Codable, Sendable {
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        accountId = try container.decode(String.self, forKey: .accountId)
+        domainId = try container.decode(String.self, forKey: .domainId)
         state = try container.decode(State.self, forKey: .state)
         lastSyncTime = try container.decodeIfPresent(Date.self, forKey: .lastSyncTime)
         nodeCount = try container.decode(Int.self, forKey: .nodeCount)
@@ -74,18 +76,18 @@ public final class ExtensionStatusWriter: @unchecked Sendable {
     private let lock = NSLock()
     private var current: ExtensionStatus
 
-    public init(containerURL: URL, accountId: String) {
-        self.fileURL = containerURL.appendingPathComponent("status-\(accountId).json")
+    public init(containerURL: URL, domainId: String) {
+        self.fileURL = containerURL.appendingPathComponent("status-\(domainId).json")
         // Restore persisted state so nodeCount survives extension process restarts.
         // The extension is killed every ~60s; without this, every restart writes nodeCount=0.
-        if let data = try? Data(contentsOf: containerURL.appendingPathComponent("status-\(accountId).json")),
+        if let data = try? Data(contentsOf: containerURL.appendingPathComponent("status-\(domainId).json")),
            let persisted = try? {
                let d = JSONDecoder(); d.dateDecodingStrategy = .iso8601
                return try d.decode(ExtensionStatus.self, from: data)
            }() {
             self.current = persisted
         } else {
-            self.current = ExtensionStatus(accountId: accountId)
+            self.current = ExtensionStatus(domainId: domainId)
         }
     }
 
@@ -182,9 +184,9 @@ public final class ExtensionStatusReader: @unchecked Sendable {
         self.containerURL = containerURL
     }
 
-    /// Read status for a specific account.
-    public func status(for accountId: String) -> ExtensionStatus? {
-        let fileURL = containerURL.appendingPathComponent("status-\(accountId).json")
+    /// Read status for a specific domain (loginId:accountId).
+    public func status(for domainId: String) -> ExtensionStatus? {
+        let fileURL = containerURL.appendingPathComponent("status-\(domainId).json")
         guard let data = try? Data(contentsOf: fileURL) else { return nil }
         return try? decoder.decode(ExtensionStatus.self, from: data)
     }

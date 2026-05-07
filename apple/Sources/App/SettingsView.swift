@@ -9,14 +9,14 @@ private enum ConfirmAction: Identifiable {
     case removeLogin(String)
     case removeAccount(String, String)
     case cleanAccount(String, String)
-    case evictFiles(String)
+    case evictFiles(String, String)  // (loginId, accountId)
 
     var id: String {
         switch self {
         case .removeLogin(let id): return "removeLogin:\(id)"
         case .removeAccount(let l, let a): return "removeAccount:\(l):\(a)"
         case .cleanAccount(let l, let a): return "cleanAccount:\(l):\(a)"
-        case .evictFiles(let a): return "evictFiles:\(a)"
+        case .evictFiles(let l, let a): return "evictFiles:\(l):\(a)"
         }
     }
 
@@ -187,8 +187,8 @@ struct SettingsView: View {
                             await appState.removeAccount(loginId: loginId, accountId: accountId)
                         case .cleanAccount(let loginId, let accountId):
                             await appState.cleanAccount(loginId: loginId, accountId: accountId)
-                        case .evictFiles(let accountId):
-                            appState.evictDownloadedFiles(accountId: accountId)
+                        case .evictFiles(let loginId, let accountId):
+                            appState.evictDownloadedFiles(loginId: loginId, accountId: accountId)
                         }
                     }
                 },
@@ -330,7 +330,7 @@ struct SettingsView: View {
                 Text(account.isSynced ? statusText(status) : "Not synced")
                     .font(.caption)
                     .foregroundColor(.secondary)
-                if let quota = appState.quotaInfo[account.accountId] {
+                if let quota = appState.quotaInfo[login.domainId(for: account.accountId)] {
                     quotaBar(quota)
                 }
             }
@@ -339,17 +339,17 @@ struct SettingsView: View {
 
             if account.isSynced {
                 Button("Open") {
-                    openInFinder(accountId: account.accountId)
+                    openInFinder(domainId: login.domainId(for: account.accountId))
                 }
                 .font(.caption)
 
                 Button("Sync") {
-                    appState.syncNow(account.accountId)
+                    appState.syncNow(loginId: login.loginId, accountId: account.accountId)
                 }
                 .font(.caption)
 
                 Button("Free Up Space") {
-                    confirmAction = .evictFiles(account.accountId)
+                    confirmAction = .evictFiles(login.loginId, account.accountId)
                 }
                 .font(.caption)
 
@@ -380,9 +380,9 @@ struct SettingsView: View {
     // MARK: - Helpers
 
     #if os(macOS)
-    private func openInFinder(accountId: String) {
+    private func openInFinder(domainId: String) {
         let domain = NSFileProviderDomain(
-            identifier: NSFileProviderDomainIdentifier(rawValue: accountId),
+            identifier: NSFileProviderDomainIdentifier(rawValue: domainId),
             displayName: "")
         if let manager = NSFileProviderManager(for: domain) {
             manager.getUserVisibleURL(for: .rootContainer) { url, error in
@@ -440,7 +440,7 @@ struct SettingsView: View {
 
     private func refreshOrphanedDomains() async {
         let domains = await appState.listDomains()
-        let knownIds = Set(appState.logins.flatMap { $0.accounts.map { $0.accountId } })
+        let knownIds = Set(appState.logins.flatMap { login in login.accounts.map { login.domainId(for: $0.accountId) } })
         orphanedDomains = domains.filter { !knownIds.contains($0.identifier.rawValue) }
     }
 }
@@ -789,8 +789,10 @@ struct AddAccountView: View {
             throw JmapError.noAccountId
         }
 
-        let loginId = fileNodeAccounts.first(where: { $0.isPrimary })?.name
+        let primaryName = fileNodeAccounts.first(where: { $0.isPrimary })?.name
             ?? fileNodeAccounts.first?.name ?? "unknown"
+        let serverHost = URL(string: sessionUrl)?.host ?? "unknown"
+        let loginId = "\(primaryName)@\(serverHost)"
 
         discoveredAccounts = fileNodeAccounts.map { acct in
             DiscoveredAccount(accountId: acct.accountId, name: acct.name,
@@ -823,8 +825,10 @@ struct AddAccountView: View {
                 throw JmapError.noAccountId
             }
 
-            let loginId = fileNodeAccounts.first(where: { $0.isPrimary })?.name
+            let primaryName = fileNodeAccounts.first(where: { $0.isPrimary })?.name
                 ?? fileNodeAccounts.first?.name ?? "unknown"
+            let serverHost = URL(string: sessionURL)?.host ?? "unknown"
+            let loginId = "\(primaryName)@\(serverHost)"
 
             discoveredAccounts = fileNodeAccounts.map { acct in
                 DiscoveredAccount(accountId: acct.accountId, name: acct.name,

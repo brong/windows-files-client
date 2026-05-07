@@ -91,29 +91,32 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
         // No `self` access allowed here — use local variables for everything.
 
         self.domain = domain
-        self.accountId = domain.identifier.rawValue
         self.accountName = domain.displayName
 
         let appGroup = Self.appGroupId
-        let acctId = domain.identifier.rawValue
+        // Domain identifier is "loginId:accountId" — parse both parts.
+        let domainId = domain.identifier.rawValue
+        let colonIdx = domainId.firstIndex(of: ":")
+        let loginId = colonIdx.map { String(domainId[..<$0]) } ?? ""
+        let acctId = colonIdx.map { String(domainId[domainId.index(after: $0)...]) } ?? domainId
+        self.accountId = acctId
 
         // App Group container — fall back to temp dir so all `let` properties are always valid.
         let containerURL = FileManager.default.containerURL(
             forSecurityApplicationGroupIdentifier: appGroup)
         let effectiveContainerURL = containerURL ?? FileManager.default.temporaryDirectory
 
-        // Load config from shared UserDefaults
+        // Load config from shared UserDefaults (keyed by domainId = loginId:accountId)
         let defaults = UserDefaults(suiteName: appGroup)
-        let sessionURLString = defaults?.string(forKey: "sessionURL-\(acctId)")
+        let sessionURLString = defaults?.string(forKey: "sessionURL-\(domainId)")
             ?? "https://api.fastmail.com/jmap/session"
         let sessionURL = URL(string: sessionURLString)
             ?? URL(string: "https://api.fastmail.com/jmap/session")!
 
-        // Look up which login owns this account
-        let loginId = defaults?.string(forKey: "loginForAccount-\(acctId)")
-        let authType = defaults?.string(forKey: "authType-\(acctId)")
+        // loginId is parsed from the domain identifier; Keychain credential is keyed by loginId
+        let authType = defaults?.string(forKey: "authType-\(domainId)")
         let loginKeychainService = "com.fastmail.files.login"
-        let keychainAccount = loginId ?? acctId
+        let keychainAccount = loginId.isEmpty ? acctId : loginId
 
         let credData = FileProviderExtension.readKeychainData(
             service: loginKeychainService, account: keychainAccount, accessGroup: appGroup)
@@ -161,7 +164,8 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
         }
 
         // Build all infrastructure synchronously (no self needed).
-        let sessionCacheURL = effectiveContainerURL.appendingPathComponent("session-\(acctId).json")
+        // Session cache is shared across all accounts of the same login.
+        let sessionCacheURL = effectiveContainerURL.appendingPathComponent("session-\(loginId).json")
         let _sessionManager = SessionManager(sessionURL: sessionURL, tokenProvider: tokenProvider,
                                              diskCacheURL: sessionCacheURL)
         TrafficLog.shared.configure(containerURL: effectiveContainerURL)
@@ -170,7 +174,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
         let tmpDir = effectiveContainerURL.appendingPathComponent("tmp", isDirectory: true)
         try? FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
 
-        let _database = NodeDatabase(containerURL: effectiveContainerURL, accountId: acctId)
+        let _database = NodeDatabase(containerURL: effectiveContainerURL, accountId: domainId)
 
         // Sweep stale rows on every startup to prevent unbounded table growth.
         // NodeDatabase is an actor; sweep in a detached Task so init stays synchronous.
@@ -179,9 +183,10 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
 
         // Background URLSession for chunk uploads — tasks run in nsurlsessiond and survive
         // extension process kills. The session identifier must be stable across launches so
-        // reconnection works; use the account ID as the discriminator.
+        // reconnection works; use the domainId (with colon replaced) as the discriminator.
+        let bgSessionId = domainId.replacingOccurrences(of: ":", with: "-")
         let bgUploader = BackgroundUploader(
-            identifier: "com.fastmail.files.upload.\(acctId)",
+            identifier: "com.fastmail.files.upload.\(bgSessionId)",
             onOrphan: { taskId, data, response in
                 // A chunk task that completed after the extension was killed.
                 // Parse the blobId and persist it so the next retry can skip re-uploading.
@@ -210,7 +215,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                                  backgroundUploader: bgUploader,
                                  chunkStore: chunkStore)
         let _activityTracker = ActivityTracker(containerURL: effectiveContainerURL)
-        let _statusWriter = ExtensionStatusWriter(containerURL: effectiveContainerURL, accountId: acctId)
+        let _statusWriter = ExtensionStatusWriter(containerURL: effectiveContainerURL, domainId: domainId)
         let _syncEngine = SyncEngine(client: _client, database: _database, accountId: acctId)
         let _pushWatcher = PushWatcher(
             sessionManager: _sessionManager, tokenProvider: tokenProvider, accountId: acctId,

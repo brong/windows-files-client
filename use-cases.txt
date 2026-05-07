@@ -1,0 +1,96 @@
+This software is designed to integrate the native filesystem APIs on each platform with 
+the JMAP Core (RFC8620), FileNode, and Blobext specifications -- which are in the spec
+directory.
+
+This is to be high quality, production ready code to run on millions of machines, so it
+will need robust error handling, debug capability for reporting issues back to us, and
+the ability to reset cleanly if it gets into any confused situations.
+
+Users are expected to download and install a package in the standard way for their platform,
+and then run the software.  An update mechanism will be needed, which should detect updates
+automatically and install them if available.  This will be done with the platform mechanism
+where possible, and with a static file on a Fastmail owned website if not.
+
+Glossary:
+* session: a JMAP login with an email address as a username.
+* account: a session can have one or more accounts associated with it that provide the JMAP
+  Files capability.
+* capability: per JMAP, a string which identifies that the server implements a specification.
+
+
+As a user, I want to:
+* download and install the Fastmail Files client
+* add a new server login via OAuth (using the PACC protocol to detect the correct server)
+* add a new account manually (by specifying a session URL and a bearer token)
+* select which accounts from a session I want to have synchronised.
+* navigate my files through the operating system's finder/explorer.
+* open a file (which may need to be downloaded first)
+* select files or entire directories to be hydrated (kept on the local machine)
+* free up space by dehydrating files from the local machine.
+* remove a single account without removing the entire login, freeing up any cached data
+  for that account
+* remove an entire login, which implicitly removes all accounts and destroys the cached
+  credentials
+* see any updates which were made on the server immediately when I'm online, and have them
+  resync if they happened while I was offline.
+* be able to access any downloaded files even when I'm offline
+* be able to copy new files in, and have them upload when I go back online
+* be able to edit existing files, whether I'm online or offline.
+* reset the cache for an individual account without destorying any data on the server.
+* view JMAP protocol logs to see what was done
+* see the sync state of all accounts
+* have my oauth refresh token automatically used if the access token has expired,
+  with a clean (get new access token, save new access token and new refresh token,
+  use new access token - in a race free transaction which makes all other in-flight
+  calls finish and then guarantees no rewind)
+* Be able to delete files on the server
+* Be able to rename files on the server
+* Be able to see my quota usage
+* Get clear error messages if anything failed.
+* Be able to very clearly see if any changes I have made locally (edits, renames,
+  new files) are still not fully synced to the server.  This is VERY IMPORTANT as
+  otherwise there could be data loss if I lose or wipe this device.
+
+As the operating system I want to:
+* Disable background traffic when I'm on a low bandwidth connection, including queued
+  upload or downloads, while still allowing the user to explicitly download and access
+  individual files.
+* Be able to start the sync service on startup
+* Be able to cleanly shut down the sync service
+* Store the tokens securely in my operating-system security enclave, protected by the
+  standard security mechanisms.
+* Have all the components of the sync cleaned up; filesystem artifacts, cache, registry
+  entries, etc - if an account is removed or if the program is uninstalled.
+
+As the server I want to:
+* Have all the JMAP traffic be efficient queries (query by parentId is efficient, as
+  is query by role).  An alternative efficient method is "fetch all directory nodes
+  ids, then the nodes in pages, then fill the contents of each directory using
+  pages as well".
+* have the client upload in chunks which match my chunk size
+* have the client not re-upload or re-download data it already has
+* have the client listen for changes rather than polling when nothing has changed;
+  but it's OK to fall back to a poll occasionally in case the sync channel has
+  failed, so long as it's not too frequent.
+* Not have the client go into an infinite loop (which causes denial of service) if
+  something is broken, either in client OR server.  Bugs happen.
+* Have the client tell me if it needs case-insignificant checks,
+* Have the client correctly handle any filename mangling it has to do, so it never
+  renames a file I have unless the user asked it to.
+* Have the client be careful not to accidentally wipe my content or move it to
+  trash because it got confused about its local state.
+
+As the author I want to:
+* Have clean, maintainable, efficient code.
+* Have the structure be a single source of truth, with edge triggers to update UI
+  elements.
+* Allow the user to "refresh" things so they can fix up bugs.
+* Have clear bug reports for all crashes and debug logs which the user can easily
+  send to me, so I can understand what confused them.
+* Keep a clear roadmap document with progress towards any changes.
+* Have good tests so I can be sure changes are safe.
+* Keep track of bugs we identify or mistakes we make along the way so we don't
+  make them again.
+* Have a clear list of the capabilities of the operating system, the alternative
+  ways that we could have implemented each of the user needs, and the reasoning
+  behind why we chose the path we did

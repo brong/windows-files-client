@@ -8,11 +8,11 @@ final class StatusMonitor: ObservableObject {
     @Published var activitySnapshot: ActivityTracker.Snapshot? = nil
 
     private let containerURL: URL
-    private let knownAccountIds: () -> Set<String>
+    private let knownDomainIds: () -> Set<String>
 
-    init(containerURL: URL, knownAccountIds: @escaping () -> Set<String>) {
+    init(containerURL: URL, knownDomainIds: @escaping () -> Set<String>) {
         self.containerURL = containerURL
-        self.knownAccountIds = knownAccountIds
+        self.knownDomainIds = knownDomainIds
     }
 
     // MARK: - Observers
@@ -36,12 +36,12 @@ final class StatusMonitor: ObservableObject {
 
     func reload() {
         let reader = ExtensionStatusReader(containerURL: containerURL)
-        let known = knownAccountIds()
+        let known = knownDomainIds()
         var newStatuses: [String: ExtensionStatus] = [:]
         let now = Date()
         for var status in reader.allStatuses() {
-            if !known.contains(status.accountId) {
-                let orphan = containerURL.appendingPathComponent("status-\(status.accountId).json")
+            if !known.contains(status.domainId) {
+                let orphan = containerURL.appendingPathComponent("status-\(status.domainId).json")
                 try? FileManager.default.removeItem(at: orphan)
                 continue
             }
@@ -51,7 +51,7 @@ final class StatusMonitor: ObservableObject {
                status.activeOperationCount == 0 {
                 status.state = .idle
             }
-            newStatuses[status.accountId] = status
+            newStatuses[status.domainId] = status
         }
         statuses = newStatuses
         activitySnapshot = ActivityTracker.loadShared(containerURL: containerURL)

@@ -48,8 +48,8 @@ final class AppViewModel: ObservableObject {
 
             let monitor = StatusMonitor(
                 containerURL: containerURL,
-                knownAccountIds: { [weak self] in
-                    Set(self?.logins.flatMap { $0.accounts.map { $0.accountId } } ?? [])
+                knownDomainIds: { [weak self] in
+                    Set(self?.logins.flatMap { login in login.accounts.map { login.domainId(for: $0.accountId) } } ?? [])
                 })
             self.statusMonitor = monitor
 
@@ -98,7 +98,8 @@ final class AppViewModel: ObservableObject {
             guard let acct = login.accounts.first(where: { $0.accountId == accountId }) else { continue }
             if !acct.isSynced { return .notSynced }
 
-            if let extStatus = extensionStatuses[accountId] {
+            let domainId = login.domainId(for: accountId)
+            if let extStatus = extensionStatuses[domainId] {
                 let hasActive = extStatus.activeOperationCount > 0
                 switch extStatus.state {
                 case .initializing: return hasActive ? .syncing : .idle
@@ -307,10 +308,11 @@ final class AppViewModel: ObservableObject {
         guard let login = logins.first(where: { $0.loginId == loginId }) else { return }
 
         for acct in login.accounts {
+            let domainId = login.domainId(for: acct.accountId)
             if acct.isSynced {
-                await registrar.remove(accountId: acct.accountId)
+                await registrar.remove(domainId: domainId)
             } else {
-                registrar.purgeFiles(accountId: acct.accountId)
+                registrar.purgeFiles(domainId: domainId)
             }
         }
 
@@ -355,7 +357,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func disableAccount(loginId: String, accountId: String) async {
-        await registrar.remove(accountId: accountId)
+        await registrar.remove(domainId: "\(loginId):\(accountId)")
         accountStore.update(loginId: loginId) { login in
             if let idx = login.accounts.firstIndex(where: { $0.accountId == accountId }) {
                 login.accounts[idx].isSynced = false
@@ -364,8 +366,8 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    func evictDownloadedFiles(accountId: String) {
-        registrar.evict(accountId: accountId)
+    func evictDownloadedFiles(loginId: String, accountId: String) {
+        registrar.evict(domainId: "\(loginId):\(accountId)")
     }
 
     func cleanAccount(loginId: String, accountId: String) async {
@@ -376,22 +378,23 @@ final class AppViewModel: ObservableObject {
 
         let login = logins[loginIdx]
         let displayName = logins[loginIdx].accounts[acctIdx].displayName
+        let domainId = login.domainId(for: accountId)
 
         // Evict downloaded content
         let domain = NSFileProviderDomain(
-            identifier: NSFileProviderDomainIdentifier(rawValue: accountId), displayName: "")
+            identifier: NSFileProviderDomainIdentifier(rawValue: domainId), displayName: "")
         if let manager = NSFileProviderManager(for: domain) {
             manager.evictItem(identifier: .rootContainer) { _ in }
             try? await Task.sleep(nanoseconds: 500_000_000)
         }
 
-        await registrar.remove(accountId: accountId)
+        await registrar.remove(domainId: domainId)
 
         if let containerURL = FileManager.default.containerURL(
             forSecurityApplicationGroupIdentifier: Self.appGroupId) {
             let cacheDir = containerURL
                 .appendingPathComponent("NodeCache", isDirectory: true)
-                .appendingPathComponent(accountId, isDirectory: true)
+                .appendingPathComponent(domainId, isDirectory: true)
             try? FileManager.default.removeItem(at: cacheDir)
         }
 
@@ -404,7 +407,7 @@ final class AppViewModel: ObservableObject {
                     l.accounts[idx].status = .syncing
                 }
             }
-            syncNow(accountId)
+            syncNow(loginId: loginId, accountId: accountId)
         } catch {
             accountStore.update(loginId: loginId) { l in
                 if let idx = l.accounts.firstIndex(where: { $0.accountId == accountId }) {
@@ -424,28 +427,30 @@ final class AppViewModel: ObservableObject {
             login.connectionStatus = .connected
         }
 
-        for acct in logins.first(where: { $0.loginId == loginId })?.accounts ?? [] where acct.isSynced {
-            syncNow(acct.accountId)
+        if let login = logins.first(where: { $0.loginId == loginId }) {
+            for acct in login.accounts where acct.isSynced {
+                syncNow(loginId: loginId, accountId: acct.accountId)
+            }
         }
     }
 
-    func syncNow(_ accountId: String) {
-        registrar.signal(accountId: accountId)
+    func syncNow(loginId: String, accountId: String) {
+        registrar.signal(domainId: "\(loginId):\(accountId)")
     }
 
-    func retryBlockedUploads(for accountId: String) {
+    func retryBlockedUploads(for domainId: String) {
         guard let containerURL = FileManager.default.containerURL(
             forSecurityApplicationGroupIdentifier: Self.appGroupId) else { return }
         Task {
-            let db = NodeDatabase(containerURL: containerURL, accountId: accountId)
+            let db = NodeDatabase(containerURL: containerURL, accountId: domainId)
             await db.resetAllUploadFailures()
-            registrar.signal(accountId: accountId)
+            registrar.signal(domainId: domainId)
         }
     }
 
     func retryAllBlockedUploads() {
         for status in extensionStatuses.values where status.blockedUploadCount > 0 {
-            retryBlockedUploads(for: status.accountId)
+            retryBlockedUploads(for: status.domainId)
         }
     }
 
@@ -454,11 +459,12 @@ final class AppViewModel: ObservableObject {
               let url = URL(string: login.sessionURL),
               let tokenProvider = credentials.makeTokenProvider(for: login) else { return }
 
+        let domainId = login.domainId(for: accountId)
         Task {
             let sessionManager = SessionManager(sessionURL: url, tokenProvider: tokenProvider)
             let client = JmapClient(sessionManager: sessionManager, tokenProvider: tokenProvider)
             if let info = try? await client.fetchQuota(accountId: accountId) {
-                await MainActor.run { self.quotaInfo[accountId] = info }
+                await MainActor.run { self.quotaInfo[domainId] = info }
             }
         }
     }
@@ -471,7 +477,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func cleanupOrphanedDomains() async {
-        let knownIds = Set(logins.flatMap { $0.accounts.map { $0.accountId } })
+        let knownIds = Set(logins.flatMap { login in login.accounts.map { login.domainId(for: $0.accountId) } })
         await registrar.cleanOrphaned(knownIds: knownIds)
     }
 
