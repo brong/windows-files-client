@@ -96,9 +96,9 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
         let appGroup = Self.appGroupId
         // Domain identifier is "loginId~accountId" — parse both parts.
         let domainId = domain.identifier.rawValue
-        let tildeIdx = domainId.firstIndex(of: "~")
-        let loginId = tildeIdx.map { String(domainId[..<$0]) } ?? ""
-        let acctId = tildeIdx.map { String(domainId[domainId.index(after: $0)...]) } ?? domainId
+        let identity = DomainIdentity.parse(domainId)
+        let loginId = identity?.loginId ?? ""
+        let acctId = identity?.accountId ?? domainId
         self.accountId = acctId
         #if canImport(os)
         // Temporary: log the computed identity so we can verify Keychain lookup matches what the app stored.

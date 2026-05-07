@@ -791,8 +791,8 @@ struct AddAccountView: View {
 
         let primaryName = fileNodeAccounts.first(where: { $0.isPrimary })?.name
             ?? fileNodeAccounts.first?.name ?? "unknown"
-        let serverHost = URL(string: sessionUrl)?.host ?? "unknown"
-        let loginId = "\(primaryName)@\(serverHost)"
+        let loginId = DomainIdentity.makeLoginId(
+            primaryEmail: primaryName, sessionURL: URL(string: sessionUrl) ?? URL(string: "https://unknown")!)
 
         discoveredAccounts = fileNodeAccounts.map { acct in
             DiscoveredAccount(accountId: acct.accountId, name: acct.name,
@@ -827,8 +827,8 @@ struct AddAccountView: View {
 
             let primaryName = fileNodeAccounts.first(where: { $0.isPrimary })?.name
                 ?? fileNodeAccounts.first?.name ?? "unknown"
-            let serverHost = URL(string: sessionURL)?.host ?? "unknown"
-            let loginId = "\(primaryName)@\(serverHost)"
+            let loginId = DomainIdentity.makeLoginId(
+                primaryEmail: primaryName, sessionURL: URL(string: sessionURL) ?? URL(string: "https://unknown")!)
 
             discoveredAccounts = fileNodeAccounts.map { acct in
                 DiscoveredAccount(accountId: acct.accountId, name: acct.name,

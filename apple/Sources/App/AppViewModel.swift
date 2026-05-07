@@ -71,9 +71,10 @@ final class AppViewModel: ObservableObject {
 
         Task {
             await checkAllConnections()
-            // Remove any domain registrations whose identifiers don't match the
-            // current loginId~accountId format (e.g. stale bare-accountId domains
-            // left over from before the loginId refactor).
+            // Re-register any isSynced accounts whose domain is missing from the
+            // system (e.g. after a domain identifier format change).
+            await reconcileSyncedDomains()
+            // Remove domains whose identifiers don't match any current loginId~accountId.
             await cleanupOrphanedDomains()
         }
 
@@ -363,7 +364,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func disableAccount(loginId: String, accountId: String) async {
-        await registrar.remove(domainId: "\(loginId)~\(accountId)")
+        await registrar.remove(domainId: DomainIdentity(loginId: loginId, accountId: accountId).domainId)
         accountStore.update(loginId: loginId) { login in
             if let idx = login.accounts.firstIndex(where: { $0.accountId == accountId }) {
                 login.accounts[idx].isSynced = false
@@ -373,7 +374,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func evictDownloadedFiles(loginId: String, accountId: String) {
-        registrar.evict(domainId: "\(loginId)~\(accountId)")
+        registrar.evict(domainId: DomainIdentity(loginId: loginId, accountId: accountId).domainId)
     }
 
     func cleanAccount(loginId: String, accountId: String) async {
@@ -441,7 +442,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func syncNow(loginId: String, accountId: String) {
-        registrar.signal(domainId: "\(loginId)~\(accountId)")
+        registrar.signal(domainId: DomainIdentity(loginId: loginId, accountId: accountId).domainId)
     }
 
     func retryBlockedUploads(for domainId: String) {
@@ -485,6 +486,26 @@ final class AppViewModel: ObservableObject {
     func cleanupOrphanedDomains() async {
         let knownIds = Set(logins.flatMap { login in login.accounts.map { login.domainId(for: $0.accountId) } })
         await registrar.cleanOrphaned(knownIds: knownIds)
+    }
+
+    /// Ensure every isSynced account has a domain registered with the current
+    /// loginId~accountId format. Handles leftover AccountStore entries from
+    /// domain identifier format changes (bare-accountId era, colon era, etc.)
+    /// where isSynced=true but no matching domain was ever registered or survived.
+    func reconcileSyncedDomains() async {
+        let registered = Set((await registrar.listDomains()).map { $0.identifier.rawValue })
+        for login in logins {
+            for account in login.accounts where account.isSynced {
+                let domainId = login.domainId(for: account.accountId)
+                guard !registered.contains(domainId) else { continue }
+                try? await registrar.register(
+                    accountId: account.accountId,
+                    displayName: account.displayName,
+                    loginId: login.loginId,
+                    sessionURL: login.sessionURL,
+                    authType: login.authType)
+            }
+        }
     }
 
     func listDomains() async -> [NSFileProviderDomain] {
