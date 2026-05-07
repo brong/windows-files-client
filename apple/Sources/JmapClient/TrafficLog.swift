@@ -34,7 +34,7 @@ public final class TrafficLog: Sendable {
         lock.unlock()
 
         // Cap the log at ~500 KB to avoid unbounded growth.
-        trimIfNeeded(url: url, maxBytes: 500_000)
+        trimIfNeeded(url: url, maxBytes: 5_000_000)
     }
 
     public func log(_ message: String) {

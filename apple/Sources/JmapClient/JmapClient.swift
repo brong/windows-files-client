@@ -145,14 +145,15 @@ public actor JmapClient {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let bodyData = try encoder.encode(body)
         request.httpBody = bodyData
+        let acctTag = allMethodCalls.first?.args["accountId"]?.stringValue.map { "[\($0)] " } ?? ""
         if let url = request.url {
-            let cb = requestWillSend ?? { u, d in TrafficLog.shared.log("→ POST \(u.absoluteString)\n\(TrafficLog.formatBody(d))") }
+            let cb = requestWillSend ?? { u, d in TrafficLog.shared.log("→ POST \(acctTag)\(u.absoluteString)\n\(TrafficLog.formatBody(d))") }
             cb(url, bodyData)
         }
 
         let (data, httpResponse) = try await authorizedRequest(request, session: interactiveSession)
         if let url = request.url {
-            let cb = responseDidReceive ?? { u, s, d in TrafficLog.shared.log("← \(s) \(u.absoluteString)\n\(TrafficLog.formatBody(d))") }
+            let cb = responseDidReceive ?? { u, s, d in TrafficLog.shared.log("← \(s) \(acctTag)\(u.absoluteString)\n\(TrafficLog.formatBody(d))") }
             cb(url, httpResponse.statusCode, data)
         }
         try checkHTTPStatus(httpResponse, data: data)
