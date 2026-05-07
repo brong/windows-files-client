@@ -94,11 +94,11 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
         self.accountName = domain.displayName
 
         let appGroup = Self.appGroupId
-        // Domain identifier is "loginId:accountId" — parse both parts.
+        // Domain identifier is "loginId~accountId" — parse both parts.
         let domainId = domain.identifier.rawValue
-        let colonIdx = domainId.firstIndex(of: ":")
-        let loginId = colonIdx.map { String(domainId[..<$0]) } ?? ""
-        let acctId = colonIdx.map { String(domainId[domainId.index(after: $0)...]) } ?? domainId
+        let tildeIdx = domainId.firstIndex(of: "~")
+        let loginId = tildeIdx.map { String(domainId[..<$0]) } ?? ""
+        let acctId = tildeIdx.map { String(domainId[domainId.index(after: $0)...]) } ?? domainId
         self.accountId = acctId
 
         // App Group container — fall back to temp dir so all `let` properties are always valid.
@@ -106,7 +106,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
             forSecurityApplicationGroupIdentifier: appGroup)
         let effectiveContainerURL = containerURL ?? FileManager.default.temporaryDirectory
 
-        // Load config from shared UserDefaults (keyed by domainId = loginId:accountId)
+        // Load config from shared UserDefaults (keyed by domainId = loginId~accountId)
         let defaults = UserDefaults(suiteName: appGroup)
         let sessionURLString = defaults?.string(forKey: "sessionURL-\(domainId)")
             ?? "https://api.fastmail.com/jmap/session"
@@ -182,9 +182,8 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
         Task { await _database.sweepSha1Cache() }
 
         // Background URLSession for chunk uploads — tasks run in nsurlsessiond and survive
-        // extension process kills. The session identifier must be stable across launches so
-        // reconnection works; use the domainId (with colon replaced) as the discriminator.
-        let bgSessionId = domainId.replacingOccurrences(of: ":", with: "-")
+        // extension process kills. The session identifier must be stable across launches.
+        let bgSessionId = domainId
         let bgUploader = BackgroundUploader(
             identifier: "com.fastmail.files.upload.\(bgSessionId)",
             onOrphan: { taskId, data, response in

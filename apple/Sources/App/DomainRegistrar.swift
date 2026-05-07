@@ -17,7 +17,7 @@ final class DomainRegistrar: @unchecked Sendable {
     func register(accountId: String, displayName: String,
                   loginId: String, sessionURL: String,
                   authType: AuthType) async throws {
-        let domainId = "\(loginId):\(accountId)"
+        let domainId = "\(loginId)~\(accountId)"
         // Store config so the extension can bootstrap from UserDefaults.
         // loginId is encoded in the domain identifier, so no separate loginForAccount key needed.
         defaults?.set(sessionURL, forKey: "sessionURL-\(domainId)")

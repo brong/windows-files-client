@@ -4,7 +4,7 @@ import Foundation
 /// Written to the shared App Group container by the extension,
 /// read by the app UI. This is the single source of truth for account status.
 public struct ExtensionStatus: Codable, Sendable {
-    /// Globally-unique key: "\(loginId):\(accountId)".
+    /// Globally-unique key: "\(loginId)~\(accountId)".
     /// loginId = primaryEmail@serverHost, accountId = bare JMAP accountId.
     public let domainId: String
     public var state: State
@@ -184,7 +184,7 @@ public final class ExtensionStatusReader: @unchecked Sendable {
         self.containerURL = containerURL
     }
 
-    /// Read status for a specific domain (loginId:accountId).
+    /// Read status for a specific domain (loginId~accountId).
     public func status(for domainId: String) -> ExtensionStatus? {
         let fileURL = containerURL.appendingPathComponent("status-\(domainId).json")
         guard let data = try? Data(contentsOf: fileURL) else { return nil }

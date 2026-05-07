@@ -357,7 +357,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func disableAccount(loginId: String, accountId: String) async {
-        await registrar.remove(domainId: "\(loginId):\(accountId)")
+        await registrar.remove(domainId: "\(loginId)~\(accountId)")
         accountStore.update(loginId: loginId) { login in
             if let idx = login.accounts.firstIndex(where: { $0.accountId == accountId }) {
                 login.accounts[idx].isSynced = false
@@ -367,7 +367,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func evictDownloadedFiles(loginId: String, accountId: String) {
-        registrar.evict(domainId: "\(loginId):\(accountId)")
+        registrar.evict(domainId: "\(loginId)~\(accountId)")
     }
 
     func cleanAccount(loginId: String, accountId: String) async {
@@ -435,7 +435,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func syncNow(loginId: String, accountId: String) {
-        registrar.signal(domainId: "\(loginId):\(accountId)")
+        registrar.signal(domainId: "\(loginId)~\(accountId)")
     }
 
     func retryBlockedUploads(for domainId: String) {
