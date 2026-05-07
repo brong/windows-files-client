@@ -262,7 +262,7 @@ The intended upper bound is `maxChunkSize`. The actual upper bound is `max(maxCh
 
 ## BUG-018 — Identity strings constructed by ad-hoc concatenation in multiple places
 
-**Status:** Partially fixed (separator changed to `~`; startup reconcile added); root cause not fully resolved
+**Status:** Fixed (commit e9aaed2)
 **Symptom:** All accounts show "Authentication required" indefinitely after a domain identifier format change. Log shows `[init] domainId=vac7641b2 loginId= acctId=vac7641b2` — the extension is launched with a bare `accountId` (old format), `loginId` is empty, Keychain lookup fails.
 
 **Root cause: No single source of truth for identity strings.**
@@ -281,26 +281,14 @@ When the format changed from bare `accountId` → `loginId:accountId` (colon) �
 
 **Why migration doesn't fix this:** The user deleted and recreated accounts. Migration is irrelevant when the identifiers used at add-time are built by a different copy of the formula than the one used at runtime. The problem isn't stale data — it's that two different files independently computed the same string and got different results.
 
-**Fix needed:** Extract all identity construction and parsing into a single `DomainIdentity` type in `JmapClient`, used by every caller:
-```swift
-public struct DomainIdentity {
-    public let loginId: String   // "user@host.com@server.host"
-    public let accountId: String // bare JMAP accountId
+**Fix applied:** `DomainIdentity` struct added to `JmapClient` (`Sources/JmapClient/DomainIdentity.swift`). All 8 scattered call sites replaced:
+- `SettingsView.swift` (2 sites) → `DomainIdentity.makeLoginId(primaryEmail:sessionURL:)`
+- `FastmailFilesApp.swift` `LoginInfo.domainId(for:)` → `DomainIdentity(loginId:accountId:).domainId`
+- `AppViewModel.swift` (3 sites) → same
+- `DomainRegistrar.swift` → same
+- `FileProviderExtension.swift` init → `DomainIdentity.parse(domainId)`
 
-    public var domainId: String { "\(loginId)~\(accountId)" }
-
-    public static func from(domainId: String) -> DomainIdentity? {
-        guard let idx = domainId.firstIndex(of: "~") else { return nil }
-        return DomainIdentity(loginId: String(domainId[..<idx]),
-                              accountId: String(domainId[domainId.index(after: idx)...]))
-    }
-
-    public static func loginId(primaryEmail: String, sessionURL: URL) -> String {
-        "\(primaryEmail)@\(sessionURL.host ?? "unknown")"
-    }
-}
-```
-Then every call site uses `DomainIdentity.domainId` or `DomainIdentity.from(domainId:)` — no inline string interpolation for identity anywhere. A single test on `DomainIdentity` covers every call site.
+No inline string interpolation for identity strings anywhere in the codebase.
 
 **Lesson:** If the same string format is constructed by concatenation in more than one place, it will eventually diverge. Extract into a single type with a single test. This is not a style preference — scattered concatenation is a correctness hazard when the format is load-bearing (authentication, filesystem paths, IPC).
 
@@ -318,14 +306,14 @@ Then every call site uses `DomainIdentity.domainId` or `DomainIdentity.from(doma
 
 ## BUG-020 — No tests for the domain-identity round-trip
 
-**Status:** Open
+**Status:** Fixed (commit 3a484b4)
 **Symptom:** The formatter and the parser (in separate processes, app vs. extension) silently diverge — empty `loginId`, failed Keychain lookup, broken authentication — with no compile-time or test-time signal.
 **Root cause:** Follows directly from BUG-018. When identity construction is scattered across multiple call sites with no shared code, there is nothing to test. Adding a `DomainIdentity` type (BUG-018 fix) immediately gives a testable unit.
-**Fix needed:** Once `DomainIdentity` exists, add `DomainIdentityTests.swift`:
-- `domainId` round-trips through `from(domainId:)` correctly
-- `from(domainId:)` returns `nil` for bare accountId (old format detection)
-- `loginId(primaryEmail:sessionURL:)` produces the expected `email@host` form
-- The Keychain account key from `DomainIdentity.loginId` matches what `CredentialStore.storeCredential` uses
+**Fix applied:** `Tests/JmapClientTests/DomainIdentityTests.swift` added with 10 tests:
+- `domainId` round-trips through `parse(_:)` correctly
+- `parse(_:)` returns `nil` for bare accountId, colon-separated old format, empty loginId, empty accountId
+- `makeLoginId(primaryEmail:sessionURL:)` produces the expected `email@host` form
+- Tilde does not appear in email addresses or representative JMAP accountIds (separator-safety invariants)
 
 ---
 
