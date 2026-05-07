@@ -694,7 +694,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                                     nodeId: nodeId,
                                     blobId: conflictBlob.blobId,
                                     type: contentType,
-                                    modified: item.contentModificationDate ?? nil ?? nil,
+                                    modified: item.contentModificationDate ?? nil,
                                     onExists: "newest"
                                 )
                                 let winnerEntry = NodeCacheEntry(
