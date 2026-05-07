@@ -82,10 +82,71 @@ Tracks progress against the requirements in `../use-cases.txt`. Status key:
 
 ---
 
+## Architecture concern: accountId is not globally unique
+
+**Severity: correctness bug for multi-server users; latent for single-server users**
+
+`accountId` values in JMAP are unique only within a single login session — i.e. per `(server, username)` pair. Two separate logins (even to the same Fastmail server with different email addresses, or to two completely different servers) can return identical `accountId` strings. Additionally, `nodeId` and `blobId` values are scoped per account, so they too are only meaningful within a `(server, accountId)` context.
+
+### Current state (wrong)
+
+All identifiers are keyed on bare `accountId`:
+
+| Thing | Current key | Collision risk |
+|---|---|---|
+| `NSFileProviderDomain` identifier | `accountId` | Two logins same `accountId` → system treats as same domain |
+| SQLite database file | `nodes-<accountId>.sqlite` | Same path → row collisions, corrupted state |
+| Session cache file | `session-<loginId>.json` | `loginId` is UUID so this is OK currently, but see below |
+| Status file | `status-<accountId>.json` | Shared container collision |
+| UserDefaults sync-state key | `accountId` | Wrong state read |
+| `NodeRecord` primary key | `id` (nodeId only) | nodeId N in account A ≠ nodeId N in account B, but stored in same rows |
+
+### Required re-architecture
+
+#### 1. Login identity: `(serverHost, username)` → stable `loginId`
+
+`loginId` should be a deterministic string derived from `(serverHost, username)` — e.g. `"brong@fastmailteam.com@api.fastmail.com"` (double `@` is fine for an internal key; username is already an email address). Using a stable composite rather than an opaque UUID means the same login re-authenticated from scratch produces the same `loginId`, which is essential for database continuity and domain re-registration. This value is internal and not directly displayed to users.
+
+#### 2. Account identity: `(loginId, accountId)` → composite key everywhere
+
+Every place that currently uses bare `accountId` as a key must use a `(loginId, accountId)` composite:
+
+- `NSFileProviderDomain` identifier → `"\(loginId):\(accountId)"` (colon is safe, not valid in email)
+- Status file → `status-<loginId>-<accountId>.json`
+- UserDefaults keys → `"\(loginId):\(accountId)"`
+
+#### 3. NodeRecord database scoping — two options
+
+**Option A: one DB per `(loginId, accountId)`**  
+File named `nodes-<loginId>-<accountId>.sqlite`. Within that file `id` alone is sufficient as the PK (nodeIds are unique within an account). Closest to the current structure (`nodes-<accountId>.sqlite`); migration is a file rename. Extension already opens one account at a time, so no cross-DB joins needed.
+
+**Option B: one DB per login**  
+File named `nodes-<loginId>.sqlite`, all of that login's accounts share it. Requires `(accountId, id)` composite PK and `accountId` column on every table. More complex schema and migration, but enables cross-account queries if ever needed.
+
+Option A is recommended: simpler schema, simpler migration, aligns with how the extension already works.
+
+#### 4. Migration path
+
+This is a breaking schema change. Migration requires:
+1. Re-derive `loginId` from existing session data (sessionURL + stored username)
+2. Rename database files
+3. Re-register `NSFileProviderDomain` identifiers (system will see them as new domains and do a fresh enumeration)
+4. Clear old status/UserDefaults keys
+
+### Impact on existing code
+
+- `AppViewModel`: `LoginInfo.loginId` should become `username@serverhost`, not UUID
+- `NodeDatabase`: schema migration to add `loginId` column and update PK
+- `FileProviderExtension`: `accountId` property should become `(loginId, accountId)` pair
+- `ActivityTracker`, `PushWatcher`, `SyncEngine`: all pass `accountId` around — need to pass the pair
+- `FileProviderItem.itemIdentifier`: already `nodeId`-based, but the domain it lives in needs the correct identifier
+
+---
+
 ## Remaining work (priority order)
 
-1. **Sparkle package** — add Sparkle SPM dependency + `SUFeedURL`/`SUPublicEDKey` in Info.plist to fully activate auto-updates (wiring is done)
-2. **PACC full RFC discovery** — remove Fastmail-hardcoded fallback; discover any server
-
+1. **accountId uniqueness re-architecture** — correctness fix for multi-server users; required before any public multi-server launch (see above)
+2. **Sparkle package** — add Sparkle SPM dependency + `SUFeedURL`/`SUPublicEDKey` in Info.plist to fully activate auto-updates (wiring is done)
+3. **PACC full RFC discovery** — remove Fastmail-hardcoded fallback; discover any server
 4. **Distribution pipeline** — DMG / notarised package + appcast for Sparkle
 5. **Uninstall cleanup** — script or helper to remove FileProvider domains + app group data
