@@ -70,6 +70,21 @@ final class AppViewModel: ObservableObject {
             .assign(to: &$logins)
 
         Task { await checkAllConnections() }
+
+        // Observe session refreshes from the extension — new accounts added server-side
+        // will be written to the session-<loginId>.json disk cache and then notified here.
+        let observer = UnsafeMutableRawPointer(Unmanaged.passRetained(self as AnyObject).toOpaque())
+        CFNotificationCenterAddObserver(
+            CFNotificationCenterGetDarwinNotifyCenter(),
+            observer,
+            { _, observer, _, _, _ in
+                guard let observer else { return }
+                let vm = Unmanaged<AnyObject>.fromOpaque(observer).takeUnretainedValue()
+                guard let self = vm as? AppViewModel else { return }
+                Task { @MainActor in self.mergeSessionAccounts() }
+            },
+            SessionManager.sessionChangedNotificationName,
+            nil, .deliverImmediately)
     }
 
     // MARK: - Computed Properties (forwarded exactly as in AppState)
@@ -162,12 +177,67 @@ final class AppViewModel: ObservableObject {
         accountStore.save()
     }
 
+    // MARK: - Session Account Merge
+
+    /// Merge a freshly-discovered account list into an existing login record.
+    /// Adds accounts that aren't already known (isSynced: false); leaves existing ones alone.
+    private func mergeDiscoveredAccounts(
+        loginId: String,
+        discoveredAccounts: [(accountId: String, name: String, isPrimary: Bool)]
+    ) {
+        let existingIds = Set(logins.first(where: { $0.loginId == loginId })?.accounts.map { $0.accountId } ?? [])
+        let newAccounts = discoveredAccounts.filter { !existingIds.contains($0.accountId) }
+        guard !newAccounts.isEmpty else { return }
+        accountStore.update(loginId: loginId) { login in
+            for acct in newAccounts {
+                login.accounts.append(AccountInfo(
+                    accountId: acct.accountId, displayName: acct.name,
+                    isSynced: false, status: .notSynced))
+            }
+        }
+    }
+
+    /// Merge accounts from refreshed session files into existing logins.
+    /// Called when the Darwin sessionChanged notification fires (extension refreshed a session).
+    /// Called when the Darwin sessionChanged notification fires (extension refreshed a session).
+    /// Adds any new accounts (isSynced: false) without touching existing ones.
+    func mergeSessionAccounts() {
+        guard let containerURL = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: Self.appGroupId) else { return }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+
+        for login in logins {
+            let sessionURL = containerURL.appendingPathComponent("session-\(login.loginId).json")
+            guard let data = try? Data(contentsOf: sessionURL),
+                  let session = try? decoder.decode(JmapSession.self, from: data)
+            else { continue }
+
+            let discovered = session.fileNodeAccounts()
+            let existingIds = Set(login.accounts.map { $0.accountId })
+            let newAccounts = discovered.filter { !existingIds.contains($0.accountId) }
+            guard !newAccounts.isEmpty else { continue }
+
+            accountStore.update(loginId: login.loginId) { l in
+                for acct in newAccounts {
+                    l.accounts.append(AccountInfo(
+                        accountId: acct.accountId, displayName: acct.name,
+                        isSynced: false, status: .notSynced))
+                }
+            }
+        }
+    }
+
     // MARK: - Add Login
 
     func addLogin(loginId: String, sessionURL: String, credential: OAuthCredential,
                   discoveredAccounts: [(accountId: String, name: String, isPrimary: Bool)],
                   selectedAccountIds: Set<String>) async throws {
-        guard !logins.contains(where: { $0.loginId == loginId }) else { return }
+        // Re-auth for an existing login: merge any new accounts rather than no-oping.
+        if logins.contains(where: { $0.loginId == loginId }) {
+            mergeDiscoveredAccounts(loginId: loginId, discoveredAccounts: discoveredAccounts)
+            return
+        }
 
         try credentials.storeCredential(credential, for: loginId)
         defaults?.set(sessionURL, forKey: "sessionURL-\(loginId)")
@@ -199,7 +269,10 @@ final class AppViewModel: ObservableObject {
     func addLoginWithToken(loginId: String, sessionURL: String, token: String,
                            discoveredAccounts: [(accountId: String, name: String, isPrimary: Bool)],
                            selectedAccountIds: Set<String>) async throws {
-        guard !logins.contains(where: { $0.loginId == loginId }) else { return }
+        if logins.contains(where: { $0.loginId == loginId }) {
+            mergeDiscoveredAccounts(loginId: loginId, discoveredAccounts: discoveredAccounts)
+            return
+        }
 
         try credentials.storeToken(token, for: loginId)
         defaults?.set(sessionURL, forKey: "sessionURL-\(loginId)")

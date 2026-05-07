@@ -86,6 +86,7 @@ public actor SessionManager {
             }
             if let url = diskCacheURL {
                 try? data.write(to: url, options: .atomic)
+                SessionManager.postSessionChangedNotification()
             }
             cachedSession = session
             return session
@@ -102,6 +103,17 @@ public actor SessionManager {
     /// Invalidate the cached session.
     public func invalidate() {
         cachedSession = nil
+    }
+
+    /// Darwin notification posted after a session is successfully refreshed and written to disk.
+    /// The app observes this to detect new accounts added server-side.
+    nonisolated(unsafe) public static let sessionChangedNotificationName = "com.fastmail.files.sessionChanged" as CFString
+
+    public static func postSessionChangedNotification() {
+        CFNotificationCenterPostNotification(
+            CFNotificationCenterGetDarwinNotifyCenter(),
+            CFNotificationName(sessionChangedNotificationName),
+            nil, nil, true)
     }
 }
 
