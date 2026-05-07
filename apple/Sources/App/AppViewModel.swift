@@ -278,25 +278,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func removeAccount(loginId: String, accountId: String) async {
-        guard let loginIdx = logins.firstIndex(where: { $0.loginId == loginId }),
-              let acctIdx = logins[loginIdx].accounts.firstIndex(where: { $0.accountId == accountId })
-        else { return }
-
-        if logins[loginIdx].accounts[acctIdx].isSynced {
-            await registrar.remove(accountId: accountId)
-        }
-
-        if let containerURL = FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier: Self.appGroupId) {
-            let cacheDir = containerURL
-                .appendingPathComponent("NodeCache", isDirectory: true)
-                .appendingPathComponent(accountId, isDirectory: true)
-            try? FileManager.default.removeItem(at: cacheDir)
-        }
-
-        accountStore.update(loginId: loginId) { login in
-            login.accounts.removeAll { $0.accountId == accountId }
-        }
+        await disableAccount(loginId: loginId, accountId: accountId)
     }
 
     func disableAccount(loginId: String, accountId: String) async {
