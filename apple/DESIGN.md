@@ -682,10 +682,66 @@ The shared App Group container holds:
 |------|---------|---------------|
 | Node metadata | SQLite database | Extension writes, app reads for status |
 | Auth tokens | Keychain (shared group) | App writes, extension reads |
-| JMAP session cache | UserDefaults (shared suite) | Both read/write |
+| JMAP session cache | JSON file on disk | Both read/write |
 | Sync state token | SQLite database | Extension writes |
 | Account config | UserDefaults (shared suite) | App writes, extension reads |
-| Error/status | SQLite database or UserDefaults | Extension writes, app reads |
+| Error/status | JSON file on disk | Extension writes, app reads |
+
+### App Group Data Layout
+
+Concrete paths inside `~/Library/Group Containers/BJL34Q426G.com.fastmail.files/` (macOS) or the equivalent iOS container:
+
+```
+<container>/
+│
+├── NodeCache/
+│   └── <accountId>/               # one directory per account
+│       ├── nodecache.sqlite       # GRDB WAL-mode database — node metadata, sync state,
+│       ├── nodecache.sqlite-shm   #   upload sessions, sha1 chunk cache, pinned nodes
+│       └── nodecache.sqlite-wal
+│
+├── session-<loginSessionId>.json  # cached JMAP session document (JSON); one per login.
+│                                  #   loginSessionId is the JMAP account ID for the login
+│                                  #   credential (e.g. "vac7641b2").  Multiple domains
+│                                  #   (different email addresses on the same login) share
+│                                  #   one session file.  Refreshed on 401 or capability change.
+│
+├── status-<accountId>.json        # ExtensionStatus written by the extension, read by the app.
+│                                  #   Contains: syncState (idle/syncing/error), lastSyncDate,
+│                                  #   pendingUploads count, errorMessage.
+│
+├── activity.json                  # ActivityTracker state: in-progress transfer list.
+│                                  #   Written by extension, displayed in app menu bar.
+│
+├── jmap-traffic.log               # Rolling debug log of all JMAP HTTP requests/responses.
+│                                  #   Capped at ~500 KB; shared across all accounts.
+│                                  #   Read with: tail -f or grep in diagnostics bundle.
+│
+├── tmp/                           # Ephemeral temp files.  Extension writes chunk files here
+│                                  #   during uploads (survives process kill via background
+│                                  #   URLSession).  Thumbnail download temps also land here.
+│
+├── token-refresh-<email>.lock     # Zero-byte flock(2) file for OAuth token-refresh
+│                                  #   serialization.  Prevents two processes (app + extension)
+│                                  #   from simultaneously refreshing the same token.
+│
+└── File Provider Storage/         # Managed entirely by the system (NSFileProviderManager).
+                                   #   Contains hydrated file content for placeholder items.
+                                   #   Never read or write directly.
+```
+
+**Account ID vs Login Session ID.** The JMAP session response contains a map of `accountId → account`. The `loginSessionId` (used for session and lock files) is the account ID that matches the OAuth credential — the "primary" identity for a given login. Other email addresses visible in the same session (e.g. shared mailboxes, sub-accounts) get their own `accountId` used as the NodeCache directory name, but share the same session and lock files as the login credential they came in on.
+
+**Finding which account owns a file.** The Finder domain `displayName` = email address; the domain `identifier.rawValue` = accountId. To inspect a specific account's data:
+```bash
+# Account ID for test4@brong.net based on session file:
+python3 -c "
+import json; s=json.load(open('session-<loginId>.json'))
+print({v['name']:k for k,v in s['accounts'].items()})
+"
+# Then:
+sqlite3 NodeCache/<accountId>/nodecache.sqlite "SELECT name, type, blobId FROM nodes LIMIT 20;"
+```
 
 ### App → Extension Signals
 

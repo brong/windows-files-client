@@ -1028,6 +1028,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
         ) -> Void,
         completionHandler: @escaping (Error?) -> Void
     ) -> Progress {
+        logger.info("[\(self.accountId, privacy: .public)] fetchThumbnails: \(itemIdentifiers.count, privacy: .public) items, size=\(Int(requestedSize.width), privacy: .public)x\(Int(requestedSize.height), privacy: .public)")
         Task {
             for identifier in itemIdentifiers {
                 let nodeId = identifier.rawValue
@@ -1036,6 +1037,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                       let type = entry.type,
                       type.hasPrefix("image/")
                 else {
+                    logger.debug("[\(self.accountId, privacy: .public)] fetchThumbnails: \(nodeId, privacy: .public) — no entry/blobId/imageType, skipping")
                     perThumbnailCompletionHandler(identifier, nil, nil)
                     continue
                 }
@@ -1045,10 +1047,12 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                 guard let session = session,
                       session.hasBlob2(accountId: accountId)
                 else {
+                    logger.warning("[\(self.accountId, privacy: .public)] fetchThumbnails: \(nodeId, privacy: .public) — no blob2 capability, skipping")
                     perThumbnailCompletionHandler(identifier, nil, nil)
                     continue
                 }
 
+                logger.debug("[\(self.accountId, privacy: .public)] fetchThumbnails: converting \(nodeId, privacy: .public) type=\(type, privacy: .public)")
                 do {
                     let thumbnailBlobId = try await client.convertImage(
                         accountId: accountId,
@@ -1078,8 +1082,10 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                     let thumbnailData = try Data(contentsOf: tempURL)
                     try? FileManager.default.removeItem(at: tempURL)
 
+                    logger.info("[\(self.accountId, privacy: .public)] fetchThumbnails: \(nodeId, privacy: .public) — done (\(thumbnailData.count, privacy: .public) bytes)")
                     perThumbnailCompletionHandler(identifier, thumbnailData, nil)
                 } catch {
+                    logger.error("[\(self.accountId, privacy: .public)] fetchThumbnails: \(nodeId, privacy: .public) — error: \(error.localizedDescription, privacy: .public)")
                     perThumbnailCompletionHandler(identifier, nil, nil)
                 }
             }
