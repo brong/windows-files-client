@@ -659,7 +659,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                     // UTF-8 bytes) that the system held when the user opened the file. If the
                     // DB's current blobId differs, another device updated the server copy while
                     // this edit was in progress.
-                    let baseContentBlobId = String(data: baseVersion.contentVersion, encoding: .utf8)
+                    let baseContentBlobId = String(data: version.contentVersion, encoding: .utf8)
                     let currentEntry = await database.entry(for: nodeId)
                     let currentBlobId = currentEntry?.blobId
 
@@ -694,7 +694,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                                     nodeId: nodeId,
                                     blobId: conflictBlob.blobId,
                                     type: contentType,
-                                    modified: item.contentModificationDate,
+                                    modified: item.contentModificationDate ?? nil,
                                     onExists: "newest"
                                 )
                                 let winnerEntry = NodeCacheEntry(

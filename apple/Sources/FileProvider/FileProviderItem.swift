@@ -31,7 +31,7 @@ public final class FileProviderItem: NSObject, NSFileProviderItem {
 
     /// Convenience init from a FileNode.
     public convenience init(node: FileNode, homeNodeId: String, trashNodeId: String?,
-                            isPinned: Bool = false) {
+                            isPinned: Bool = false, filenameOverride: String? = nil) {
         let entry = NodeCacheEntry(
             parentId: node.parentId,
             name: node.name ?? "Untitled",
@@ -43,7 +43,7 @@ public final class FileProviderItem: NSObject, NSFileProviderItem {
             myRights: node.myRights
         )
         self.init(nodeId: node.id, entry: entry, homeNodeId: homeNodeId,
-                  trashNodeId: trashNodeId, isPinned: isPinned)
+                  trashNodeId: trashNodeId, isPinned: isPinned, filenameOverride: filenameOverride)
     }
 
     // MARK: - NSFileProviderItem

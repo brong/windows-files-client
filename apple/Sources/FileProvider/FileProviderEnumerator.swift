@@ -153,7 +153,7 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
 
                 for parentId in batchParents {
                     let siblings = childrenByParent[parentId] ?? []
-                    let suffixes = Self.caseCollisionSuffixes(for: siblings.map { $0.name })
+                    let suffixes = Self.caseCollisionSuffixes(for: siblings.map { $0.name ?? "" })
                     for (i, node) in siblings.enumerated() {
                         allNodes.append(node)
                         if node.isTrash { effectiveTrashId = node.id }
