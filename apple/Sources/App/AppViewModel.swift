@@ -69,7 +69,13 @@ final class AppViewModel: ObservableObject {
             .receive(on: RunLoop.main)
             .assign(to: &$logins)
 
-        Task { await checkAllConnections() }
+        Task {
+            await checkAllConnections()
+            // Remove any domain registrations whose identifiers don't match the
+            // current loginId~accountId format (e.g. stale bare-accountId domains
+            // left over from before the loginId refactor).
+            await cleanupOrphanedDomains()
+        }
 
         // Observe session refreshes from the extension — new accounts added server-side
         // will be written to the session-<loginId>.json disk cache and then notified here.

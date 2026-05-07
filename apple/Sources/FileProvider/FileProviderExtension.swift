@@ -100,6 +100,11 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
         let loginId = tildeIdx.map { String(domainId[..<$0]) } ?? ""
         let acctId = tildeIdx.map { String(domainId[domainId.index(after: $0)...]) } ?? domainId
         self.accountId = acctId
+        #if canImport(os)
+        // Temporary: log the computed identity so we can verify Keychain lookup matches what the app stored.
+        Logger(subsystem: "com.fastmail.files", category: "Init")
+            .info("[init] domainId=\(domainId, privacy: .public) loginId=\(loginId, privacy: .public) acctId=\(acctId, privacy: .public)")
+        #endif
 
         // App Group container — fall back to temp dir so all `let` properties are always valid.
         let containerURL = FileManager.default.containerURL(
@@ -121,6 +126,10 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
         let credData = FileProviderExtension.readKeychainData(
             service: loginKeychainService, account: keychainAccount, accessGroup: appGroup)
 
+        #if canImport(os)
+        Logger(subsystem: "com.fastmail.files", category: "Init")
+            .info("[init] [\(acctId, privacy: .public)] authType=\(authType ?? "nil", privacy: .public) credData=\(credData != nil ? "found(\(credData!.count)b)" : "nil", privacy: .public)")
+        #endif
         let tokenProvider: TokenProvider
         if authType == "oauth", let credData = credData,
            let credential = {
@@ -158,7 +167,15 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                     return try? d.decode(OAuthCredential.self, from: data)
                 }
             )
+            #if canImport(os)
+            Logger(subsystem: "com.fastmail.files", category: "Init")
+                .info("[init] [\(acctId, privacy: .public)] using OAuthTokenProvider expiresAt=\(credential.expiresAt, privacy: .public)")
+            #endif
         } else {
+            #if canImport(os)
+            Logger(subsystem: "com.fastmail.files", category: "Init")
+                .warning("[init] [\(acctId, privacy: .public)] falling back to KeychainTokenProvider (authType=\(authType ?? "nil", privacy: .public) credData=\(credData != nil ? "found" : "nil", privacy: .public))")
+            #endif
             tokenProvider = KeychainTokenProvider(
                 service: loginKeychainService, account: keychainAccount, accessGroup: appGroup)
         }
