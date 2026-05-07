@@ -694,7 +694,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                                     nodeId: nodeId,
                                     blobId: conflictBlob.blobId,
                                     type: contentType,
-                                    modified: item.contentModificationDate ?? nil,
+                                    modified: item.contentModificationDate ?? nil ?? nil,
                                     onExists: "newest"
                                 )
                                 let winnerEntry = NodeCacheEntry(
@@ -702,7 +702,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                                     name: currentEntry?.name ?? fileName,
                                     blobId: conflictBlob.blobId,
                                     size: conflictBlob.size,
-                                    modified: item.contentModificationDate,
+                                    modified: item.contentModificationDate ?? nil,
                                     isFolder: false,
                                     type: contentType,
                                     myRights: currentEntry?.myRights
@@ -730,7 +730,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                             name: fileName,
                             blobId: conflictBlob.blobId,
                             type: contentType,
-                            modified: item.contentModificationDate,
+                            modified: item.contentModificationDate ?? nil,
                             onExists: "rename"
                         )
 
@@ -739,7 +739,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                             name: conflictNode.name ?? fileName,
                             blobId: conflictBlob.blobId,
                             size: conflictBlob.size,
-                            modified: item.contentModificationDate,
+                            modified: item.contentModificationDate ?? nil,
                             isFolder: false,
                             type: contentType,
                             myRights: currentEntry?.myRights
@@ -766,7 +766,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                             nodeId: nodeId,
                             fileURL: contentURL,
                             contentType: contentType,
-                            modified: item.contentModificationDate
+                            modified: item.contentModificationDate ?? nil
                         )
                     } else {
                         let currentBlobId = await database.entry(for: nodeId)?.blobId
@@ -796,7 +796,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                             nodeId: nodeId,
                             blobId: blob.blobId,
                             type: contentType,
-                            modified: item.contentModificationDate
+                            modified: item.contentModificationDate ?? nil
                         )
                     }
                     progress.completedUnitCount = 80
@@ -808,7 +808,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                             name: entry.name,
                             blobId: blob.blobId,
                             size: blob.size,
-                            modified: item.contentModificationDate,
+                            modified: item.contentModificationDate ?? nil,
                             isFolder: false,
                             type: contentType,
                             myRights: entry.myRights
