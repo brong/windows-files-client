@@ -260,6 +260,61 @@ The intended upper bound is `maxChunkSize`. The actual upper bound is `max(maxCh
 
 ---
 
+## BUG-018 — Stale FileProvider domain registrations survive identifier format changes
+
+**Status:** Mitigated (startup cleanup added; root cause is the absence of a reconcile loop)
+**Symptom:** All accounts show "Authentication required" indefinitely. The unified log shows `[init] domainId=vac7641b2 loginId= acctId=vac7641b2` — the extension is launched with a bare accountId identifier, no `~` separator, `loginId` is empty, Keychain lookup fails.
+**Root cause (chain):**
+1. `accountId` is not globally unique — it is scoped per (server, user). Two different logins can have the same `accountId`. This required introducing a composite `loginId~accountId` domain identifier.
+2. The domain identifier format changed twice: `vac7641b2` → `brong@brong.net:vac7641b2` (colon, commit 5514c8c) → `brong@brong.net~vac7641b2` (tilde, this session).
+3. `NSFileProviderManager.remove(domain:)` matches on the exact string identifier. When removal is called with the new-format identifier but the system has the old-format registered domain, it silently does nothing — no error, no log.
+4. The app had no startup reconciliation: it never compared registered system domains against AccountStore and re-registered or removed as needed.
+5. Result: after each format change, old-format domains accumulated in the system. Extensions were launched for those stale domains with identifiers the current code cannot parse.
+
+**Contributing factor — separator choice `:` was filesystem-illegal:**
+The first format change chose `:` as the separator without checking all contexts. macOS HFS+/APFS forbids `:` in file and directory names (legacy HFS path separator). `NodeDatabase.makePool` silently failed to create the cache directory, fell back to a UUID-named temp dir, and rebuilt the DB from scratch on every extension restart — causing endless cold-start re-enumeration. There were no tests that instantiated a NodeDatabase with a colon-containing ID and verified the directory was actually created.
+
+**Fix applied:**
+- Changed separator to `~` (safe in all contexts: filenames, NSFileProviderDomain, UserDefaults, URLSession identifiers, email addresses don't use it).
+- Removed all `replacingOccurrences(of: ":", with: "-")` sanitization — one canonical form everywhere.
+- Added `cleanupOrphanedDomains()` call at app startup (after `checkAllConnections()`).
+
+**Still needed:** Startup domain reconcile — for every `isSynced: true` account in AccountStore, verify a domain with the correct `~`-format identifier is registered in the system; if not, call `register()`. Without this, if the AccountStore has accounts that predate the current domain format, they stay in the AccountStore as "synced" but no extension runs for them.
+
+**Lesson:** When the domain identifier format changes, the removal code must handle the old format explicitly (e.g. remove all known legacy-format variants) or startup reconciliation must detect and re-register missing domains. Silent failure from `NSFileProviderManager` is the norm, not the exception. Never assume remove succeeded.
+
+---
+
+## BUG-019 — AccountStore `loginId` not migrated when computation changed
+
+**Status:** Open
+**Symptom:** AccountStore has `loginId = "brong@brong.net"` (email only). New code computes `loginId = "email@serverHost"` (e.g. `"brong@brong.net@api.fastmail.com"`). Downstream effects: Keychain lookup key, domain identifier prefix, session cache filename all diverge between old and new code paths.
+**Root cause:** `loginId` is computed from the JMAP session response at add-login time and persisted to disk (AccountStore `logins` key in UserDefaults). When the computation formula changed (from `primaryName` alone to `primaryName@serverHost`), existing persisted entries were not migrated. Any code path that uses `login.loginId` to construct a key (Keychain, domain ID, session file) silently uses the stale value.
+**Contributing factor:** The `loginId` is used as a compound key in multiple independent systems (Keychain, FileProvider, UserDefaults, filename) with no central registry or canonical form. Changing the formula breaks all of them simultaneously.
+**Fix needed:**
+- Migration in AccountStore: on load, detect old-format loginIds (those that don't contain `@` followed by a hostname) and upgrade them using the stored `sessionURL`.
+- OR: derive `loginId` from `sessionURL` on every use (not stored), so it's always current.
+**Lesson:** Anything persisted to disk is a migration target the moment the schema changes. Never change a computed key's formula without writing a migration. If a key is derived from stable data (e.g. session URL), re-derive it on load rather than caching the derived value.
+
+---
+
+## BUG-020 — No tests for the domain-identity round-trip
+
+**Status:** Open
+**Symptom:** The formatter (`domainId(for:)`) and the parser (extension init) can silently diverge. When they do, `loginId` is empty, Keychain lookup fails, and the entire extension fails to authenticate — with no compile-time or test-time signal.
+**Root cause:** The domain identifier format is a hand-rolled string protocol shared between the app (writer) and the extension (parser). There are no tests that:
+1. Verify `domainId(for:)` produces a string containing `~`.
+2. Verify parsing `loginId~accountId` yields non-empty `loginId` and the original `accountId`.
+3. Verify the Keychain lookup key used by the extension matches the key used by `CredentialStore.storeCredential`.
+**Fix needed:** Add a `DomainIdentityTests.swift` that:
+- Constructs a domainId from a (loginId, accountId) pair
+- Parses it back and asserts both parts are non-empty and match
+- Asserts the Keychain account key derived from parsing equals what the app would store
+- Asserts a domainId without `~` is detected as stale (empty loginId)
+**Lesson:** Any string protocol where writer and reader live in separate processes (app vs. extension) with no shared code path needs a test that exercises both directions in the same test. If the round-trip isn't tested, a format change in one direction breaks the other silently.
+
+---
+
 ## Recurring mistakes to watch for
 
 - **`privacy: .public` omitted** — every interpolated value in a logger call needs it
@@ -275,3 +330,7 @@ The intended upper bound is `maxChunkSize`. The actual upper bound is `max(maxCh
 - **`defer` inside a loop body is scoped to the iteration** — if the process is killed mid-loop, the current iteration's `defer` does not run. For files that must be cleaned up across process kills, write them to a location that can be swept at next startup, not to a process-scoped temp directory.
 - **APFS returns NFD, JMAP requires NFC** — names from macOS FileProvider (`item.filename`) are in NFD-like form. The JMAP spec (Net-Unicode, RFC 5198) requires NFC. Always call `FilenameUtils.desanitize` (which NFC-normalizes) before sending a name to the server. Failing to do so causes round-trip mismatches: the server stores the NFC-normalized version; the client then computes a different ETag/hash because its in-memory name is NFD.
 - **`caseInsensitiveNames: false` means the server is case-sensitive** — macOS APFS is case-insensitive. The client must send `compareCaseInsensitively: true` on all `FileNode/set` requests and must visually deduplicate case-variant siblings (via `FilenameUtils.caseCollisionSuffixes`) before presenting them to FileProvider. Never assume the server and macOS agree on what "same name" means.
+- **`NSFileProviderManager.remove()` silently fails on identifier mismatch** — if the registered domain identifier doesn't exactly match the one passed to `remove()`, the call succeeds without removing anything. After any domain identifier format change, the old domains remain until explicitly removed or a startup reconcile detects them.
+- **Domain identifier separator must be safe in ALL contexts** — the separator appears in filenames, NSFileProviderDomain identifier strings, UserDefaults keys, and URLSession identifiers. Test any candidate against each context before committing. `:` is illegal in HFS+/APFS filenames. `/` is a path separator everywhere. `~` is safe in all these contexts.
+- **Persisted keys are migration targets** — any key derived from app data and stored to disk (AccountStore `loginId`, UserDefaults domain keys) must be migrated when the derivation formula changes. Re-derive on load from stable inputs (e.g. session URL) rather than caching derived values when possible.
+- **App–extension string protocols need round-trip tests** — writer (app) and parser (extension) run in separate processes with no shared code path. If there is no test that constructs a key in one direction and parses it in the other, a format change silently breaks authentication.
