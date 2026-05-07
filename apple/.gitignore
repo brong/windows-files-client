@@ -1,0 +1,6 @@
+.build/
+.swiftpm/
+FastmailFiles.xcodeproj/project.xcworkspace/
+FastmailFiles.xcodeproj/xcuserdata/
+Package.resolved
+output.txt
