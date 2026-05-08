@@ -486,6 +486,11 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
 
                 let parentId = resolveNodeId(itemTemplate.parentItemIdentifier, nodes: nodes)
 
+                guard !FilenameUtils.containsSubstituteChars(itemTemplate.filename) else {
+                    completionHandler(nil, [], false, NSFileProviderError(.filenameCollision) as NSError)
+                    return
+                }
+
                 if itemTemplate.contentType == .folder {
                     // Create folder
                     let folderName = desanitizeFilename(itemTemplate.filename)
@@ -655,6 +660,11 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
         let modifyTask = Task {
             defer { deregisterInFlight(key: modifyDedupeKey, generation: modifyInFlightGen) }
             do {
+                guard !FilenameUtils.containsSubstituteChars(item.filename) else {
+                    completionHandler(nil, [], false, NSFileProviderError(.filenameCollision) as NSError)
+                    return
+                }
+
                 let nodes = try await specialNodes.value
                 let nodeId = item.itemIdentifier.rawValue
                 var currentNodeId = nodeId

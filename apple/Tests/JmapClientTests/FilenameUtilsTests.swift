@@ -135,3 +135,36 @@ private let eAcuteNFD = "e\u{0301}"
     let name = "hello world.txt"
     #expect(FilenameUtils.sanitize(name) == name)
 }
+
+// MARK: - containsSubstituteChars
+
+@Test func testDetectsDivisionSlash() {
+    #expect(FilenameUtils.containsSubstituteChars("foo\u{2215}bar"))
+}
+
+@Test func testDetectsModifierLetterColon() {
+    #expect(FilenameUtils.containsSubstituteChars("foo\u{A789}bar"))
+}
+
+@Test func testCleanNameHasNoSubstituteChars() {
+    #expect(!FilenameUtils.containsSubstituteChars("normal-name.txt"))
+}
+
+@Test func testRealColonIsNotASubstituteChar() {
+    // A literal ASCII colon does not trigger containsSubstituteChars —
+    // it would be rejected by the server anyway, but that's a different check.
+    #expect(!FilenameUtils.containsSubstituteChars("report: 2026.txt"))
+}
+
+@Test func testSanitizedNameContainsSubstituteChars() {
+    // sanitize introduces substitute chars — the extension guards against
+    // sending those back to the server via createItem/modifyItem.
+    let sanitized = FilenameUtils.sanitize("foo/bar:baz")
+    #expect(FilenameUtils.containsSubstituteChars(sanitized))
+}
+
+@Test func testSanitizeDoesNotDoubleEncodeSubstituteChars() {
+    // A server name already containing U+2215 passes through sanitize unchanged.
+    let name = "foo\u{2215}bar.txt"
+    #expect(FilenameUtils.sanitize(name) == name)
+}

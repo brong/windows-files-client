@@ -38,6 +38,18 @@ public enum FilenameUtils {
         )
     }
 
+    // MARK: - Substitute character detection
+
+    /// Returns true if the name contains U+2215 (DIVISION SLASH) or U+A789
+    /// (MODIFIER LETTER COLON) — the substitute characters used by `sanitize`.
+    /// A macOS filename containing these cannot be safely round-tripped through
+    /// `desanitize`: we cannot tell whether they were placed there by `sanitize`
+    /// (mapping a server `/` or `:`) or typed literally by the user. Callers
+    /// should reject such filenames rather than silently corrupting the server name.
+    public static func containsSubstituteChars(_ name: String) -> Bool {
+        name.unicodeScalars.contains { $0.value == 0x2215 || $0.value == 0xA789 }
+    }
+
     // MARK: - Case-collision deduplication
 
     /// Given a parallel array of sibling names, returns display-name overrides for any
