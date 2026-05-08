@@ -93,6 +93,7 @@ public actor NodeDatabase {
                 t.column("type", .text)
                 t.column("mayRead", .boolean).notNull().defaults(to: true)
                 t.column("mayWrite", .boolean).notNull().defaults(to: true)
+                t.column("bfsGeneration", .integer).notNull().defaults(to: 0)
             }
             try db.create(
                 index: "idx_nodes_parentId", on: "nodes",
@@ -214,7 +215,7 @@ public actor NodeDatabase {
         }
     }
 
-    public func upsertFromServer(_ node: FileNode) {
+    public func upsertFromServer(_ node: FileNode, bfsGeneration: Int? = nil) {
         guard let name = node.name else { return }
         let entry = NodeCacheEntry(
             parentId: node.parentId,
@@ -227,6 +228,37 @@ public actor NodeDatabase {
             myRights: node.myRights
         )
         upsert(nodeId: node.id, entry: entry)
+        if let gen = bfsGeneration {
+            try? pool.write { db in
+                try db.execute(
+                    sql: "UPDATE nodes SET bfsGeneration = ? WHERE id = ?",
+                    arguments: [gen, node.id])
+            }
+        }
+    }
+
+    /// Increments the BFS generation counter and returns the new value.
+    /// Call once at the start of each enumerateWorkingSet pass.
+    public func incrementBfsGeneration() -> Int {
+        (try? pool.write { db -> Int in
+            try db.execute(sql: """
+                INSERT INTO sync_state (key, value) VALUES ('bfsGeneration', '1')
+                ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)
+                """)
+            return try Int.fetchOne(
+                db, sql: "SELECT CAST(value AS INTEGER) FROM sync_state WHERE key = 'bfsGeneration'"
+            ) ?? 1
+        }) ?? 1
+    }
+
+    /// Deletes all nodes whose bfsGeneration differs from `generation`.
+    /// Call after a complete BFS to remove server-deleted nodes from the DB.
+    public func pruneStaleNodes(generation: Int) {
+        try? pool.write { db in
+            try db.execute(
+                sql: "DELETE FROM nodes WHERE bfsGeneration != ?",
+                arguments: [generation])
+        }
     }
 
     public func remove(nodeId: String) {

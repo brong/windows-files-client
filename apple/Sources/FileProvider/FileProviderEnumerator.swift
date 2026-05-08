@@ -135,6 +135,7 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
         var allNodes: [FileNode] = []
         var finalState: String = ""
         let pinnedIds = await database.allPinnedIds
+        let bfsGen = await database.incrementBfsGeneration()
 
         // BFS queue of folder IDs whose children need to be fetched.
         var folderQueue: [String] = [nodes.homeId]
@@ -181,8 +182,9 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
             }
 
             for node in allNodes {
-                await database.upsertFromServer(node)
+                await database.upsertFromServer(node, bfsGeneration: bfsGen)
             }
+            await database.pruneStaleNodes(generation: bfsGen)
             await database.setHomeNodeId(nodes.homeId)
             await database.setTrashNodeId(effectiveTrashId)
             await database.setStateToken(finalState)

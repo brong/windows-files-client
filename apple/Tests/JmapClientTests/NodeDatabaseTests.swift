@@ -259,3 +259,69 @@ private func makeDatabase() -> NodeDatabase {
         .appendingPathComponent(UUID().uuidString, isDirectory: true)
     return NodeDatabase(containerURL: tempDir, accountId: "test-\(UUID().uuidString)")
 }
+
+// MARK: - BFS generation counter / echo suppression
+
+@Test func testIncrementBfsGenerationMonotonicallyIncreases() async {
+    let db = await makeDatabase()
+    let gen1 = await db.incrementBfsGeneration()
+    let gen2 = await db.incrementBfsGeneration()
+    let gen3 = await db.incrementBfsGeneration()
+    #expect(gen1 < gen2)
+    #expect(gen2 < gen3)
+}
+
+@Test func testPruneRemovesStaleNode() async {
+    let db = await makeDatabase()
+    // Plant a node with the default generation (0)
+    await db.upsertFromServer(FileNode(
+        id: "stale", parentId: "root", blobId: nil, name: "old.txt",
+        type: nil, size: nil, created: nil, modified: nil, accessed: nil,
+        role: nil, executable: nil, isSubscribed: nil, myRights: nil, shareWith: nil))
+
+    // BFS sees a different node
+    let gen = await db.incrementBfsGeneration()
+    await db.upsertFromServer(FileNode(
+        id: "fresh", parentId: "root", blobId: nil, name: "new.txt",
+        type: nil, size: nil, created: nil, modified: nil, accessed: nil,
+        role: nil, executable: nil, isSubscribed: nil, myRights: nil, shareWith: nil),
+        bfsGeneration: gen)
+    await db.pruneStaleNodes(generation: gen)
+
+    #expect(await db.entry(for: "stale") == nil)
+    #expect(await db.entry(for: "fresh") != nil)
+}
+
+@Test func testBfsNodeSurvivesPrune() async {
+    let db = await makeDatabase()
+    let gen = await db.incrementBfsGeneration()
+    await db.upsertFromServer(FileNode(
+        id: "keep", parentId: "root", blobId: nil, name: "keep.txt",
+        type: nil, size: nil, created: nil, modified: nil, accessed: nil,
+        role: nil, executable: nil, isSubscribed: nil, myRights: nil, shareWith: nil),
+        bfsGeneration: gen)
+    await db.pruneStaleNodes(generation: gen)
+    #expect(await db.entry(for: "keep") != nil)
+}
+
+@Test func testNodeNotSeenInNextBfsIsPruned() async {
+    let db = await makeDatabase()
+    // First BFS stamps node with gen 1
+    let gen1 = await db.incrementBfsGeneration()
+    await db.upsertFromServer(FileNode(
+        id: "n1", parentId: "root", blobId: nil, name: "file.txt",
+        type: nil, size: nil, created: nil, modified: nil, accessed: nil,
+        role: nil, executable: nil, isSubscribed: nil, myRights: nil, shareWith: nil),
+        bfsGeneration: gen1)
+
+    // Incremental sync updates node without stamping generation
+    await db.upsertFromServer(FileNode(
+        id: "n1", parentId: "root", blobId: "b2", name: "file.txt",
+        type: nil, size: 99, created: nil, modified: nil, accessed: nil,
+        role: nil, executable: nil, isSubscribed: nil, myRights: nil, shareWith: nil))
+
+    // Second BFS does not include n1 — it was deleted on the server
+    let gen2 = await db.incrementBfsGeneration()
+    await db.pruneStaleNodes(generation: gen2)
+    #expect(await db.entry(for: "n1") == nil)
+}
