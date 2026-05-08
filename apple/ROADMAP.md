@@ -34,7 +34,7 @@ Tracks progress against the requirements in `../use-cases.txt`. Status key:
 | Delete files on server | Done | `deleteItem` moves to trash |
 | Rename files on server | Done | `modifyItem` handles rename |
 | See quota usage | Done | Fetched via JMAP Quota/get; progress bar in Settings |
-| Clear error messages on failure | Partial | JmapError maps to NSFileProviderError; no user-visible error detail surfaced in UI |
+| Clear error messages on failure | Done | ExtensionStatus.error string shown in red below account status; auth failure shows "Authentication required" |
 | Automatic updates (Sparkle) | Partial | `UpdateManager` instantiated at app startup; "Check for Updates…" menu item wired. Requires Sparkle package + Info.plist `SUFeedURL`/`SUPublicEDKey` to activate — see comments in UpdateManager.swift |
 
 ---
