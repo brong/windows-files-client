@@ -82,7 +82,15 @@ Tracks progress against the requirements in `../use-cases.txt`. Status key:
 
 ---
 
-## Architecture concern: accountId is not globally unique
+## Architecture concern: accountId is not globally unique — RESOLVED
+
+**Status: Fixed by DomainIdentity refactor (commits e9aaed2 / 3a484b4)**
+
+All keys now use `domainId = loginId~accountId` where `loginId = email@serverHost` (deterministic, not a UUID). Every item in the original collision table is resolved — see those commits for details.
+
+---
+
+**Original concern (for reference):**
 
 **Severity: correctness bug for multi-server users; latent for single-server users**
 
