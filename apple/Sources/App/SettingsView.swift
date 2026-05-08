@@ -320,7 +320,10 @@ struct SettingsView: View {
     // MARK: - Account Row
 
     private func accountRow(login: LoginInfo, account: AccountInfo) -> some View {
+        let domainId = login.domainId(for: account.accountId)
         let status = appState.liveStatus(for: account.accountId)
+        let errorDetail: String? = appState.extensionStatuses[domainId]?.error
+            ?? (login.connectionStatus == .authFailed ? "Authentication required" : nil)
         return HStack {
             Image(systemName: account.isSynced ? "checkmark.circle.fill" : "circle")
                 .foregroundColor(account.isSynced ? statusColor(status) : .gray)
@@ -330,7 +333,12 @@ struct SettingsView: View {
                 Text(account.isSynced ? statusText(status) : "Not synced")
                     .font(.caption)
                     .foregroundColor(.secondary)
-                if let quota = appState.quotaInfo[login.domainId(for: account.accountId)] {
+                if status == .error, let detail = errorDetail {
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundColor(.red)
+                }
+                if let quota = appState.quotaInfo[domainId] {
                     quotaBar(quota)
                 }
             }
