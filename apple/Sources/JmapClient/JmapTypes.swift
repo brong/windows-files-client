@@ -4,10 +4,6 @@ import Foundation
 
 public enum JmapCapability {
     public static let core = "urn:ietf:params:jmap:core"
-    // Legacy `urn:ietf:params:jmap:blob` capability is deprecated and must
-    // not be sent in `using` arrays. Its URI is referenced only to read
-    // advertised limits (maxDataSources, maxSizeBlobSet) from session metadata.
-    public static let blob = "urn:ietf:params:jmap:blob"
     public static let blob2 = "https://www.fastmail.com/dev/blob2"
     public static let quota = "urn:ietf:params:jmap:quota"
 
@@ -87,10 +83,10 @@ public struct JmapSession: Codable, Sendable {
         accounts[accountId]?.accountCapabilities[JmapCapability.blob2]?.dictValue?["chunkSize"]?.intValue
     }
 
-    /// Maximum total upload size from the legacy blob capability metadata.
+    /// Maximum total upload size from the blob2 capability metadata.
     /// Files exceeding this limit cannot be uploaded via Blob/set.
     public func maxSizeBlobSet(accountId: String) -> Int? {
-        accounts[accountId]?.accountCapabilities[JmapCapability.blob]?.dictValue?["maxSizeBlobSet"]?.intValue
+        accounts[accountId]?.accountCapabilities[JmapCapability.blob2]?.dictValue?["maxSizeBlobSet"]?.intValue
     }
 
     /// Get the FileNode capability URI that the server actually uses.

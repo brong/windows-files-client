@@ -732,10 +732,9 @@ public actor JmapClient {
         }
 
         // Determine chunk size. Start from the server-suggested blob2 chunkSize
-        // hint (or 64 MB default). maxDataSources comes from the legacy blob
-        // capability metadata — readable without sending that URI.
-        let blobCap = session.accounts[accountId]?.accountCapabilities[JmapCapability.blob]
-        let maxDataSources = blobCap?.dictValue?["maxDataSources"]?.intValue ?? 100
+        // hint (or 64 MB default). maxDataSources comes from the blob2 capability.
+        let maxDataSources = session.accounts[accountId]?
+            .accountCapabilities[JmapCapability.blob2]?.dictValue?["maxDataSources"]?.intValue ?? 100
         var chunkSize = session.blob2ChunkSize(accountId: accountId) ?? Self.defaultChunkSize
 
         // Adjust chunk size up if file would exceed maxDataSources chunks
