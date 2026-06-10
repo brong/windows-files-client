@@ -53,14 +53,16 @@ using this same roadmap):
   promptly instead of burning the upload-retry budget. (The count-based
   threshold→`blockedUploadCount`→"N stuck — press Retry" escalation already
   existed.)
+- **R1 ✅ done** (`a7ed026`) — "Verify & Repair" menu item: tested
+  `SyncEngine.verifyAgainstServer()` reports DB↔server drift, and the action
+  forces a full reconcile (re-fetch missing, prune stale) + retries blocked
+  uploads, per account.
 - Remaining:
   - **V2/V3** — surface *reasons*: `ActivityTracker` records failure `error`
     strings, but `OperationHint` has no error field and `pushToStatus` forwards
     only active/pending ops, so reasons never reach the UI. Multi-layer UI
     plumbing (extend `OperationHint`, forward failures, render in MenuBar/
-    Diagnostics); verify via xcodebuild.
-  - **R1** — Verify & Repair action: larger feature; repair routine in the sync
-    layer (re-check digests / reconcile / re-enqueue) with a user-facing trigger.
+    Diagnostics); verify via xcodebuild. This is the last Apple item.
 
 ## Severity legend
 
