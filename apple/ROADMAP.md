@@ -36,6 +36,13 @@ Tracks progress against the requirements in `../use-cases.txt`. Status key:
 | See quota usage | Done | Fetched via JMAP Quota/get; progress bar in Settings |
 | Clear error messages on failure | Done | ExtensionStatus.error string shown in red below account status; auth failure shows "Authentication required" |
 | Automatic updates (Sparkle) | Partial | `UpdateManager` instantiated at app startup; "Check for Updates…" menu item wired. Requires Sparkle package + Info.plist `SUFeedURL`/`SUPublicEDKey` to activate — see comments in UpdateManager.swift |
+| Never serve/store corrupt file content | Done | Download (`downloadBlob`) and single-shot upload (`uploadBlob`/`directWrite`) verify `digest:sha`; mismatch is rejected + retried. Reliability I1/I2 (BUG-021/022) |
+| Detect a silently-stalled sync | Done | SSE idle-timeout watchdog (150s) detects half-open push connections → reconnect + catch-up. Reliability D3 (BUG-023) |
+| See when files last synced | Done | "Last synced …" line in the menu bar header. Reliability V1 |
+| See *why* a file failed to sync | Done | Failure reasons shown in red in the menu-bar activity list (not just an aggregate count). Reliability V2/V3 (BUG-025) |
+| Verify & Repair / force a clean re-sync | Done | Menu item: reconciles local state against the server (re-fetch missing, prune stale) and retries blocked uploads. Reliability R1 |
+
+See `../windows/RELIABILITY.md` for the cross-platform reliability tracker. Items I3/D2/R3/R5 (conflict handling, server-delete pruning, crash-safe state token, DB corruption fallback) were already handled in earlier work.
 
 ---
 

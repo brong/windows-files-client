@@ -317,6 +317,51 @@ No inline string interpolation for identity strings anywhere in the codebase.
 
 ---
 
+## BUG-021 — Downloaded content served without verifying its digest
+**Status:** Fixed (commit cff4881, reliability I1)
+**Symptom:** A blob corrupted in transit (or by a misbehaving cache/proxy) was written to the placeholder and marked in-sync. The user's app opened corrupt data with no indication anything was wrong; only a log line recorded the mismatch.
+**Root cause:** `downloadBlob` fetched the bytes, checked the HTTP status, and returned the file — it never compared the content against the server's `digest:sha`. (The cross-platform `DESIGN.md` even advised "log mismatches but don't fail," which was wrong.)
+**Fix:** `downloadBlob` now fetches `digest:sha` via `Blob/get` (when `blob2` is available), computes the downloaded file's SHA1, and throws `JmapError.digestMismatch` (retriable) on mismatch instead of returning the bytes. Covers both hydration paths (FileProvider `fetchContents` + FUSE `hydrateBlob`) since both route through `downloadBlob`. Degrades gracefully when the server can't supply a digest.
+**Lesson:** A digest you fetch but ignore is not an integrity check. Never write or mark-in-sync content you haven't verified.
+
+---
+
+## BUG-022 — Single-shot uploads stored without verifying the result
+**Status:** Fixed (commit 4d32623, reliability I2)
+**Symptom:** A blob corrupted on the wire during a simple POST (`uploadBlob`) or Direct HTTP PUT (`directWrite`) was accepted and recorded as a successful upload; the corruption was permanent and undetected.
+**Root cause:** Only the chunked/delta paths send `digest:sha` for the server to validate. The single-shot POST and PUT paths sent no digest, and the client never re-checked the stored blob.
+**Fix:** After `uploadBlob`/`directWrite`, re-fetch the stored blob's `digest:sha` (when `blob2` is available) and compare to the local file's SHA1 via a shared `verifyUploadedBlob` helper; throw `JmapError.digestMismatch` (retriable) on mismatch. Degrades gracefully without `blob2`.
+**Lesson:** Verify integrity in both directions. "The server returned a blobId" is not the same as "the server stored my bytes."
+
+---
+
+## BUG-023 — Half-open SSE connection stalls sync silently
+**Status:** Fixed (commit 9618a74, reliability D3)
+**Symptom:** Sync would silently stop for hours while the UI showed "idle / up to date." Only a restart (which re-establishes the push connection) recovered it.
+**Root cause:** The SSE read loop (`for try await line in bytes.lines`) had no idle timeout. On a half-open connection — TCP alive but the server has stopped sending, including its 60s keepalive pings — the loop blocks forever with no error, so the reconnect-with-backoff path never fires.
+**Fix:** `consumeWithIdleTimeout` wraps the stream in a task-group watchdog that throws `SSEIdleTimeoutError` if no line arrives within 150s (2.5× the ping). On that throw, `connectionLoop` signals a catch-up enumeration (recovering changes missed during the stall) and reconnects.
+**Lesson:** A push stream can die without an error. Any long-lived `for await` over a network stream needs an idle timeout, and recovery must include a catch-up — missed pushes are not re-sent.
+
+---
+
+## BUG-024 — Permanent upload errors retried until the failure threshold
+**Status:** Fixed (commit c733227, reliability D4)
+**Symptom:** An upload that could never succeed (e.g. its parent folder was deleted on the server) was retried 5 times before the failure threshold finally surfaced it — wasting retries and delaying the signal to the user.
+**Root cause:** In the create/set paths a permanent JMAP SetError became `JmapError.serverError(type)`, and `isRetriable` treated *every* server-error type except `"forbidden"` as retriable.
+**Fix:** `isRetriable` now treats a set of clearly-permanent SetError types (`notFound`, `invalidProperties`, `invalidArguments`, `tooLarge`) as non-retriable, so they surface promptly via the FileProvider error path. Transient errors (5xx/429/internal) still retry.
+**Lesson:** Classify errors by whether a retry could *ever* succeed. Looping on a permanent failure hides it from the user and wastes the retry budget.
+
+---
+
+## BUG-025 — Upload/download failure reasons never reached the UI
+**Status:** Fixed (commit 943b4f7, reliability V2/V3)
+**Symptom:** When an operation failed, the user saw it disappear (or saw only an aggregate "N stuck — press Retry") with no explanation of *why*; the reason was recorded only in the log.
+**Root cause:** `ActivityTracker` stored each failure's reason, but `ExtensionStatus.OperationHint` had no error field and `pushToStatus` forwarded only active/pending operations, so failures and their reasons never crossed to the app process.
+**Fix:** `OperationHint` carries an optional `error`; a tested `operationHints(from:)` builder includes failed operations (reason attached, listed first) and `pushToStatus` uses it; `MenuBarView` renders failures in red with the plain reason.
+**Lesson:** Tracking a failure reason is pointless if it never reaches the user. The path from "we recorded an error" to "the user can read it" must be wired and tested end to end.
+
+---
+
 ## Recurring mistakes to watch for
 
 - **`privacy: .public` omitted** — every interpolated value in a logger call needs it

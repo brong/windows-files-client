@@ -165,7 +165,7 @@ Key design points:
 
 **Inline fetch (small files):** `Blob/get { ids: [blobId], properties: ["data:asBase64", "size", "digest:sha"] }` — returns base64-encoded content inline for files ≤16KB. Avoids a separate HTTP round-trip.
 
-**Digest verification:** Fetch `digest:sha` or `digest:sha-256` via `Blob/get` concurrently with the download. Compare after transfer completes. Log mismatches but don't fail (network corruption is possible but rare; blocking would be worse).
+**Digest verification (enforce — do not just log).** Fetch `digest:sha` (or `digest:sha-256`) via `Blob/get` concurrently with the download and compare after the transfer completes. On mismatch, **reject the download**: do not write the bytes and do not mark the file in-sync. Treat it as a transient failure and retry (corruption is rare and usually clears on a re-fetch). Serving unverified bytes silently hands corrupt data to the user's apps while showing the file as synced. Degrade gracefully (skip verification) only when the server cannot supply a digest (no `blob2`). *(Earlier drafts of this doc said to log-and-continue; that was wrong — see pitfall #34. The Apple client enforces this as reliability item I1; the Windows client still logs-only and is pending the same fix.)*
 
 **Thumbnails:** `Blob/convert { create: { "t0": { imageConvert: { blobId, width, height, type: "image/png", autoOrient: true } } } }` — server-side resize, returns a new blobId for the thumbnail. Download the result as a normal blob.
 
@@ -913,3 +913,19 @@ Shipping percentage (int 0-100) over IPC loses precision for large files and mak
 
 **33. Chunked upload requires `blob2` — never send the deprecated `urn:ietf:params:jmap:blob`.**
 `Blob/set` with `dataSourceObjects` (combining chunks into a final blob) is the blob2 method. The legacy `Blob/upload` (RFC 9404) and the base `urn:ietf:params:jmap:blob` capability are deprecated and must not be sent in `using` arrays. Use `["urn:ietf:params:jmap:core", "https://www.fastmail.com/dev/blob2"]` and call `Blob/set`. Gate chunked uploads on `HasBlob2`. Always include `digest:sha` for each chunk and for the combined blob — it's supported by the server regardless of capability and gives the upload integrity check we need. (Spec: draft-ietf-jmap-blobext-01.)
+
+### Reliability & Recovery Lessons
+
+These came out of a dedicated reliability pass (see `windows/RELIABILITY.md` for the per-platform tracker). They are the difference between a demo and something a non-technical user can trust.
+
+**34. Enforce content digests in BOTH directions — never serve or record unverified bytes.**
+A digest you fetch but ignore is not integrity checking. On **download**, a mismatch must reject the transfer (don't write, don't mark in-sync) and retry — otherwise corrupt content is silently handed to the user's apps and looks synced. On **upload**, the chunked/delta `Blob/set` paths send `digest:sha` and the server validates it, but single-shot uploads (raw POST, Direct HTTP PUT) send no digest — so after one of those, re-fetch the stored blob's `digest:sha` and compare to the local file; on mismatch, re-upload. Degrade gracefully (skip) only when the server can't supply a digest (no `blob2`). (Apple: items I1/I2.)
+
+**35. A push stream can die without an error — add an idle timeout.**
+An SSE/event-source connection can go half-open: the TCP socket stays "alive" but the server stops sending, including its keepalive pings. A naive `for await line in stream` loop then blocks forever with no error, no reconnect, and the UI cheerfully shows "idle" while sync is dead. Wrap the read in an idle-timeout watchdog (we use 2.5× the ping interval): if no line arrives in that window, throw and let the reconnect loop re-establish. Crucially, recovery must also **catch up** — on reconnect, trigger a full change enumeration, since changes that occurred during the stall were never pushed. (Apple: item D3.)
+
+**36. Classify upload errors as permanent vs. transient — and surface, never silently loop.**
+Retrying a permanently-failing operation forever burns the retry budget and hides the problem. JMAP SetError types like `notFound` (parent/node gone), `invalidProperties` (cycle), `invalidArguments`, and `tooLarge` can never succeed on retry — classify them non-retriable so they surface promptly instead of looping to the failure threshold. Transient errors (5xx, 429, network, internal) keep retrying with backoff. Either way, once an operation is stuck, **surface the reason in plain language** (not just a count, not just the log) so the user knows what to do, and offer a manual retry / "Verify & Repair". (Apple: items D4, V2/V3, R1.)
+
+**37. Give the user an honest "last synced" signal and an escape hatch.**
+A stalled account is indistinguishable from an up-to-date one unless you show *when* it last successfully synced. Track and display a "last synced …" timestamp. Pair it with a user-triggerable **Verify & Repair** that reconciles local state against the server (re-fetch missing, prune stale via a consistent enumeration) and retries anything stuck — the understandable way back when something has drifted. (Apple: items V1, R1.)

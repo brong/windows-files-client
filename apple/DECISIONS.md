@@ -532,6 +532,53 @@ Keeping FUSE in its own target means the main app and extension have no FUSE sym
 
 ---
 
+## 20. Content Integrity: Enforce Digests, Both Directions
+
+**Chosen:** Verify `digest:sha` on download (reject + retry on mismatch) and re-verify the stored blob after single-shot uploads. Degrade gracefully only when the server can't supply a digest (no `blob2`).
+
+**Alternatives considered:**
+
+| Option | Notes |
+|--------|-------|
+| Log mismatches but continue (original plan) | Silently serves/records corrupt data; the digest is decorative |
+| Trust TLS only | TLS covers transport, not cache/proxy/storage corruption or server bugs |
+| Block forever on mismatch | A digest mismatch is usually transient; retry, don't dead-end |
+
+**Why enforce:** A digest you fetch but ignore is not an integrity check. On mismatch we throw `JmapError.digestMismatch` (retriable) so the OS retries rather than handing corrupt bytes to the user's apps and marking the file in-sync. Chunked/delta uploads are already server-validated via the `digest:sha` sent with `Blob/set`; the single-shot POST and Direct PUT paths needed a client-side re-check. (Reliability I1/I2; BUG-021/022.)
+
+---
+
+## 21. Push Liveness: SSE Idle-Timeout Watchdog
+
+**Chosen:** Wrap the SSE read loop in an idle-timeout watchdog (150s ≈ 2.5× the 60s server ping). No line in that window → throw → reconnect + catch-up enumeration. No separate fallback poll.
+
+**Alternatives considered:**
+
+| Option | Notes |
+|--------|-------|
+| Rely on TCP / URLSession to surface a dead connection | Half-open connections never error; the loop blocks forever, sync stalls silently |
+| Add an independent periodic poll | Redundant — the existing reconnect→`signalEnumerator` path already catches up; only *detection* was missing |
+
+**Why a watchdog:** The failure mode is a half-open stream (pings stopped, socket "alive"). The idle timeout converts that silent stall into a thrown error that the existing reconnect-with-backoff loop already handles; on reconnect we signal a working-set enumeration so changes missed during the stall are recovered (SSE does not re-send them). (Reliability D3; BUG-023.)
+
+---
+
+## 22. Error Retriability & User-Facing Recovery
+
+**Chosen:** Classify clearly-permanent JMAP SetError types (`notFound`, `invalidProperties`, `invalidArguments`, `tooLarge`) as non-retriable; surface failure *reasons* in the menu bar; provide a "Verify & Repair" action that force-reconciles (clear state token → full re-enumeration) and retries blocked uploads.
+
+**Alternatives considered:**
+
+| Option | Notes |
+|--------|-------|
+| Retry every server error until the failure threshold | Wastes the retry budget on operations that can never succeed; delays the user signal |
+| Surface only an aggregate "N stuck" count | The user can't tell *why* or what to do |
+| Repair = remove & re-add the account | Heavyweight, loses local pin state; force-reconcile achieves the same fix in place |
+
+**Why:** "Recover in a way the user can understand" was the goal. Permanent errors must surface promptly, with a plain reason, and the user needs one button that reconciles drift (re-fetch missing, prune stale via the generation-counter BFS) and retries anything stuck. (Reliability D4/V2/V3/R1; BUG-024/025.)
+
+---
+
 ## Summary Table
 
 | Decision | Chosen | Key Reason |
@@ -554,3 +601,7 @@ Keeping FUSE in its own target means the main app and extension have no FUSE sym
 | SSE on constrained | Skip (rely on polling) | Respects Low Data Mode intent |
 | Dependencies | SPM, minimal | First-party; source-built; narrow surface |
 | FUSE | Separate target | Different product; sandbox incompatible with extension |
+| Content integrity | Enforce digest both ways | A fetched-but-ignored digest is not an integrity check |
+| Push liveness | SSE idle-timeout watchdog | Half-open streams never error; detect, then reconnect + catch up |
+| Error retriability | Permanent SetErrors non-retriable | Don't loop on what can never succeed; surface it |
+| Recovery | Verify & Repair (force-reconcile) | One understandable button; fixes drift + retries stuck |
