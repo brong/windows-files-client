@@ -67,6 +67,23 @@ public func sseStateChangeHasFileNode(_ stateChange: SSEStateChange, accountId: 
     return accountChanges.keys.contains { $0 == "FileNode" || $0 == "StorageNode" }
 }
 
+// MARK: - Idle timeout
+
+/// Thrown when an SSE stream goes silent (no lines, including keepalive pings)
+/// for longer than the allowed idle interval — i.e. a half-open connection.
+public struct SSEIdleTimeoutError: Error {}
+
+/// Tracks the time of the most recent activity, for the idle watchdog.
+/// Uses the monotonic clock so wall-clock changes can't disturb the timeout.
+private actor IdleTicker {
+    private var lastNanos: UInt64 = DispatchTime.now().uptimeNanoseconds
+    func tick() { lastNanos = DispatchTime.now().uptimeNanoseconds }
+    func idle(forSeconds seconds: TimeInterval) -> Bool {
+        let elapsed = Double(DispatchTime.now().uptimeNanoseconds &- lastNanos) / 1_000_000_000
+        return elapsed >= seconds
+    }
+}
+
 // MARK: - PushWatcher
 
 /// SSE (Server-Sent Events) push watcher for JMAP StateChange notifications.
@@ -84,6 +101,12 @@ public actor PushWatcher {
     private var task: Task<Void, Never>?
     private var backoffSeconds: Double = 1.0
     private static let maxBackoff: Double = 60.0
+
+    /// SSE parser state, reset on each (re)connect.
+    private var sseParser = SSEParser()
+    /// Reconnect if no SSE line (including the 60s keepalive ping) arrives for
+    /// this long — 2.5x the ping interval allows for jitter without false trips.
+    private static let sseIdleTimeout: TimeInterval = 150
 
     #if canImport(os)
     private let logger = Logger(subsystem: "com.fastmail.files", category: "PushWatcher")
@@ -119,6 +142,42 @@ public actor PushWatcher {
         backoffSeconds = 1.0
     }
 
+    /// Consume an SSE line stream, invoking `onLine` for each line. Returns
+    /// normally when the stream ends. Throws `SSEIdleTimeoutError` if no line
+    /// (including keepalive pings) arrives for `idleTimeout` — catching a
+    /// half-open connection that would otherwise stall sync silently.
+    static func consumeWithIdleTimeout<S: AsyncSequence & Sendable>(
+        _ lines: S,
+        idleTimeout: TimeInterval,
+        onLine: @Sendable @escaping (String) async -> Void
+    ) async throws where S.Element == String {
+        let ticker = IdleTicker()
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            // Reader: consume the stream; completes when it ends normally.
+            group.addTask {
+                for try await line in lines {
+                    try Task.checkCancellation()
+                    await ticker.tick()
+                    await onLine(line)
+                }
+            }
+            // Watchdog: throw if no line has arrived within the idle window.
+            group.addTask {
+                let napNanos = UInt64(idleTimeout * 1_000_000_000)
+                while true {
+                    try await Task.sleep(nanoseconds: napNanos)
+                    if await ticker.idle(forSeconds: idleTimeout) {
+                        throw SSEIdleTimeoutError()
+                    }
+                }
+            }
+            // First task to finish decides the outcome: the reader completing
+            // (stream ended) returns; the watchdog throwing (idle) rethrows.
+            defer { group.cancelAll() }
+            try await group.next()
+        }
+    }
+
     private func connectionLoop() async {
         while !Task.isCancelled {
             // Bandwidth gate: skip SSE entirely on constrained/offline connections.
@@ -143,6 +202,14 @@ public actor PushWatcher {
                 await delegate?.pushWatcherDidReconnect(self)
             } catch is CancellationError {
                 return
+            } catch is SSEIdleTimeoutError {
+                // Half-open connection: no pings for sseIdleTimeout. Catch up via
+                // an enumeration (in case we missed changes while silently stalled),
+                // then fall through to reconnect.
+                #if canImport(os)
+                logger.warning("[\(self.accountId, privacy: .public)] SSE idle timeout — reconnecting and catching up")
+                #endif
+                await delegate?.pushWatcherDidReconnect(self)
             } catch {
                 #if canImport(os)
                 logger.warning("[\(self.accountId, privacy: .public)] SSE connection error: \(error.localizedDescription, privacy: .public). Retrying in \(self.backoffSeconds, privacy: .public)s")
@@ -212,25 +279,31 @@ public actor PushWatcher {
         logger.info("[\(self.accountId, privacy: .public)] SSE connected")
         #endif
 
-        // Parse SSE stream using the extracted parser
-        var parser = SSEParser()
-        var lineCount = 0
-
-        for try await line in bytes.lines {
-            if Task.isCancelled { return }
-            lineCount += 1
-
-            if let event = parser.feedLine(line) {
-                TrafficLog.shared.log("← SSE event [\(accountId)] type=\(event.type.isEmpty ? "(state)" : event.type) data=\(event.data.prefix(200))")
-                await handleEvent(event)
-            }
+        // Parse the SSE stream with an idle-timeout watchdog: if no line
+        // (including the server's keepalive pings) arrives for sseIdleTimeout,
+        // treat the connection as half-open and throw, so connectionLoop
+        // reconnects and catches up rather than stalling sync silently.
+        sseParser.reset()
+        try await Self.consumeWithIdleTimeout(
+            bytes.lines, idleTimeout: Self.sseIdleTimeout
+        ) { [weak self] line in
+            await self?.handleSSELine(line)
         }
-        // If bytes.lines throws (network drop, server close), connectionLoop catches it and
-        // retries with backoff. The next connect() sends the cached token; if it was expired
-        // the server returns 401 on the initial response, which the handler above invalidates.
-        // We do NOT invalidate proactively here — a genuine network drop must not cycle the token.
+        // If bytes.lines throws (network drop, server close) or the idle timeout
+        // fires, connectionLoop catches it and retries with backoff. The next
+        // connect() sends the cached token; if it was expired the server returns
+        // 401 on the initial response, which the handler above invalidates. We do
+        // NOT invalidate proactively here — a genuine network drop must not cycle
+        // the token.
 
-        TrafficLog.shared.log("← SSE closed [\(accountId)] after \(lineCount) lines")
+        TrafficLog.shared.log("← SSE closed [\(accountId)]")
+    }
+
+    private func handleSSELine(_ line: String) async {
+        if let event = sseParser.feedLine(line) {
+            TrafficLog.shared.log("← SSE event [\(accountId)] type=\(event.type.isEmpty ? "(state)" : event.type) data=\(event.data.prefix(200))")
+            await handleEvent(event)
+        }
     }
 
     private func handleEvent(_ event: SSEParser.Event) async {
