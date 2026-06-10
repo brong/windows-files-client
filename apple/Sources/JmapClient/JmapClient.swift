@@ -654,7 +654,9 @@ public actor JmapClient {
             onBytesSent: progress.map { cb in { @Sendable sent, total in cb(sent, total) } })
         try checkHTTPStatus(httpResponse, data: data)
 
-        return try decoder.decode(BlobUploadResponse.self, from: data)
+        let result = try decoder.decode(BlobUploadResponse.self, from: data)
+        try await verifyUploadedBlob(accountId: accountId, blobId: result.blobId, fileURL: fileURL)
+        return result
     }
 
     // MARK: - Chunked Upload
@@ -1257,6 +1259,20 @@ public actor JmapClient {
         return blob["digest:sha"]?.stringValue
     }
 
+    /// Verify a just-uploaded blob's server-side content matches the local file.
+    /// No-op when the server cannot supply a digest (no blob2 capability).
+    /// Throws `JmapError.digestMismatch` on mismatch so the caller retries the upload
+    /// rather than recording a corrupt blob as successfully synced.
+    private func verifyUploadedBlob(accountId: String, blobId: String, fileURL: URL) async throws {
+        guard let serverSha = await serverBlobDigestSha(accountId: accountId, blobId: blobId)
+        else { return }
+        let localSha = (try? sha1OfFile(fileURL)) ?? ""
+        if localSha != serverSha {
+            TrafficLog.shared.log("← ERR upload [\(accountId)] digest mismatch blobId=\(blobId): local \(localSha) server \(serverSha)")
+            throw JmapError.digestMismatch(blobId)
+        }
+    }
+
     /// Returns true if the server supports Direct HTTP Write for this account.
     /// Requires a live session (may trigger session fetch if not yet cached).
     public func hasDirectWrite(accountId: String) async throws -> Bool {
@@ -1298,6 +1314,7 @@ public actor JmapClient {
         try checkHTTPStatus(httpResponse, data: data)
 
         let blob = try decoder.decode(BlobUploadResponse.self, from: data)
+        try await verifyUploadedBlob(accountId: accountId, blobId: blob.blobId, fileURL: fileURL)
 
         // Set modified separately — the PUT does not carry a timestamp.
         // Send null if no client timestamp so the server stamps it with current time.

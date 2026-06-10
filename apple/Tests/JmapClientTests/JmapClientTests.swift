@@ -159,6 +159,36 @@ private let testSessionWithBlob2 = """
 }
 """
 
+private let testSessionDirectWriteBlob2 = """
+{
+    "state": "test-session-state-1",
+    "apiUrl": "https://api.example.com/jmap/",
+    "downloadUrl": "https://api.example.com/jmap/download/{accountId}/{blobId}/{name}?type={type}",
+    "uploadUrl": "https://api.example.com/jmap/upload/{accountId}/",
+    "eventSourceUrl": "https://api.example.com/jmap/eventsource/",
+    "capabilities": {
+        "urn:ietf:params:jmap:core": {},
+        "https://www.fastmail.com/dev/filenode": {},
+        "https://www.fastmail.com/dev/blob2": {}
+    },
+    "accounts": {
+        "u123": {
+            "name": "test@example.com",
+            "isPersonal": true,
+            "accountCapabilities": {
+                "https://www.fastmail.com/dev/filenode": {
+                    "webWriteUrlTemplate": "https://write.example.com/write/{id}"
+                },
+                "https://www.fastmail.com/dev/blob2": {}
+            }
+        }
+    },
+    "primaryAccounts": {
+        "https://www.fastmail.com/dev/filenode": "u123"
+    }
+}
+"""
+
 private func makeTestClient() -> JmapClient {
     let sessionURL = URL(string: "https://api.example.com/jmap/session")!
     let tokenProvider = StaticTokenProvider(token: "test-token")
@@ -280,6 +310,100 @@ extension NetworkTests {
             type: "text/plain", destinationDir: tmp)
         #expect(try Data(contentsOf: url) == fileBytes)
         try? FileManager.default.removeItem(at: url)
+    }
+
+    @Test func uploadBlobRejectsWhenServerDigestMismatches() async throws {
+        let client = makeTestClient()
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try Data("local file we are uploading".utf8).write(to: tmp)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        // Server's stored digest is of different bytes — simulates transit corruption.
+        let serverDigest = sha1Digest(Data("corrupted on the wire".utf8))
+
+        MockURLProtocol.handler = { request in
+            let url = request.url!
+            if url.path.contains("session") {
+                return jsonResponse(url: url, json: testSessionWithBlob2)
+            }
+            if url.path.contains("/upload/") {
+                return jsonResponse(
+                    url: url, json: #"{"blobId":"G1","size":27,"type":"text/plain"}"#, statusCode: 201)
+            }
+            return jsonResponse(url: url, json: """
+            {"methodResponses":[["Blob/get",{"accountId":"u123","list":[{"id":"G1","digest:sha":"\(serverDigest)"}],"notFound":[]},"b0"]],"sessionState":"ss1"}
+            """)
+        }
+        defer { MockURLProtocol.handler = nil }
+
+        do {
+            _ = try await client.uploadBlob(accountId: "u123", fileURL: tmp, contentType: "text/plain")
+            Issue.record("uploadBlob should reject when the stored blob's digest doesn't match the local file")
+        } catch let e as JmapError {
+            guard case .digestMismatch = e else {
+                Issue.record("expected .digestMismatch, got \(e)"); return
+            }
+        }
+    }
+
+    @Test func uploadBlobSucceedsWhenServerDigestMatches() async throws {
+        let client = makeTestClient()
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let bytes = Data("local file we are uploading".utf8)
+        try bytes.write(to: tmp)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let serverDigest = sha1Digest(bytes)
+
+        MockURLProtocol.handler = { request in
+            let url = request.url!
+            if url.path.contains("session") {
+                return jsonResponse(url: url, json: testSessionWithBlob2)
+            }
+            if url.path.contains("/upload/") {
+                return jsonResponse(
+                    url: url, json: #"{"blobId":"G1","size":27,"type":"text/plain"}"#, statusCode: 201)
+            }
+            return jsonResponse(url: url, json: """
+            {"methodResponses":[["Blob/get",{"accountId":"u123","list":[{"id":"G1","digest:sha":"\(serverDigest)"}],"notFound":[]},"b0"]],"sessionState":"ss1"}
+            """)
+        }
+        defer { MockURLProtocol.handler = nil }
+
+        let result = try await client.uploadBlob(accountId: "u123", fileURL: tmp, contentType: "text/plain")
+        #expect(result.blobId == "G1")
+    }
+
+    @Test func directWriteRejectsWhenServerDigestMismatches() async throws {
+        let client = makeTestClient()
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try Data("direct write payload".utf8).write(to: tmp)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let serverDigest = sha1Digest(Data("corrupted on the wire".utf8))
+
+        MockURLProtocol.handler = { request in
+            let url = request.url!
+            if url.path.contains("session") {
+                return jsonResponse(url: url, json: testSessionDirectWriteBlob2)
+            }
+            if url.host == "write.example.com" {
+                return jsonResponse(
+                    url: url, json: #"{"blobId":"G1","size":20,"type":"text/plain"}"#, statusCode: 200)
+            }
+            // Verification's Blob/get (runs before the timestamp FileNode/set, so that's all we need).
+            return jsonResponse(url: url, json: """
+            {"methodResponses":[["Blob/get",{"accountId":"u123","list":[{"id":"G1","digest:sha":"\(serverDigest)"}],"notFound":[]},"b0"]],"sessionState":"ss1"}
+            """)
+        }
+        defer { MockURLProtocol.handler = nil }
+
+        do {
+            _ = try await client.directWrite(
+                accountId: "u123", nodeId: "N1", fileURL: tmp, contentType: "text/plain")
+            Issue.record("directWrite should reject when the stored blob's digest doesn't match the local file")
+        } catch let e as JmapError {
+            guard case .digestMismatch = e else {
+                Issue.record("expected .digestMismatch, got \(e)"); return
+            }
+        }
     }
 
     @Test func downloadBlobSkipsVerificationWithoutBlob2() async throws {
