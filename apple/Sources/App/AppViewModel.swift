@@ -136,6 +136,13 @@ final class AppViewModel: ObservableObject {
         )
     }
 
+    /// Human-readable "last synced …" line for the menu bar header.
+    /// Uses the most recent successful sync across all accounts.
+    var lastSyncedDescription: String {
+        let latest = extensionStatuses.values.compactMap { $0.lastSyncTime }.max()
+        return MenuBarState.lastSyncedDescription(latest)
+    }
+
     var activeOperationHints: [ExtensionStatus.OperationHint] {
         extensionStatuses.values.flatMap { $0.operationHints }
     }

@@ -16,9 +16,14 @@ struct MenuBarView: View {
             Image(systemName: state.symbolName)
                 .foregroundColor(headerIconColor(for: state))
                 .imageScale(.medium)
-            Text(state.statusText)
-                .font(.callout)
-                .fontWeight(.medium)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(state.statusText)
+                    .font(.callout)
+                    .fontWeight(.medium)
+                Text(appState.lastSyncedDescription)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
             Spacer()
         }
         .padding(.horizontal, 8)

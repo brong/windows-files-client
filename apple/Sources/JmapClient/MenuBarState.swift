@@ -63,6 +63,25 @@ public enum MenuBarState: Equatable {
         return false
     }
 
+    /// A human-readable "last synced" description for surfacing `lastSyncTime` in the UI.
+    /// Informational only — staleness is not treated as an error here (a quiet account
+    /// legitimately may not sync for a while; detecting a genuine stall is a separate concern).
+    public static func lastSyncedDescription(_ lastSync: Date?, now: Date = Date()) -> String {
+        guard let lastSync else { return "Not yet synced" }
+        let seconds = max(0, now.timeIntervalSince(lastSync))
+        if seconds < 60 { return "Last synced just now" }
+        let minutes = Int(seconds / 60)
+        if minutes < 60 {
+            return "Last synced \(minutes) \(minutes == 1 ? "minute" : "minutes") ago"
+        }
+        let hours = minutes / 60
+        if hours < 24 {
+            return "Last synced \(hours) \(hours == 1 ? "hour" : "hours") ago"
+        }
+        let days = hours / 24
+        return "Last synced \(days) \(days == 1 ? "day" : "days") ago"
+    }
+
     /// Derives MenuBarState from raw activity and status data.
     /// Priority order: error > blockedUploads > pending > syncing > offline > idle
     public static func derive(

@@ -167,3 +167,36 @@ private func makeStatus(_ domainId: String, state: ExtensionStatus.State, error:
 @Test func testPausedUserRequestedStatusText() {
     #expect(MenuBarState.paused(reason: .userRequested).statusText == "Sync paused")
 }
+
+// MARK: - Last synced description (V1: surface lastSyncTime)
+
+private let v1Now = Date(timeIntervalSince1970: 1_700_000_000)
+
+@Test func testLastSyncedNeverSynced() {
+    #expect(MenuBarState.lastSyncedDescription(nil, now: v1Now) == "Not yet synced")
+}
+
+@Test func testLastSyncedJustNow() {
+    #expect(MenuBarState.lastSyncedDescription(v1Now.addingTimeInterval(-10), now: v1Now)
+        == "Last synced just now")
+}
+
+@Test func testLastSyncedMinuteSingular() {
+    #expect(MenuBarState.lastSyncedDescription(v1Now.addingTimeInterval(-60), now: v1Now)
+        == "Last synced 1 minute ago")
+}
+
+@Test func testLastSyncedMinutesPlural() {
+    #expect(MenuBarState.lastSyncedDescription(v1Now.addingTimeInterval(-300), now: v1Now)
+        == "Last synced 5 minutes ago")
+}
+
+@Test func testLastSyncedHours() {
+    #expect(MenuBarState.lastSyncedDescription(v1Now.addingTimeInterval(-3 * 3600), now: v1Now)
+        == "Last synced 3 hours ago")
+}
+
+@Test func testLastSyncedDays() {
+    #expect(MenuBarState.lastSyncedDescription(v1Now.addingTimeInterval(-2 * 86400), now: v1Now)
+        == "Last synced 2 days ago")
+}
