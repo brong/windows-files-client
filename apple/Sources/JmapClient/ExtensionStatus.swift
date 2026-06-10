@@ -32,12 +32,15 @@ public struct ExtensionStatus: Codable, Sendable {
     public struct OperationHint: Codable, Sendable, Identifiable {
         public var id: String
         public var fileName: String
-        public var actionVerb: String  // "Uploading", "Downloading", "Syncing", "Deleting"
+        public var actionVerb: String  // "Uploading", "Downloading", "Syncing", "Deleting", "Failed"
+        /// Plain-language failure reason when this operation failed; nil for in-flight work.
+        public var error: String?
 
-        public init(id: String, fileName: String, actionVerb: String) {
+        public init(id: String, fileName: String, actionVerb: String, error: String? = nil) {
             self.id = id
             self.fileName = fileName
             self.actionVerb = actionVerb
+            self.error = error
         }
     }
 

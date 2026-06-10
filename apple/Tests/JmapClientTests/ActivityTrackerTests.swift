@@ -37,6 +37,31 @@ import Testing
         #expect(snap.activities[0].error == "network timeout")
     }
 
+    @Test func operationHintsSurfaceFailureReasons() {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        func activity(_ id: String, _ name: String, _ action: ActivityTracker.Activity.Action,
+                      _ status: ActivityTracker.Activity.Status, _ err: String?)
+            -> ActivityTracker.Activity {
+            ActivityTracker.Activity(
+                id: id, accountId: "u1", fileName: name, action: action, fileSize: nil,
+                startedAt: now, completedAt: nil, progress: nil, status: status, error: err)
+        }
+        let active = activity("ul1", "doc.txt", .upload, .active, nil)
+        let failed = activity("dl1", "photo.jpg", .download, .error, "Failed an integrity check")
+        let completed = activity("ul2", "old.txt", .upload, .completed, nil)
+
+        let hints = ActivityTracker.operationHints(from: [active, failed, completed])
+
+        // Completed work is not surfaced; failures come first, carrying their reason.
+        #expect(hints.count == 2)
+        #expect(hints[0].fileName == "photo.jpg")
+        #expect(hints[0].actionVerb == "Failed")
+        #expect(hints[0].error == "Failed an integrity check")
+        #expect(hints[1].fileName == "doc.txt")
+        #expect(hints[1].actionVerb == "Uploading")
+        #expect(hints[1].error == nil)
+    }
+
     @Test func updateProgressStored() async {
         let tracker = ActivityTracker()
         await tracker.start(id: "op1", accountId: "u1", fileName: "large.bin", action: .upload, fileSize: 10_000_000)

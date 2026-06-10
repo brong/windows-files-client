@@ -112,13 +112,17 @@ struct MenuBarView: View {
     private func operationSection(hints: [ExtensionStatus.OperationHint]) -> some View {
         let shown = hints.prefix(5)
         ForEach(shown) { hint in
+            let failed = hint.error != nil
             HStack(spacing: 6) {
                 Image(systemName: iconForVerb(hint.actionVerb))
-                    .foregroundColor(.blue)
+                    .foregroundColor(failed ? .red : .blue)
                     .frame(width: 16)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(hint.fileName).lineLimit(1)
-                    Text(hint.actionVerb).font(.caption).foregroundColor(.secondary)
+                    Text(hint.error ?? hint.actionVerb)
+                        .font(.caption)
+                        .foregroundColor(failed ? .red : .secondary)
+                        .lineLimit(2)
                 }
             }
             .padding(.vertical, 2)
@@ -135,6 +139,7 @@ struct MenuBarView: View {
         case "Uploading":   return "arrow.up.doc"
         case "Downloading": return "arrow.down.doc"
         case "Deleting":    return "trash"
+        case "Failed":      return "exclamationmark.triangle"
         default:            return "arrow.triangle.2.circlepath"
         }
     }

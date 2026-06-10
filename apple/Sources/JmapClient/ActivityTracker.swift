@@ -180,25 +180,43 @@ public actor ActivityTracker {
     /// Darwin notification name for cross-process activity updates.
     nonisolated(unsafe) public static let darwinNotificationName = "com.fastmail.files.activityChanged" as CFString
 
+    /// Build the UI operation hints from activities: failures (with their plain
+    /// reason) first so the user can't miss them, then in-flight work
+    /// (active/pending), capped at `limit`.
+    static func operationHints(
+        from activities: [Activity], limit: Int = 5
+    ) -> [ExtensionStatus.OperationHint] {
+        let failed = activities.filter { $0.status == .error }
+        let active = activities.filter { $0.status == .active }
+        let pending = activities.filter { $0.status == .pending }
+        return (failed + active + pending).prefix(limit).map { a in
+            ExtensionStatus.OperationHint(
+                id: a.id,
+                fileName: a.fileName,
+                actionVerb: a.status == .error ? "Failed" : Self.verb(for: a.action),
+                error: a.status == .error ? a.error : nil)
+        }
+    }
+
+    private static func verb(for action: Activity.Action) -> String {
+        switch action {
+        case .upload:   return "Uploading"
+        case .download: return "Downloading"
+        case .sync:     return "Syncing"
+        case .delete:   return "Deleting"
+        }
+    }
+
     /// Push current active/pending counts and hints into the ExtensionStatus file.
     private func pushToStatus() {
         guard let writer = statusWriter else { return }
         let activeItems = activities.values.filter { $0.status == .active }
         let pendingItems = activities.values.filter { $0.status == .pending }
-        let hints = (activeItems + pendingItems).prefix(5).map { a -> ExtensionStatus.OperationHint in
-            let verb: String
-            switch a.action {
-            case .upload:   verb = "Uploading"
-            case .download: verb = "Downloading"
-            case .sync:     verb = "Syncing"
-            case .delete:   verb = "Deleting"
-            }
-            return ExtensionStatus.OperationHint(id: a.id, fileName: a.fileName, actionVerb: verb)
-        }
+        let hints = Self.operationHints(from: Array(activities.values))
         writer.setActivityCounts(
             active: activeItems.count,
             pending: pendingItems.count,
-            hints: Array(hints)
+            hints: hints
         )
     }
 
