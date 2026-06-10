@@ -38,10 +38,17 @@ handles several of the architectural gaps**, with tests:
 | R5 cache corruption | gap | ✅ SQLite WAL + temp-DB fallback (`NodeDatabase.swift:109`) |
 | R2 watchdog | gap | ✅ N/A — OS manages the FileProvider extension lifecycle |
 
-Remaining on **Apple**: **I1 ✅ done** (`cff4881` — `downloadBlob` now verifies
-`digest:sha`), then I2, D3 (SSE stall), V1 (surface `lastSyncTime`), and the
-partial items D4/V2/R1. Because we develop and test on a Mac, Apple fixes land
-first; Windows follows using this same roadmap.
+Apple progress (Mac fixes land first, since we build/test here; Windows follows
+using this same roadmap):
+- **I1 ✅ done** (`cff4881`) — `downloadBlob` verifies `digest:sha`; corrupt
+  downloads are rejected, not served.
+- **I2 ✅ done** (`4d32623`) — `uploadBlob`/`directWrite` re-verify the stored
+  blob's digest (the chunked/delta paths were already server-validated).
+- **V1 ✅ done** (`dbbc196`) — menu bar shows "Last synced …" (informational).
+- **D3** (SSE idle-timeout + fallback poll) — next; needs a small PushWatcher
+  testability refactor and a fallback-poll decision.
+- Remaining: D4 (escalate stuck uploads), V2/V3 (surface push/poll/quota
+  failures), R1 (verify & repair action).
 
 ## Severity legend
 
