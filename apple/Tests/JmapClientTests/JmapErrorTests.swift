@@ -34,6 +34,20 @@ import Testing
     #expect(!JmapError.httpError(404, nil).isRetriable)
 }
 
+@Test func testPermanentServerErrorTypesAreNotRetriable() {
+    // JMAP SetError types that can never succeed on retry must surface promptly
+    // instead of burning the upload-failure retry budget.
+    #expect(!JmapError.serverError("notFound", nil).isRetriable)
+    #expect(!JmapError.serverError("invalidProperties", nil).isRetriable)
+    #expect(!JmapError.serverError("invalidArguments", nil).isRetriable)
+    #expect(!JmapError.serverError("tooLarge", nil).isRetriable)
+}
+
+@Test func testTransientServerErrorsRemainRetriable() {
+    #expect(JmapError.serverError("internalError", nil).isRetriable)
+    #expect(JmapError.serverError("serverUnavailable", nil).isRetriable)
+}
+
 // MARK: - fileProviderError
 
 @Test func testUnauthorizedMapsToNotAuthenticated() {

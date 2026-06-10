@@ -26,6 +26,12 @@ public enum JmapError: Error, Sendable {
     case blobTooLarge(Int, Int)        // fileSize, maxSize
     case digestMismatch(String)        // blobId — downloaded content did not match server digest
 
+    /// JMAP SetError `type` values that indicate a permanent failure for the same
+    /// request — retrying cannot succeed, so the upload should be surfaced, not looped.
+    private static let permanentServerErrorTypes: Set<String> = [
+        "forbidden", "notFound", "invalidProperties", "invalidArguments", "tooLarge",
+    ]
+
     public var isRetriable: Bool {
         switch self {
         case .httpError(let code, _):
@@ -39,7 +45,9 @@ public enum JmapError: Error, Sendable {
              .missingCapability, .noAccountId, .keychainError:
             return false
         case .serverError(let type, _):
-            return type != "forbidden"
+            // Most server errors are transient (overload, internal). A few SetError
+            // types can never succeed on retry — surface them instead of looping.
+            return !Self.permanentServerErrorTypes.contains(type)
         case .notFound, .alreadyExists, .cannotCalculateChanges, .uploadFailed:
             return false
         }
