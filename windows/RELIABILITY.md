@@ -23,6 +23,26 @@ its own cache and the network, rarely verifies, and fails silently when
 something goes wrong.** Bulletproofing is mostly about adding verification,
 making failure visible, and providing understandable recovery.
 
+## Platform status
+
+The gaps below were found in the **Windows** client (the most mature), and the
+`file:line` citations are all Windows C#. The **Apple** (Swift) client is a
+different, DB-backed implementation and a separate review found it **already
+handles several of the architectural gaps**, with tests:
+
+| Gap | Windows | Apple |
+|---|---|---|
+| I3 conflict (dirty + server change) | gap | ✅ conflict-copy / `onExists:newest` (`FileProviderExtension.swift:689`) |
+| D2 server-delete pruning | gap | ✅ generation-counter BFS, tested (`NodeDatabase.swift:240`) |
+| R3 state-token crash window | gap | ✅ token-after-changes, idempotent replay (`SyncEngine.swift:65`) |
+| R5 cache corruption | gap | ✅ SQLite WAL + temp-DB fallback (`NodeDatabase.swift:109`) |
+| R2 watchdog | gap | ✅ N/A — OS manages the FileProvider extension lifecycle |
+
+Remaining on **Apple**: **I1 ✅ done** (`cff4881` — `downloadBlob` now verifies
+`digest:sha`), then I2, D3 (SSE stall), V1 (surface `lastSyncTime`), and the
+partial items D4/V2/R1. Because we develop and test on a Mac, Apple fixes land
+first; Windows follows using this same roadmap.
+
 ## Severity legend
 
 | | Meaning |
