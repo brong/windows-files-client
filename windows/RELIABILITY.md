@@ -45,8 +45,9 @@ using this same roadmap):
 - **I2 ✅ done** (`4d32623`) — `uploadBlob`/`directWrite` re-verify the stored
   blob's digest (the chunked/delta paths were already server-validated).
 - **V1 ✅ done** (`dbbc196`) — menu bar shows "Last synced …" (informational).
-- **D3** (SSE idle-timeout + fallback poll) — next; needs a small PushWatcher
-  testability refactor and a fallback-poll decision.
+- **D3 ✅ done** (`9618a74`) — SSE idle-timeout watchdog detects half-open
+  connections and reconnects + catches up. (No separate fallback poll needed:
+  the existing reconnect→`signalEnumerator` path recovers missed changes.)
 - Remaining: D4 (escalate stuck uploads), V2/V3 (surface push/poll/quota
   failures), R1 (verify & repair action).
 
