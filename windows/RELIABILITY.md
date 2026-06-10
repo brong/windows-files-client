@@ -48,8 +48,19 @@ using this same roadmap):
 - **D3 ✅ done** (`9618a74`) — SSE idle-timeout watchdog detects half-open
   connections and reconnects + catches up. (No separate fallback poll needed:
   the existing reconnect→`signalEnumerator` path recovers missed changes.)
-- Remaining: D4 (escalate stuck uploads), V2/V3 (surface push/poll/quota
-  failures), R1 (verify & repair action).
+- **D4 ✅ done** (`c733227`) — permanent JMAP SetErrors (notFound, invalidProperties,
+  invalidArguments, tooLarge) are classified non-retriable, so they surface
+  promptly instead of burning the upload-retry budget. (The count-based
+  threshold→`blockedUploadCount`→"N stuck — press Retry" escalation already
+  existed.)
+- Remaining:
+  - **V2/V3** — surface *reasons*: `ActivityTracker` records failure `error`
+    strings, but `OperationHint` has no error field and `pushToStatus` forwards
+    only active/pending ops, so reasons never reach the UI. Multi-layer UI
+    plumbing (extend `OperationHint`, forward failures, render in MenuBar/
+    Diagnostics); verify via xcodebuild.
+  - **R1** — Verify & Repair action: larger feature; repair routine in the sync
+    layer (re-check digests / reconcile / re-enqueue) with a user-facing trigger.
 
 ## Severity legend
 
