@@ -57,12 +57,14 @@ using this same roadmap):
   `SyncEngine.verifyAgainstServer()` reports DB↔server drift, and the action
   forces a full reconcile (re-fetch missing, prune stale) + retries blocked
   uploads, per account.
-- Remaining:
-  - **V2/V3** — surface *reasons*: `ActivityTracker` records failure `error`
-    strings, but `OperationHint` has no error field and `pushToStatus` forwards
-    only active/pending ops, so reasons never reach the UI. Multi-layer UI
-    plumbing (extend `OperationHint`, forward failures, render in MenuBar/
-    Diagnostics); verify via xcodebuild. This is the last Apple item.
+- **V2/V3 ✅ done** (`943b4f7`) — `OperationHint` carries an error; failed
+  operations are forwarded with their reason and rendered in red in the menu
+  bar. Failure reasons now reach the user instead of living only in the log.
+
+**Apple reliability tranche complete.** All gaps that apply to the Apple client
+are resolved (I1/I2/V1/D3/D4/R1/V2/V3 this pass; I3/D2/R3/R5/R2 already handled).
+Next: port these fixes to the **Windows** C# client using this roadmap, and F1
+(conditional writes) once the draft + server land.
 
 ## Severity legend
 
