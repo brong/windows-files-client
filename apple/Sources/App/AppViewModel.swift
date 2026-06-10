@@ -462,6 +462,28 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    /// Verify & Repair: for every synced account, force a full server
+    /// reconciliation (clearing the state token re-fetches missing nodes and
+    /// prunes stale ones via the generation-counter BFS) and retry any blocked
+    /// uploads. The user's escape hatch when something looks out of sync.
+    func verifyAndRepair() {
+        guard let containerURL = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: Self.appGroupId) else { return }
+        let domainIds = logins.flatMap { login in
+            login.accounts.filter { $0.isSynced }.map { login.domainId(for: $0.accountId) }
+        }
+        for domainId in domainIds {
+            Task {
+                let db = NodeDatabase(containerURL: containerURL, accountId: domainId)
+                await db.setStateToken("")
+                await db.setEnumerationFailureCount(0)
+                await db.resetAllUploadFailures()
+                ExtensionStatusWriter(containerURL: containerURL, domainId: domainId).setSyncing()
+                registrar.signal(domainId: domainId)
+            }
+        }
+    }
+
     func retryAllBlockedUploads() {
         for status in extensionStatuses.values where status.blockedUploadCount > 0 {
             retryBlockedUploads(for: status.domainId)

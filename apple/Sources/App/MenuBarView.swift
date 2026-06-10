@@ -87,6 +87,9 @@ struct MenuBarView: View {
                     }
                 }
             }
+            Button("Verify & Repair") {
+                appState.verifyAndRepair()
+            }
         }
 
         Button("Settings...") {

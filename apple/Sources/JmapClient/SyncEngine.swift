@@ -102,4 +102,32 @@ public actor SyncEngine {
         #endif
         return (allUpdated, changes.destroyed, changes.newState)
     }
+
+    // MARK: - Verify & Repair
+
+    /// Drift between the local database and the server's node set, used by the
+    /// "Verify & Repair" action to tell the user what's out of sync.
+    public struct VerifyReport: Sendable, Equatable {
+        public let serverCount: Int
+        public let localCount: Int
+        /// Node IDs the server has that the local DB is missing (will be fetched on repair).
+        public let missingLocally: [String]
+        /// Node IDs the local DB has that the server no longer has (will be pruned on repair).
+        public let staleLocally: [String]
+        public var isConsistent: Bool { missingLocally.isEmpty && staleLocally.isEmpty }
+        public var driftCount: Int { missingLocally.count + staleLocally.count }
+    }
+
+    /// Compare the local node set against the server's and report any drift.
+    /// Read-only — the repair step (full re-enumeration) is what actually fixes it.
+    public func verifyAgainstServer() async throws -> VerifyReport {
+        let serverIds = Set(try await client.queryAllNodeIds(accountId: accountId))
+        let localIds = Set(await database.allEntries.keys)
+        return VerifyReport(
+            serverCount: serverIds.count,
+            localCount: localIds.count,
+            missingLocally: serverIds.subtracting(localIds).sorted(),
+            staleLocally: localIds.subtracting(serverIds).sorted()
+        )
+    }
 }

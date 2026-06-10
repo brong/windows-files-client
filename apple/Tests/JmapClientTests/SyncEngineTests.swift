@@ -184,5 +184,60 @@ extension NetworkTests {
             // expected
         }
     }
+
+    // MARK: - verifyAgainstServer (Verify & Repair / R1)
+
+    @Test func verifyAgainstServerReportsDrift() async throws {
+        let (db, _) = try makeTmpDB()
+        // Local DB knows A, B, C.
+        await db.upsert(nodeId: "A", entry: NodeCacheEntry(parentId: "home", name: "a", isFolder: false))
+        await db.upsert(nodeId: "B", entry: NodeCacheEntry(parentId: "home", name: "b", isFolder: false))
+        await db.upsert(nodeId: "C", entry: NodeCacheEntry(parentId: "home", name: "c", isFolder: false))
+
+        // Server has A, B, D — D is new (missing locally), C was deleted (stale locally).
+        MockURLProtocol.handler = { request in
+            let url = request.url!
+            if url.path.contains("session") {
+                return syncJsonResponse(url: url, json: syncTestSession)
+            }
+            return syncJsonResponse(url: url, json: """
+            {"methodResponses":[["FileNode/query",{"accountId":"u123","queryState":"q1","ids":["A","B","D"],"total":3},"q0"]],"sessionState":"ss1"}
+            """)
+        }
+        defer { MockURLProtocol.handler = nil }
+
+        let engine = SyncEngine(client: makeSyncClient(), database: db, accountId: "u123")
+        let report = try await engine.verifyAgainstServer()
+
+        #expect(report.serverCount == 3)
+        #expect(report.localCount == 3)
+        #expect(report.missingLocally == ["D"])
+        #expect(report.staleLocally == ["C"])
+        #expect(report.isConsistent == false)
+        #expect(report.driftCount == 2)
+    }
+
+    @Test func verifyAgainstServerConsistentWhenInSync() async throws {
+        let (db, _) = try makeTmpDB()
+        await db.upsert(nodeId: "A", entry: NodeCacheEntry(parentId: "home", name: "a", isFolder: false))
+        await db.upsert(nodeId: "B", entry: NodeCacheEntry(parentId: "home", name: "b", isFolder: false))
+
+        MockURLProtocol.handler = { request in
+            let url = request.url!
+            if url.path.contains("session") {
+                return syncJsonResponse(url: url, json: syncTestSession)
+            }
+            return syncJsonResponse(url: url, json: """
+            {"methodResponses":[["FileNode/query",{"accountId":"u123","queryState":"q1","ids":["A","B"],"total":2},"q0"]],"sessionState":"ss1"}
+            """)
+        }
+        defer { MockURLProtocol.handler = nil }
+
+        let engine = SyncEngine(client: makeSyncClient(), database: db, accountId: "u123")
+        let report = try await engine.verifyAgainstServer()
+
+        #expect(report.isConsistent)
+        #expect(report.driftCount == 0)
+    }
 }
 }
