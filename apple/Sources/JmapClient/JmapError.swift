@@ -24,12 +24,16 @@ public enum JmapError: Error, Sendable {
     case noAccountId
     case uploadFailed(String)
     case blobTooLarge(Int, Int)        // fileSize, maxSize
+    case digestMismatch(String)        // blobId — downloaded content did not match server digest
 
     public var isRetriable: Bool {
         switch self {
         case .httpError(let code, _):
             return code >= 500 || code == 429
         case .rateLimited, .invalidResponse:
+            return true
+        case .digestMismatch:
+            // Transient corruption (network/storage) — a fresh download may succeed.
             return true
         case .unauthorized, .tokenRotated, .forbidden, .payloadTooLarge, .blobTooLarge,
              .missingCapability, .noAccountId, .keychainError:
@@ -59,6 +63,9 @@ extension JmapError {
         case .httpError(let code, _) where code >= 500:
             return NSFileProviderError(.serverUnreachable) as NSError
         case .httpError, .rateLimited, .invalidResponse:
+            return NSFileProviderError(.serverUnreachable) as NSError
+        case .digestMismatch:
+            // Treat as a transient fetch failure so the system retries the download.
             return NSFileProviderError(.serverUnreachable) as NSError
         case .payloadTooLarge, .blobTooLarge:
             return NSFileProviderError(.insufficientQuota) as NSError
@@ -107,6 +114,8 @@ extension JmapError: LocalizedError {
             return "Upload failed: \(reason)"
         case .blobTooLarge(let size, let max):
             return "File size \(size) exceeds server maximum \(max)"
+        case .digestMismatch:
+            return "Downloaded file failed an integrity check; will retry"
         }
     }
 }

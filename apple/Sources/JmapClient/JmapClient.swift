@@ -1216,7 +1216,45 @@ public actor JmapClient {
             throw error
         }
 
+        // Integrity check: verify the downloaded bytes against the server's digest.
+        // If the server can't provide one (no blob2 capability, or the lookup
+        // failed), we cannot verify — proceed rather than block the download.
+        if let expectedSha = await serverBlobDigestSha(accountId: accountId, blobId: blobId) {
+            let actualSha = (try? sha1OfFile(destURL)) ?? ""
+            if actualSha != expectedSha {
+                try? FileManager.default.removeItem(at: destURL)
+                TrafficLog.shared.log("← ERR download [\(accountId)] digest mismatch blobId=\(blobId): expected \(expectedSha) got \(actualSha)")
+                throw JmapError.digestMismatch(blobId)
+            }
+        }
+
         return destURL
+    }
+
+    /// Fetch the server's base64 SHA1 digest for a blob, or nil if it cannot be
+    /// determined (no blob2 capability, blob not found, or the lookup failed).
+    /// A nil result means "cannot verify"; callers degrade gracefully.
+    private func serverBlobDigestSha(accountId: String, blobId: String) async -> String? {
+        guard let session = try? await sessionManager.session(),
+              session.hasBlob2(accountId: accountId) else { return nil }
+        let responses = try? await call([
+            JmapMethodCall(
+                name: "Blob/get",
+                args: [
+                    "accountId": AnyCodable(accountId),
+                    "ids": AnyCodable([AnyCodable(blobId)]),
+                    "properties": AnyCodable(["id", "digest:sha"].map { AnyCodable($0) }),
+                ],
+                callId: "b0"
+            ),
+        ], using: [JmapCapability.core, JmapCapability.blob2])
+        guard let responses, let response = responses.first,
+              response.count >= 3,
+              let argsDict = response[1].dictValue,
+              let list = argsDict["list"]?.arrayValue,
+              let blob = list.first?.dictValue
+        else { return nil }
+        return blob["digest:sha"]?.stringValue
     }
 
     /// Returns true if the server supports Direct HTTP Write for this account.

@@ -131,6 +131,34 @@ private let testSessionWithQuota = """
 }
 """
 
+private let testSessionWithBlob2 = """
+{
+    "state": "test-session-state-1",
+    "apiUrl": "https://api.example.com/jmap/",
+    "downloadUrl": "https://api.example.com/jmap/download/{accountId}/{blobId}/{name}?type={type}",
+    "uploadUrl": "https://api.example.com/jmap/upload/{accountId}/",
+    "eventSourceUrl": "https://api.example.com/jmap/eventsource/",
+    "capabilities": {
+        "urn:ietf:params:jmap:core": {},
+        "https://www.fastmail.com/dev/filenode": {},
+        "https://www.fastmail.com/dev/blob2": {}
+    },
+    "accounts": {
+        "u123": {
+            "name": "test@example.com",
+            "isPersonal": true,
+            "accountCapabilities": {
+                "https://www.fastmail.com/dev/filenode": {},
+                "https://www.fastmail.com/dev/blob2": {}
+            }
+        }
+    },
+    "primaryAccounts": {
+        "https://www.fastmail.com/dev/filenode": "u123"
+    }
+}
+"""
+
 private func makeTestClient() -> JmapClient {
     let sessionURL = URL(string: "https://api.example.com/jmap/session")!
     let tokenProvider = StaticTokenProvider(token: "test-token")
@@ -189,6 +217,97 @@ extension NetworkTests {
         #expect(home.isHome == true)
         #expect(home.isFolder == true)
         #expect(requestCount == 2)
+    }
+
+    @Test func downloadBlobRejectsContentFailingDigest() async throws {
+        let client = makeTestClient()
+        let fileBytes = Data("the real file contents".utf8)
+        // A valid base64 SHA1, but of different bytes — guaranteed not to match fileBytes.
+        let wrongDigest = sha1Digest(Data("totally different bytes".utf8))
+
+        MockURLProtocol.handler = { request in
+            let url = request.url!
+            if url.path.contains("session") {
+                return jsonResponse(url: url, json: testSessionWithBlob2)
+            }
+            if url.path.contains("/download/") {
+                let resp = HTTPURLResponse(
+                    url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
+                return (fileBytes, resp)
+            }
+            // Blob/get digest fetch — return a digest that does NOT match the downloaded bytes.
+            return jsonResponse(url: url, json: """
+            {"methodResponses":[["Blob/get",{"accountId":"u123","list":[{"id":"G1","digest:sha":"\(wrongDigest)"}],"notFound":[]},"b0"]],"sessionState":"ss1"}
+            """)
+        }
+        defer { MockURLProtocol.handler = nil }
+
+        let tmp = FileManager.default.temporaryDirectory
+        do {
+            _ = try await client.downloadBlob(
+                accountId: "u123", blobId: "G1", name: "f.txt",
+                type: "text/plain", destinationDir: tmp)
+            Issue.record("downloadBlob should reject content that fails digest verification")
+        } catch is JmapError {
+            // expected — corrupt content must not be served
+        }
+    }
+
+    @Test func downloadBlobSucceedsWhenDigestMatches() async throws {
+        let client = makeTestClient()
+        let fileBytes = Data("the real file contents".utf8)
+        let correctDigest = sha1Digest(fileBytes)
+
+        MockURLProtocol.handler = { request in
+            let url = request.url!
+            if url.path.contains("session") {
+                return jsonResponse(url: url, json: testSessionWithBlob2)
+            }
+            if url.path.contains("/download/") {
+                let resp = HTTPURLResponse(
+                    url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
+                return (fileBytes, resp)
+            }
+            return jsonResponse(url: url, json: """
+            {"methodResponses":[["Blob/get",{"accountId":"u123","list":[{"id":"G1","digest:sha":"\(correctDigest)"}],"notFound":[]},"b0"]],"sessionState":"ss1"}
+            """)
+        }
+        defer { MockURLProtocol.handler = nil }
+
+        let tmp = FileManager.default.temporaryDirectory
+        let url = try await client.downloadBlob(
+            accountId: "u123", blobId: "G1", name: "f.txt",
+            type: "text/plain", destinationDir: tmp)
+        #expect(try Data(contentsOf: url) == fileBytes)
+        try? FileManager.default.removeItem(at: url)
+    }
+
+    @Test func downloadBlobSkipsVerificationWithoutBlob2() async throws {
+        let client = makeTestClient()
+        let fileBytes = Data("unverifiable but fine".utf8)
+
+        MockURLProtocol.handler = { request in
+            let url = request.url!
+            if url.path.contains("session") {
+                // No blob2 capability — server can't provide a digest, so we can't verify.
+                return jsonResponse(url: url, json: testSessionJSON)
+            }
+            if url.path.contains("/download/") {
+                let resp = HTTPURLResponse(
+                    url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
+                return (fileBytes, resp)
+            }
+            Issue.record("no Blob/get should be attempted when blob2 is absent")
+            return jsonResponse(url: url, json: "{}")
+        }
+        defer { MockURLProtocol.handler = nil }
+
+        let tmp = FileManager.default.temporaryDirectory
+        let url = try await client.downloadBlob(
+            accountId: "u123", blobId: "G1", name: "f.txt",
+            type: "text/plain", destinationDir: tmp)
+        #expect(try Data(contentsOf: url) == fileBytes)
+        try? FileManager.default.removeItem(at: url)
     }
 
     @Test func findTrashNodeReturnsNil() async throws {
