@@ -112,3 +112,24 @@ import Testing
     #expect(change.changed["u123"]?["FileNode"] == "state456")
     #expect(sseStateChangeHasFileNode(change, accountId: "u123") == true)
 }
+
+// MARK: - State-change comparison (push reconnect-storm fix)
+
+@Test func testFileNodeStateExtraction() {
+    let change = SSEStateChange(changed: [
+        "acc1": ["FileNode": "67", "StorageNode": "67"],
+        "acc2": ["StorageNode": "964"],
+        "acc3": ["Mailbox": "J1"],
+    ])
+    #expect(sseFileNodeState(change, accountId: "acc1") == "67")
+    #expect(sseFileNodeState(change, accountId: "acc2") == "964")  // StorageNode fallback
+    #expect(sseFileNodeState(change, accountId: "acc3") == nil)    // no file state
+    #expect(sseFileNodeState(change, accountId: "nope") == nil)
+}
+
+@Test func testPushSignalsOnlyOnChangedState() {
+    #expect(pushShouldSignal(newState: nil, lastSeen: nil) == false)   // nothing to act on
+    #expect(pushShouldSignal(newState: "67", lastSeen: nil) == true)   // first sighting
+    #expect(pushShouldSignal(newState: "67", lastSeen: "67") == false) // the bug: unchanged → no poll
+    #expect(pushShouldSignal(newState: "68", lastSeen: "67") == true)  // real change
+}

@@ -67,6 +67,23 @@ public func sseStateChangeHasFileNode(_ stateChange: SSEStateChange, accountId: 
     return accountChanges.keys.contains { $0 == "FileNode" || $0 == "StorageNode" }
 }
 
+/// The FileNode (or StorageNode) state *value* for `accountId` in this push, or
+/// nil if the push carries no file state for that account. The server's initial
+/// `connect` event always includes the current value, so callers must compare it
+/// against the last-seen value — reacting to its mere presence causes a poll on
+/// every reconnect even when nothing changed.
+public func sseFileNodeState(_ stateChange: SSEStateChange, accountId: String) -> String? {
+    guard let accountChanges = stateChange.changed[accountId] else { return nil }
+    return accountChanges["FileNode"] ?? accountChanges["StorageNode"]
+}
+
+/// Whether a push carrying `newState` should trigger a sync, given the
+/// `lastSeen` state we already acted on. Only a genuine change warrants a poll.
+public func pushShouldSignal(newState: String?, lastSeen: String?) -> Bool {
+    guard let newState else { return false }
+    return newState != lastSeen
+}
+
 // MARK: - Idle timeout
 
 /// Thrown when an SSE stream goes silent (no lines, including keepalive pings)
@@ -104,6 +121,10 @@ public actor PushWatcher {
 
     /// SSE parser state, reset on each (re)connect.
     private var sseParser = SSEParser()
+    /// Last FileNode/StorageNode state value we acted on, persisted ACROSS
+    /// reconnects so the initial `connect` event of each new connection doesn't
+    /// re-trigger a poll when nothing actually changed.
+    private var lastFileNodeState: String?
     /// Reconnect if no SSE line (including the 60s keepalive ping) arrives for
     /// this long — 2.5x the ping interval allows for jitter without false trips.
     private static let sseIdleTimeout: TimeInterval = 150
@@ -318,12 +339,17 @@ public actor PushWatcher {
             return
         }
 
-        if sseStateChangeHasFileNode(stateChange, accountId: accountId) {
-            #if canImport(os)
-            logger.debug("FileNode state changed for account \(self.accountId)")
-            #endif
-            await delegate?.pushWatcherDidReceiveChange(self)
-        }
+        // Only act on a *changed* state value. The server's initial `connect`
+        // event (sent on every reconnect) always carries the current FileNode
+        // state, so reacting to its presence would trigger a needless poll on
+        // every reconnect — the reconnect-storm bug.
+        let newState = sseFileNodeState(stateChange, accountId: accountId)
+        guard pushShouldSignal(newState: newState, lastSeen: lastFileNodeState) else { return }
+        lastFileNodeState = newState
+        #if canImport(os)
+        logger.debug("FileNode state changed for account \(self.accountId, privacy: .public) → \(newState ?? "nil", privacy: .public)")
+        #endif
+        await delegate?.pushWatcherDidReceiveChange(self)
     }
 }
 
