@@ -84,6 +84,25 @@ public func pushShouldSignal(newState: String?, lastSeen: String?) -> Bool {
     return newState != lastSeen
 }
 
+/// Given a session-level push and the last-seen FileNode state per account,
+/// return the accounts whose file state actually changed (so each can be
+/// signalled) plus the updated last-seen map. A login's push covers all its
+/// accounts in one event, so one push owner can fan out to every changed account.
+public func changedFileNodeAccounts(
+    in stateChange: SSEStateChange, lastSeen: [String: String]
+) -> (changed: [String], updated: [String: String]) {
+    var updated = lastSeen
+    var changed: [String] = []
+    for accountId in stateChange.changed.keys {
+        guard let newState = sseFileNodeState(stateChange, accountId: accountId) else { continue }
+        if newState != lastSeen[accountId] {
+            changed.append(accountId)
+            updated[accountId] = newState
+        }
+    }
+    return (changed.sorted(), updated)
+}
+
 // MARK: - Idle timeout
 
 /// Thrown when an SSE stream goes silent (no lines, including keepalive pings)
@@ -114,7 +133,16 @@ public actor PushWatcher {
     private let sessionManager: SessionManager
     private let tokenProvider: TokenProvider
     private let accountId: String
+    private let loginId: String
     private let bandwidthPolicy: BandwidthPolicy?
+    /// Cross-process lease electing one SSE-push owner per login. A login's push
+    /// endpoint is session-level and covers all its accounts in one event, so only
+    /// one of its per-account extension processes should hold the connection.
+    /// nil → always connect (no leasing — e.g. tests or single-process use).
+    private let pushLease: PushLease?
+    /// How long a non-owner waits before retrying the lease, so it can take over
+    /// if the owner process dies (the kernel drops the flock on exit).
+    private static let leaseRetryInterval: TimeInterval = 20
     private var task: Task<Void, Never>?
     private var backoffSeconds: Double = 1.0
     private static let maxBackoff: Double = 60.0
@@ -137,10 +165,11 @@ public actor PushWatcher {
 
     /// SSE parser state, reset on each (re)connect.
     private var sseParser = SSEParser()
-    /// Last FileNode/StorageNode state value we acted on, persisted ACROSS
-    /// reconnects so the initial `connect` event of each new connection doesn't
-    /// re-trigger a poll when nothing actually changed.
-    private var lastFileNodeState: String?
+    /// Last FileNode/StorageNode state value acted on, per account, persisted
+    /// ACROSS reconnects so the initial `connect` event of each new connection
+    /// doesn't re-poll unchanged state. Login-scoped: the push owner tracks every
+    /// account the session reports, and fans out a signal to each changed one.
+    private var lastFileNodeStates: [String: String] = [:]
     /// Reconnect if no SSE line (including the 60s keepalive ping) arrives for
     /// this long — 2.5x the ping interval allows for jitter without false trips.
     private static let sseIdleTimeout: TimeInterval = 150
@@ -153,11 +182,15 @@ public actor PushWatcher {
         sessionManager: SessionManager,
         tokenProvider: TokenProvider,
         accountId: String,
+        loginId: String,
+        pushLease: PushLease? = nil,
         bandwidthPolicy: BandwidthPolicy? = nil
     ) {
         self.sessionManager = sessionManager
         self.tokenProvider = tokenProvider
         self.accountId = accountId
+        self.loginId = loginId
+        self.pushLease = pushLease
         self.bandwidthPolicy = bandwidthPolicy
     }
 
@@ -226,6 +259,22 @@ public actor PushWatcher {
                 #endif
                 do {
                     try await Task.sleep(nanoseconds: UInt64(Self.maxBackoff * 1_000_000_000))
+                } catch {
+                    return
+                }
+                continue
+            }
+
+            // Push-owner lease: only one process per login holds the (session-level)
+            // SSE connection. A non-owner stands down and retries periodically so it
+            // can take over if the owner process dies. Its domains still sync via the
+            // owner's fan-out signals and the system's own enumeration cadence.
+            if let lease = pushLease, !lease.tryAcquire() {
+                #if canImport(os)
+                logger.info("[\(self.accountId, privacy: .public)] another process owns the push for this login — standing down")
+                #endif
+                do {
+                    try await Task.sleep(nanoseconds: UInt64(Self.leaseRetryInterval * 1_000_000_000))
                 } catch {
                     return
                 }
@@ -363,17 +412,20 @@ public actor PushWatcher {
             return
         }
 
-        // Only act on a *changed* state value. The server's initial `connect`
-        // event (sent on every reconnect) always carries the current FileNode
-        // state, so reacting to its presence would trigger a needless poll on
-        // every reconnect — the reconnect-storm bug.
-        let newState = sseFileNodeState(stateChange, accountId: accountId)
-        guard pushShouldSignal(newState: newState, lastSeen: lastFileNodeState) else { return }
-        lastFileNodeState = newState
-        #if canImport(os)
-        logger.debug("FileNode state changed for account \(self.accountId, privacy: .public) → \(newState ?? "nil", privacy: .public)")
-        #endif
-        await delegate?.pushWatcherDidReceiveChange(self)
+        // Act only on *changed* state values, and fan out to every changed
+        // account in the login (one session push covers them all). The server's
+        // initial `connect` event — re-sent on every reconnect — always carries
+        // the current state, so reacting to mere presence would re-poll on every
+        // reconnect (the reconnect-storm bug).
+        let (changed, updated) = changedFileNodeAccounts(in: stateChange, lastSeen: lastFileNodeStates)
+        guard !changed.isEmpty else { return }
+        lastFileNodeStates = updated
+        for changedAccount in changed {
+            #if canImport(os)
+            logger.debug("FileNode state changed for account \(changedAccount, privacy: .public) → \(updated[changedAccount] ?? "nil", privacy: .public)")
+            #endif
+            await delegate?.pushWatcher(self, didReceiveChangeForAccount: changedAccount)
+        }
     }
 }
 
@@ -382,11 +434,14 @@ public actor PushWatcher {
 /// Delegate protocol for PushWatcher events.
 /// The FileProvider extension implements this to signal the working set enumerator.
 public protocol PushWatcherDelegate: AnyObject, Sendable {
-    /// Called when a FileNode state change is received via SSE.
-    func pushWatcherDidReceiveChange(_ watcher: PushWatcher) async
+    /// Called when a FileNode state change is received via SSE for `accountId`
+    /// (which may be a sibling account in the same login, since the push owner
+    /// fans out to every changed account). The delegate signals that account's
+    /// domain enumerator.
+    func pushWatcher(_ watcher: PushWatcher, didReceiveChangeForAccount accountId: String) async
 
     /// Called when the SSE connection is re-established after a disconnect.
-    /// The delegate should signal the working set enumerator to catch up on missed changes.
+    /// The delegate should signal the working set enumerator(s) to catch up on missed changes.
     func pushWatcherDidReconnect(_ watcher: PushWatcher) async
 }
 

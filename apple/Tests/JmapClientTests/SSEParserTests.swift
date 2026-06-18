@@ -133,3 +133,20 @@ import Testing
     #expect(pushShouldSignal(newState: "67", lastSeen: "67") == false) // the bug: unchanged → no poll
     #expect(pushShouldSignal(newState: "68", lastSeen: "67") == true)  // real change
 }
+
+@Test func testChangedFileNodeAccountsFansOutPerAccount() {
+    // One session push covers every account in the login.
+    let change = SSEStateChange(changed: [
+        "acc1": ["FileNode": "67"],     // unchanged vs lastSeen
+        "acc2": ["FileNode": "100"],    // changed (was 99)
+        "acc3": ["StorageNode": "5"],   // new account (not in lastSeen)
+        "acc4": ["Mailbox": "x"],       // no file state → ignored
+    ])
+    let (changed, updated) = changedFileNodeAccounts(
+        in: change, lastSeen: ["acc1": "67", "acc2": "99"])
+
+    #expect(changed == ["acc2", "acc3"])   // sorted, only genuinely-changed file accounts
+    #expect(updated["acc2"] == "100")
+    #expect(updated["acc3"] == "5")
+    #expect(updated["acc1"] == "67")       // carried forward unchanged
+}

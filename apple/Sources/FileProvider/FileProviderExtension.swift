@@ -233,9 +233,16 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
         let _activityTracker = ActivityTracker(containerURL: effectiveContainerURL)
         let _statusWriter = ExtensionStatusWriter(containerURL: effectiveContainerURL, domainId: domainId)
         let _syncEngine = SyncEngine(client: _client, database: _database, accountId: acctId)
+        let _loginId = DomainIdentity.parse(domainId)?.loginId ?? domainId
+        // Elect a single SSE-push owner per login: the push endpoint is session-
+        // level and covers all the login's accounts, so only one of its per-account
+        // extension processes should hold the connection. The lease file lives in
+        // the shared container so every such process contends for the same lock.
+        let _pushLease = PushLease(
+            path: effectiveContainerURL.appendingPathComponent("push-lease-\(_loginId).lock").path)
         let _pushWatcher = PushWatcher(
             sessionManager: _sessionManager, tokenProvider: tokenProvider, accountId: acctId,
-            bandwidthPolicy: bandwidthPolicy)
+            loginId: _loginId, pushLease: _pushLease, bandwidthPolicy: bandwidthPolicy)
 
         // Assign stored properties.
         self.sessionManager = _sessionManager
@@ -1169,11 +1176,23 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
 
     // MARK: - PushWatcherDelegate
 
-    public func pushWatcherDidReceiveChange(_ watcher: PushWatcher) async {
+    public func pushWatcher(_ watcher: PushWatcher, didReceiveChangeForAccount accountId: String) async {
+        // The push owner fans out to every changed account in the login, so the
+        // account may be a sibling rather than this process's own. Signal the
+        // matching domain — its own extension process (if running) handles the sync.
+        let target: NSFileProviderDomain
+        if accountId == self.accountId {
+            target = domain
+        } else {
+            let loginId = DomainIdentity.parse(domain.identifier.rawValue)?.loginId ?? ""
+            target = NSFileProviderDomain(
+                identifier: NSFileProviderDomainIdentifier(rawValue: "\(loginId)~\(accountId)"),
+                displayName: "Fastmail Files")
+        }
         #if canImport(os)
-        logger.info("[\(self.accountId, privacy: .public)] SSE state change — signalling working set")
+        logger.info("[\(target.identifier.rawValue, privacy: .public)] SSE state change — signalling working set")
         #endif
-        NSFileProviderManager(for: domain)?.signalEnumerator(for: .workingSet) { _ in }
+        NSFileProviderManager(for: target)?.signalEnumerator(for: .workingSet) { _ in }
     }
 
     public func pushWatcherDidReconnect(_ watcher: PushWatcher) async {
