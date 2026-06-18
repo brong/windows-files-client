@@ -362,6 +362,17 @@ No inline string interpolation for identity strings anywhere in the codebase.
 
 ---
 
+## BUG-026 — SSE reconnect storm hammered the server ~1 req/s/account
+**Status:** Fixed (commits 0328b70 + 910fa20, reliability D5)
+**Symptom:** A dev client with the account added pounded the server in a tight loop — one SSE (re)connect plus a `FileNode/changes` poll per account every ~1 second, for every account, indefinitely. The client traffic log grew to **482 MB**. Server logs showed a new `EVENTREDIRECT` every second and `FileNode/changes {sinceState:67/964/25860}` whose states never advanced (i.e. nothing was actually changing).
+**Root cause (two compounding bugs):**
+1. `handleEvent` triggered a poll whenever a push payload *contained* a FileNode/StorageNode key (`sseStateChangeHasFileNode` — presence, not change). The server's initial `connect` event — sent on every reconnect — always includes the current state, so every reconnect fired a poll even though the state value was unchanged.
+2. `connect()` reset `backoffSeconds = 1.0` on every 200 response. The connection was flapping (opening and closing within ~1s), and resetting backoff on each "success" meant it reconnected after ~1s every time — no flap dampening.
+**Fix:** (1) `handleEvent` now extracts the state *value* (`sseFileNodeState`) and signals only when it differs from the last value acted on (`pushShouldSignal`), tracked across reconnects. (2) Backoff is no longer reset in `connect()`; `connectionLoop` times each connection and resets to the 1s floor only after a connection stays up ≥10s (`stableConnectionThreshold`), otherwise grows exponentially toward 60s (`nextBackoff`).
+**Lesson:** Two independent guards: never treat a push notification's *presence* as a *change* (compare the state value), and never reset reconnect backoff on a connection that hasn't proven itself stable — a "successful" connect that immediately drops is a flap, not a success. (Suspected trigger for the flap: 3 extension instances sharing one push-connection token; worth confirming, but the client must be well-behaved regardless.)
+
+---
+
 ## Recurring mistakes to watch for
 
 - **`privacy: .public` omitted** — every interpolated value in a logger call needs it

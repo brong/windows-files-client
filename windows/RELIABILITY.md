@@ -61,9 +61,20 @@ using this same roadmap):
   operations are forwarded with their reason and rendered in red in the menu
   bar. Failure reasons now reach the user instead of living only in the log.
 
+- **D5 ✅ done** (`0328b70`, `910fa20`) — **push reconnect storm** (found in the
+  field: a dev client hammered the server ~1 req/s/account, growing a 482 MB
+  traffic log). Two root causes: (1) `handleEvent` polled whenever a push payload
+  *contained* a FileNode key, so the server's per-reconnect `connect` event
+  triggered a needless poll even when the state value was unchanged — now it
+  signals only on a *changed* value; (2) `connect()` reset the reconnect backoff
+  on every 200, so a connection that flapped within ~1s reconnected at 1 Hz —
+  now backoff resets only after a connection stays up ≥10s, else grows
+  exponentially. (BUG-026.)
+
 **Apple reliability tranche complete.** All gaps that apply to the Apple client
-are resolved (I1/I2/V1/D3/D4/R1/V2/V3 this pass; I3/D2/R3/R5/R2 already handled).
-Next: port these fixes to the **Windows** C# client using this roadmap, and F1
+are resolved (I1/I2/V1/D3/D4/D5/R1/V2/V3 this pass; I3/D2/R3/R5/R2 already
+handled). Next: port these fixes to the **Windows** C# client using this
+roadmap (the push reconnect-storm lesson is now DESIGN.md pitfall #38), and F1
 (conditional writes) once the draft + server land.
 
 ## Severity legend
