@@ -212,6 +212,29 @@ Two paths:
 3. `FileNode/changes` with cached state
 4. If `cannotCalculateChanges` → full reconciliation (fetch all, diff against cache)
 
+**Bulk fetch, not per-folder BFS (performance).** Step 3 of cold start means:
+fetch the *entire* node set in a few large requests — `FileNode/query` for all
+ids (paginated), then `FileNode/get` in pages (we use 1024) — and build the tree
+**in memory** by grouping on `parentId` and walking from home. Do **not** issue a
+`FileNode/query` per folder (even batched N-at-a-time): that is one network round
+trip per folder *level*, so a large or deep account needs dozens of sequential
+round trips and feels like it loads "one chunk at a time". Bulk fetch is
+`id-query-pages + ceil(nodeCount/1024)` requests total, independent of folder
+count or depth (e.g. a 6,000-node account ≈ 9 requests). The Windows client does
+this in `SyncEngine.PopulateFullAsync`; the Apple client does it in
+`FileProviderEnumerator` via `FileNode.reachableFromHome` (which also excludes
+orphans not reachable from home and is cycle-safe).
+
+**Hybrid first paint (enumerate-on-demand platforms).** Where the UI shows
+content as it's enumerated (Apple FileProvider, and any explorer that lists a
+folder on open), do two phases so the user sees the top level instantly: (1)
+fetch and report **home's direct children** in a single request, capturing the
+state token at this point; (2) bulk-fetch the rest and report/persist the full
+tree. Capture the state token at the *start* (phase 1) — a slightly-early token
+just replays idempotently on the next `FileNode/changes`, whereas a late token
+could miss changes that land during the bulk fetch. Re-reporting home's children
+in phase 2 is harmless if the platform dedupes by item identifier.
+
 ### In-Memory Mappings
 
 The sync engine maintains bidirectional mappings:
