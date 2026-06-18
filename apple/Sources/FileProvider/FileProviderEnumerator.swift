@@ -132,70 +132,47 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
             fileName: label, action: .sync)
 
         var effectiveTrashId: String? = nodes.trashId
-        var allNodes: [FileNode] = []
-        var finalState: String = ""
         let pinnedIds = await database.allPinnedIds
         let bfsGen = await database.incrementBfsGeneration()
-
-        // BFS queue of folder IDs whose children need to be fetched.
-        var folderQueue: [String] = [nodes.homeId]
-        var itemBatch: [FileProviderItem] = []
         let itemBatchSize = 100
-        let folderBatchSize = 16  // 16 folders → 32 method calls per HTTP request
 
         do {
-            while !folderQueue.isEmpty {
-                let batchParents = Array(folderQueue.prefix(folderBatchSize))
-                folderQueue.removeFirst(min(folderBatchSize, folderQueue.count))
+            // Phase 1 — fast first paint: fetch home's direct children and report
+            // them immediately so Finder shows the top level without waiting for the
+            // whole tree. Capture the state token now (start of load); incremental
+            // sync from a slightly-early token just replays idempotently.
+            let (homeChildrenByParent, startState) = try await client.getChildrenBatched(
+                accountId: accountId, parentIds: [nodes.homeId])
+            let homeChildren = homeChildrenByParent[nodes.homeId] ?? []
+            reportItems(homeChildren, to: observer, specialNodes: nodes,
+                        trashId: &effectiveTrashId, pinnedIds: pinnedIds, batchSize: itemBatchSize)
 
-                let (childrenByParent, state) = try await client.getChildrenBatched(
-                    accountId: accountId, parentIds: batchParents)
-                if !state.isEmpty { finalState = state }
+            // Phase 2 — bulk: fetch the whole node set in a few large requests and
+            // build the tree from parentId in memory — no per-folder round trips
+            // (round trips ≈ id-query pages + nodeCount/1024, independent of folder
+            // count or depth). Re-reporting home's children is fine; the system
+            // dedupes by identifier.
+            let allIds = try await client.queryAllNodeIds(accountId: accountId)
+            let fetched = try await client.getNodes(accountId: accountId, ids: allIds)
+            let reachable = FileNode.reachableFromHome(fetched, homeId: nodes.homeId)
+            reportItems(reachable, to: observer, specialNodes: nodes,
+                        trashId: &effectiveTrashId, pinnedIds: pinnedIds, batchSize: itemBatchSize)
 
-                for parentId in batchParents {
-                    let siblings = childrenByParent[parentId] ?? []
-                    let suffixes = Self.caseCollisionSuffixes(for: siblings.map { $0.name ?? "" })
-                    for (i, node) in siblings.enumerated() {
-                        allNodes.append(node)
-                        if node.isTrash { effectiveTrashId = node.id }
-
-                        if !node.isHome && !node.isRoot {
-                            itemBatch.append(FileProviderItem(
-                                node: node, homeNodeId: nodes.homeId, trashNodeId: effectiveTrashId,
-                                isPinned: pinnedIds.contains(node.id),
-                                filenameOverride: suffixes[i]))
-                            if itemBatch.count >= itemBatchSize {
-                                observer.didEnumerate(itemBatch)
-                                itemBatch.removeAll()
-                            }
-                        }
-
-                        if node.isFolder {
-                            folderQueue.append(node.id)
-                        }
-                    }
-                }
-            }
-
-            if !itemBatch.isEmpty {
-                observer.didEnumerate(itemBatch)
-            }
-
-            for node in allNodes {
+            for node in reachable {
                 await database.upsertFromServer(node, bfsGeneration: bfsGen)
             }
             await database.pruneStaleNodes(generation: bfsGen)
             await database.setHomeNodeId(nodes.homeId)
             await database.setTrashNodeId(effectiveTrashId)
-            await database.setStateToken(finalState)
+            await database.setStateToken(startState)
             try await database.save()
 
             await database.cleanupOrphanedPins()
             await database.setEnumerationFailureCount(0)
             await activityTracker?.complete(id: activityId)
-            statusWriter?.setIdle(nodeCount: allNodes.count)
+            statusWriter?.setIdle(nodeCount: reachable.count)
             #if canImport(os)
-            logger.info("[\(self.accountId, privacy: .public)] enumerateWorkingSet done — \(allNodes.count) nodes, stateToken=\(finalState, privacy: .public)")
+            logger.info("[\(self.accountId, privacy: .public)] enumerateWorkingSet done — \(reachable.count) nodes, stateToken=\(startState, privacy: .public)")
             #endif
             observer.finishEnumerating(upTo: nil)
         } catch {
@@ -206,6 +183,43 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
             #endif
             throw error
         }
+    }
+
+    /// Report `nodes` to the observer as FileProviderItems: skips the home/root
+    /// containers, computes per-parent case-collision suffixes, detects the trash
+    /// node, and batches `didEnumerate` calls. Synchronous (no awaits).
+    private func reportItems(
+        _ nodes: [FileNode],
+        to observer: NSFileProviderEnumerationObserver,
+        specialNodes: SpecialNodes,
+        trashId: inout String?,
+        pinnedIds: Set<String>,
+        batchSize: Int
+    ) {
+        for node in nodes where node.isTrash { trashId = node.id }
+
+        // Per-parent case-collision suffixes (siblings must be compared together).
+        var byParent: [String: [FileNode]] = [:]
+        for node in nodes { byParent[node.parentId ?? "", default: []].append(node) }
+        var suffixById: [String: String?] = [:]
+        for siblings in byParent.values {
+            let suffixes = Self.caseCollisionSuffixes(for: siblings.map { $0.name ?? "" })
+            for (i, node) in siblings.enumerated() { suffixById[node.id] = suffixes[i] }
+        }
+
+        var batch: [FileProviderItem] = []
+        for node in nodes {
+            guard !node.isHome && !node.isRoot else { continue }
+            batch.append(FileProviderItem(
+                node: node, homeNodeId: specialNodes.homeId, trashNodeId: trashId,
+                isPinned: pinnedIds.contains(node.id),
+                filenameOverride: suffixById[node.id] ?? nil))
+            if batch.count >= batchSize {
+                observer.didEnumerate(batch)
+                batch.removeAll()
+            }
+        }
+        if !batch.isEmpty { observer.didEnumerate(batch) }
     }
 
     /// Enumerate children of a specific folder.
