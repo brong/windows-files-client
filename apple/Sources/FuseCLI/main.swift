@@ -437,12 +437,16 @@ func loadCredential(from url: URL? = nil) -> OAuthCredential? {
 func syncLoop(fs: FileNodeFuseFS, sessionManager: SessionManager,
               tokenProvider: TokenProvider, accountId: String,
               pollInterval: TimeInterval) async {
+    // Persisted across reconnects so the per-reconnect `connect` event doesn't
+    // re-sync unchanged state.
+    let stateTracker = FileNodeStateTracker(accountId: accountId)
     while !Task.isCancelled {
         // Try to connect SSE — this blocks while the connection is alive
         do {
             try await runSSEConnection(
                 fs: fs, sessionManager: sessionManager,
-                tokenProvider: tokenProvider, accountId: accountId)
+                tokenProvider: tokenProvider, accountId: accountId,
+                stateTracker: stateTracker)
             // SSE returned normally (server closed connection) — sync and reconnect
             print("[sync] SSE connection closed by server, syncing and reconnecting...")
             await doSync(fs: fs)
@@ -463,10 +467,31 @@ func syncLoop(fs: FileNodeFuseFS, sessionManager: SessionManager,
     }
 }
 
+/// Tracks the last-seen FileNode state value so a sync fires only on a real
+/// change. The server's initial `connect` event (re-sent on every reconnect)
+/// always carries the current state, so reacting to its presence would sync on
+/// every reconnect even when nothing changed (the reconnect-storm bug; see
+/// PushWatcher / reliability D5). Persisted across reconnects within syncLoop.
+actor FileNodeStateTracker {
+    private var lastState: String?
+    private let accountId: String
+    init(accountId: String) { self.accountId = accountId }
+
+    /// Returns true (and records the new state) only when the push carries a
+    /// FileNode state value that differs from the last one we acted on.
+    func shouldSync(_ stateChange: SSEStateChange) -> Bool {
+        let newState = sseFileNodeState(stateChange, accountId: accountId)
+        guard pushShouldSignal(newState: newState, lastSeen: lastState) else { return false }
+        lastState = newState
+        return true
+    }
+}
+
 /// Connect to SSE and process events. Blocks until the connection drops.
-/// Calls fs.sync() immediately when a FileNode state change is received.
+/// Calls fs.sync() when the FileNode state actually changes.
 func runSSEConnection(fs: FileNodeFuseFS, sessionManager: SessionManager,
-                      tokenProvider: TokenProvider, accountId: String) async throws {
+                      tokenProvider: TokenProvider, accountId: String,
+                      stateTracker: FileNodeStateTracker) async throws {
     let session = try await sessionManager.session()
 
     var urlString = session.eventSourceUrl
@@ -507,8 +532,8 @@ func runSSEConnection(fs: FileNodeFuseFS, sessionManager: SessionManager,
               let stateChange = try? JSONDecoder().decode(SSEStateChange.self, from: jsonData)
         else { continue }
 
-        if sseStateChangeHasFileNode(stateChange, accountId: accountId) {
-            print("[sync] SSE push received — syncing")
+        if await stateTracker.shouldSync(stateChange) {
+            print("[sync] SSE push received (state changed) — syncing")
             await doSync(fs: fs)
         }
     }
