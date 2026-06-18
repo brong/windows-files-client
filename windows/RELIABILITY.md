@@ -69,7 +69,12 @@ using this same roadmap):
   signals only on a *changed* value; (2) `connect()` reset the reconnect backoff
   on every 200, so a connection that flapped within ~1s reconnected at 1 Hz —
   now backoff resets only after a connection stays up ≥10s, else grows
-  exponentially. (BUG-026.)
+  exponentially. **Part 3** (`820f534`) fixed the structural trigger: the push
+  endpoint is session-level but the client ran one extension process per
+  account, so N accounts opened N redundant SSE connections that fought over the
+  server's single push connection. A cross-process `flock` lease (`PushLease`)
+  now elects one push owner per login that fans out per-account signals;
+  non-owners stand down (and take over if the owner dies). (BUG-026.)
 
 **Apple reliability tranche complete.** All gaps that apply to the Apple client
 are resolved (I1/I2/V1/D3/D4/D5/R1/V2/V3 this pass; I3/D2/R3/R5/R2 already

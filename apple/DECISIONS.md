@@ -579,6 +579,23 @@ Keeping FUSE in its own target means the main app and extension have no FUSE sym
 
 ---
 
+## 23. One SSE-Push Owner per Login (Cross-Process Lease)
+
+**Chosen:** Elect a single push owner per login across its per-account extension processes, using a non-blocking `flock` lease (`PushLease`) on a shared file. The owner is login-scoped and fans out a per-account signal to each changed account's domain; non-owners stand down and retry.
+
+**Alternatives considered:**
+
+| Option | Notes |
+|--------|-------|
+| One PushWatcher per account (original) | N redundant session-level SSE connections per login → contention → reconnect storm (BUG-026) |
+| App owns the single push connection | App isn't always running; extensions must sync when it's closed |
+| Lease-gate per-account watchers, no fan-out | Only the owner account would get push; siblings would go dark |
+| Pick one account's domain to always own it | No failover if that account is removed or its process dies |
+
+**Why a per-login lease with fan-out:** The push endpoint is session-level — one event already carries every account's state — so only one connection per login is needed. `flock` gives free failover (the kernel drops the lock when the owner process exits, so a standing-by sibling takes over). The owner must fan out per-account signals because the other accounts' processes aren't holding a connection. Same primitive as the OAuth refresh lock ([decision] flock(2) on a shared file). (Reliability D5; BUG-026.)
+
+---
+
 ## Summary Table
 
 | Decision | Chosen | Key Reason |
@@ -605,3 +622,4 @@ Keeping FUSE in its own target means the main app and extension have no FUSE sym
 | Push liveness | SSE idle-timeout watchdog | Half-open streams never error; detect, then reconnect + catch up |
 | Error retriability | Permanent SetErrors non-retriable | Don't loop on what can never succeed; surface it |
 | Recovery | Verify & Repair (force-reconcile) | One understandable button; fixes drift + retries stuck |
+| Push ownership | One owner per login via flock lease | Push is session-level; avoids N redundant connections + flap |
