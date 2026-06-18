@@ -61,12 +61,6 @@ public struct SSEStateChange: Codable, Sendable {
     public let changed: [String: [String: String]]
 }
 
-/// Check if a state change contains FileNode changes for a given account.
-public func sseStateChangeHasFileNode(_ stateChange: SSEStateChange, accountId: String) -> Bool {
-    guard let accountChanges = stateChange.changed[accountId] else { return false }
-    return accountChanges.keys.contains { $0 == "FileNode" || $0 == "StorageNode" }
-}
-
 /// The FileNode (or StorageNode) state *value* for `accountId` in this push, or
 /// nil if the push carries no file state for that account. The server's initial
 /// `connect` event always includes the current value, so callers must compare it

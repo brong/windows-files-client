@@ -81,28 +81,6 @@ import Testing
 
 // MARK: - SSEStateChange tests
 
-@Test func testStateChangeHasFileNode() {
-    let change = SSEStateChange(changed: [
-        "acc1": ["FileNode": "newstate123"]
-    ])
-    #expect(sseStateChangeHasFileNode(change, accountId: "acc1") == true)
-    #expect(sseStateChangeHasFileNode(change, accountId: "acc2") == false)
-}
-
-@Test func testStateChangeHasStorageNode() {
-    let change = SSEStateChange(changed: [
-        "acc1": ["StorageNode": "newstate123"]
-    ])
-    #expect(sseStateChangeHasFileNode(change, accountId: "acc1") == true)
-}
-
-@Test func testStateChangeNoFileNode() {
-    let change = SSEStateChange(changed: [
-        "acc1": ["Mailbox": "newstate123"]
-    ])
-    #expect(sseStateChangeHasFileNode(change, accountId: "acc1") == false)
-}
-
 @Test func testStateChangeDecoding() throws {
     let json = """
     {"changed":{"u123":{"FileNode":"state456","Mailbox":"state789"}}}
@@ -110,7 +88,6 @@ import Testing
     let data = json.data(using: .utf8)!
     let change = try JSONDecoder().decode(SSEStateChange.self, from: data)
     #expect(change.changed["u123"]?["FileNode"] == "state456")
-    #expect(sseStateChangeHasFileNode(change, accountId: "u123") == true)
 }
 
 // MARK: - State-change comparison (push reconnect-storm fix)
