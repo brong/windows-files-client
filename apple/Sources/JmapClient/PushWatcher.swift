@@ -118,6 +118,22 @@ public actor PushWatcher {
     private var task: Task<Void, Never>?
     private var backoffSeconds: Double = 1.0
     private static let maxBackoff: Double = 60.0
+    /// A connection must stay open at least this long to count as a real session;
+    /// shorter ones are "flaps" and keep backing off rather than resetting to 1s.
+    private static let stableConnectionThreshold: TimeInterval = 10.0
+
+    /// The backoff to wait before the next reconnect, given the current backoff
+    /// and how long the just-ended connection stayed up. A stable connection
+    /// (≥ `stableThreshold`) resets to `floor`; a flap grows exponentially toward
+    /// `ceiling`. This prevents a connection that opens and closes within ~1s
+    /// from producing a 1 Hz reconnect storm.
+    static func nextBackoff(
+        current: Double, upSeconds: Double,
+        stableThreshold: Double, floor: Double, ceiling: Double
+    ) -> Double {
+        if upSeconds >= stableThreshold { return floor }
+        return min(current * 2, ceiling)
+    }
 
     /// SSE parser state, reset on each (re)connect.
     private var sseParser = SSEParser()
@@ -216,6 +232,7 @@ public actor PushWatcher {
                 continue
             }
 
+            let startNanos = DispatchTime.now().uptimeNanoseconds
             do {
                 try await connect()
                 // connect() returned normally — server closed the stream.
@@ -237,8 +254,15 @@ public actor PushWatcher {
                 #endif
             }
 
-            // Backoff: use the larger of the exponential error-backoff and the
-            // bandwidth-policy floor (30 s minimum on expensive/cellular connections).
+            // Backoff. A connection that stayed up only briefly is a "flap" and
+            // keeps backing off; a stable one resets to ~1s — this stops a
+            // connection that opens and closes within ~1s from reconnecting at
+            // 1 Hz. The larger of the computed backoff and the bandwidth-policy
+            // floor (30 s on expensive/cellular) is used.
+            let upSeconds = Double(DispatchTime.now().uptimeNanoseconds &- startNanos) / 1_000_000_000
+            backoffSeconds = Self.nextBackoff(
+                current: backoffSeconds, upSeconds: upSeconds,
+                stableThreshold: Self.stableConnectionThreshold, floor: 1.0, ceiling: Self.maxBackoff)
             let minDelay = await bandwidthPolicy?.minSseReconnectDelay ?? 0.0
             let sleepSeconds = max(backoffSeconds, minDelay)
             do {
@@ -246,7 +270,6 @@ public actor PushWatcher {
             } catch {
                 return
             }
-            backoffSeconds = min(backoffSeconds * 2, Self.maxBackoff)
         }
     }
 
@@ -294,8 +317,9 @@ public actor PushWatcher {
         let cl = httpResponse.value(forHTTPHeaderField: "Content-Length") ?? "chunked"
         TrafficLog.shared.log("← 200 SSE [\(accountId)] Content-Type: \(ct) Content-Length: \(cl)")
 
-        // Reset backoff on successful connection
-        backoffSeconds = 1.0
+        // Note: backoff is NOT reset here. connectionLoop resets it only after a
+        // connection that stayed up past stableConnectionThreshold — resetting on
+        // every 200 is what let a flapping connection reconnect at 1 Hz.
         #if canImport(os)
         logger.info("[\(self.accountId, privacy: .public)] SSE connected")
         #endif

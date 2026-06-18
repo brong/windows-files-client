@@ -43,3 +43,25 @@ private actor Collected {
     var lines: [String] = []
     func append(_ s: String) { lines.append(s) }
 }
+
+// MARK: - Reconnect backoff dampening (push reconnect-storm fix)
+
+@Test func reconnectBackoffResetsAfterStableConnection() {
+    // A connection that stayed up past the stable threshold resets to the floor,
+    // regardless of how high the backoff had climbed.
+    #expect(PushWatcher.nextBackoff(
+        current: 32, upSeconds: 20, stableThreshold: 10, floor: 1, ceiling: 60) == 1)
+}
+
+@Test func reconnectBackoffGrowsWhenConnectionFlaps() {
+    // Sub-threshold connections (flaps) back off exponentially toward the ceiling
+    // instead of resetting — this is what stops the 1 Hz reconnect storm.
+    #expect(PushWatcher.nextBackoff(
+        current: 1, upSeconds: 0.5, stableThreshold: 10, floor: 1, ceiling: 60) == 2)
+    #expect(PushWatcher.nextBackoff(
+        current: 2, upSeconds: 0.5, stableThreshold: 10, floor: 1, ceiling: 60) == 4)
+    #expect(PushWatcher.nextBackoff(
+        current: 40, upSeconds: 0.5, stableThreshold: 10, floor: 1, ceiling: 60) == 60)
+    #expect(PushWatcher.nextBackoff(
+        current: 60, upSeconds: 0.5, stableThreshold: 10, floor: 1, ceiling: 60) == 60)
+}
