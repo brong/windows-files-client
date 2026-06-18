@@ -374,6 +374,17 @@ No inline string interpolation for identity strings anywhere in the codebase.
 
 ---
 
+## Known benign log lines (NOT bugs — don't chase these)
+
+These appear in the unified log / Console during normal operation on macOS and are harmless. Verified the client functions correctly despite them (accounts sync; CloudStorage folders populate and open).
+
+- **`Couldn't read values in CFPrefsPlistSource … Using kCFPreferencesAnyUser with a container is only allowed for System Containers, detaching from cfprefsd`** — emitted when `UserDefaults(suiteName:)` is used with the App-Group container id (`AppViewModel.swift`, `FileProviderExtension.swift`). cfprefsd "detaches" and reads the container plist directly; reads/writes still work. Standard for App-Group-shared defaults on macOS.
+- **`Sandbox extension creation failed: client lacks entitlements? for path: [~/Library/CloudStorage/FastmailFiles-…]` / `Sandbox extension data required immediately for flavor public.file-url, but failed to obtain. (-20)`** — the system probing for a `public.file-url` sandbox extension when a sandboxed process touches a CloudStorage path. "Open in Finder" uses the correct API (`getUserVisibleURL` → `activateFileViewerSelecting`) and the reveal still succeeds; the folders exist and are browsable. Not a missing entitlement on our side.
+- **`Unable to obtain a task name port right for pid …`, `Invalid new timing data reported for display …`, `CALocalDisplayUpdateBlock returned NO`, `NSStatusItemView … No matching scene to invalidate`, `BSBlockSentinel:FBSWorkspaceScenesClient failed`** — AppKit / ControlCenter / WindowServer noise, not from our code.
+- **TLS trust failure on `ua-auto-config.<domain>/.well-known/user-agent-configuration.json`** — PACC discovery probe against a custom domain whose cert doesn't cover the `ua-auto-config` subdomain. Non-fatal: the client falls back (and OAuth-with-Fastmail works regardless). A domain-config issue, not a client bug.
+
+---
+
 ## Recurring mistakes to watch for
 
 - **`privacy: .public` omitted** — every interpolated value in a logger call needs it

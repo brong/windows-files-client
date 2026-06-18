@@ -23,7 +23,11 @@ final class DomainRegistrar: @unchecked Sendable {
         defaults?.set(sessionURL, forKey: "sessionURL-\(domainId)")
         defaults?.set(authType.rawValue, forKey: "authType-\(domainId)")
 
-        let domainName = displayName.isEmpty ? accountId : "\(displayName) Files"
+        // The CloudStorage folder is named "<ProviderName>-<domainName>" by macOS
+        // (ProviderName is the app, "FastmailFiles"), so a " Files" suffix here just
+        // produced the redundant, ugly "FastmailFiles-…netFiles". Use the account
+        // name (or accountId) directly.
+        let domainName = displayName.isEmpty ? accountId : displayName
         do {
             let domain = NSFileProviderDomain(
                 identifier: NSFileProviderDomainIdentifier(rawValue: domainId),
