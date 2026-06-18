@@ -1,3 +1,19 @@
+## Active work: reliability port (READ FIRST)
+
+The cfapi feature set is done (see `ROADMAP.md`). The current effort is
+**reliability hardening** — making the client detect every sync failure / drift
+and recover understandably. **Start at `RELIABILITY.md`** (the cross-platform
+tracker, with a "For the Windows port — start here" section mapping each gap to
+the Apple reference commit/file and the Windows target file).
+
+The **Apple client (`../apple/`) is the reference implementation**: every gap is
+already fixed and unit-tested there. For each item, read the Apple commit + code
+and the Apple tests (which encode the expected behavior), then port to the C#
+files cited in `RELIABILITY.md`. The cross-platform lessons are also distilled as
+`../DESIGN.md` pitfalls #34–39. Several gaps were *missing* on Windows
+specifically (e.g. download digest verified-but-ignored, silent dirty-vs-server
+conflict drop, state-token crash window) — don't assume the happy path is enough.
+
 ## Building
 
 Development runs in WSL2 — use `dotnet.exe` (Windows binary) for all build/run commands.

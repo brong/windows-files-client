@@ -82,6 +82,38 @@ handled). Next: port these fixes to the **Windows** C# client using this
 roadmap (the push reconnect-storm lesson is now DESIGN.md pitfall #38), and F1
 (conditional writes) once the draft + server land.
 
+## For the Windows port — start here
+
+The Apple client is the **reference implementation**: every item below is fixed
+and unit-tested there. For each, read the Apple commit (the diff and its tests —
+the tests encode the expected behavior), then port to the Windows file cited in
+the pillars below. Work the phases in order (see "Suggested sequencing").
+
+Mirror the Apple unit tests in the Windows test project where one exists; the
+Apple `JmapClient`/`FuseMount` targets are unit-tested via `swift test`.
+
+| Item | Apple reference (commit) | Windows target / note |
+|---|---|---|
+| 🔴 I1 download digest enforced | `cff4881` (`downloadBlob` + `serverBlobDigestSha`) | `SyncCallbacks.cs:737` — `VerifyDigest` currently logs-and-serves; make mismatch reject + retry |
+| 🟠 I2 upload digest re-verified | `4d32623` (`verifyUploadedBlob`) | upload path (`OutboxProcessor`/`JmapClient`) — verify single-shot/direct-PUT results |
+| 🔴 I3 conflict copy (dirty + server change) | already on Apple (`onExists:newest`/`rename`, `DECISIONS.md` #12) | `SyncEngine.cs:1247-1264` — currently drops one side silently |
+| 🟠 D1 disk↔cache↔server verify | partial on Apple | `SyncEngine.cs` warm-start (`PopulateFromCache`) |
+| 🟠 D2 stable enumeration / prune | Apple generation-counter BFS (`NodeDatabase`) | `SyncEngine.cs:875-901` — set-difference over unstable `position` paging |
+| 🟠 D3 SSE idle-timeout | `9618a74` (`consumeWithIdleTimeout`) | `JmapClient.cs` SSE loop — no idle timeout |
+| 🟠 D4 permanent-error classification | `c733227` (`JmapError.isRetriable`) | error tiers (`OutboxProcessor.cs`, DESIGN §12 table) |
+| 🟠 D5 push: poll-on-change + backoff | `0328b70`, `910fa20` | Windows SSE handler — parts 1&2 apply. **Part 3 (per-login lease) likely N/A**: Windows runs one Service process, not one per account |
+| 🟡 R1 Verify & Repair | `a7ed026` (`verifyAgainstServer` + force-reconcile) | add a user action: clear state token → full reconcile + retry rejected |
+| 🟡 R2 service watchdog | N/A on Apple (OS-managed) | Windows-specific: auto-restart `Service.exe` |
+| 🟡 R3 state-token crash window | already safe on Apple (token after changes) | `SyncEngine.cs:1280` — persist/apply ordering |
+| 🟡 R5 cache corruption fallback | Apple SQLite WAL + temp-DB fallback | `NodeCache.cs` load — add integrity check + fallback |
+| 🟡 V1 last-synced signal | `dbbc196` | surface `lastSyncTime` in tray/status |
+| 🟠 V2/V3 surface failure reasons | `943b4f7` | per-file error + reason in Explorer/activity |
+| ⚡ Bulk + hybrid first-paint populate | `ecd030f` (`reachableFromHome`) + DESIGN §Initial Populate | Windows already bulk-loads (`PopulateFullAsync`); add hybrid first-paint |
+
+Cross-platform lessons are also distilled as **`DESIGN.md` pitfalls #34–39**.
+F1 (server-adjudicated conditional writes, `draft-gondwana-jmap-conditional`) is
+deferred until the draft + Fastmail server support land.
+
 ## Severity legend
 
 | | Meaning |

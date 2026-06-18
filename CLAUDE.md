@@ -46,16 +46,16 @@ All platforms implement the same JMAP protocol. Key invariants:
 - **Language**: C# / .NET 9
 - **File system**: Windows Cloud Files API (cfapi) — native placeholder/hydration support
 - **Build**: `dotnet.exe build windows/FileNodeClient.sln` (from WSL2)
-- **Status**: Feature-complete (sync, thumbnails, URI source, recycle bin, progressive hydration)
-- See `windows/CLAUDE.md` for detailed build/test instructions
+- **Status**: cfapi feature-complete (sync, thumbnails, URI source, recycle bin, progressive hydration). **Reliability hardening is the active work — see `windows/RELIABILITY.md`.** The fixes are already implemented on Apple (the reference implementation); the Windows port has not started.
+- See `windows/CLAUDE.md` for build/test instructions **and the reliability port plan**
 
 #### Apple (`apple/`)
 - **Language**: Swift 6
-- **File system**: Apple FileProvider framework (`NSFileProviderReplicatedExtension`) — native placeholder/hydration support
+- **File system**: Apple FileProvider framework (`NSFileProviderReplicatedExtension`) — native placeholder/hydration support + a FUSE CLI mount
 - **Platforms**: macOS 12+ (Finder integration) and iOS 16+ (Files app integration)
-- **Build**: Xcode (open `apple/FastmailFiles/FastmailFiles.xcodeproj`)
-- **Status**: Design phase
-- See `apple/DESIGN.md` for architecture and design decisions
+- **Build**: Xcode (`apple/FastmailFiles.xcodeproj`); unit tests via `swift test` (JmapClient/FuseMount targets), App/FileProvider via `xcodebuild`
+- **Status**: Feature-complete and reliability-hardened (~213 unit tests). **The reference implementation for the cross-platform reliability program (`windows/RELIABILITY.md`).**
+- See `apple/DESIGN.md`, `apple/DECISIONS.md`, `apple/BUGS.md`
 
 #### Linux (`linux/`)
 - **Language**: Python 3
@@ -63,6 +63,17 @@ All platforms implement the same JMAP protocol. Key invariants:
 - **Dependencies**: `pyfuse3`, `aiohttp` (install via venv)
 - **Status**: In development
 - Target: Mount JMAP FileNode tree as a local filesystem with on-demand hydration
+
+### Reliability program (cross-platform)
+
+`windows/RELIABILITY.md` is the live tracker for making the clients bulletproof
+(detect every sync failure / drift; recover understandably). The **Apple client
+is the reference implementation** — every gap is fixed and unit-tested there. The
+hard-won cross-platform lessons are `DESIGN.md` pitfalls #34–39 (enforce content
+digests both ways; SSE idle-timeout; permanent-vs-transient error classification;
+last-synced + Verify & Repair; one push owner per login; bulk populate + hybrid
+first paint). **Porting these to Windows is the next major effort** — see the
+"For the Windows port" section of `windows/RELIABILITY.md`.
 
 ### Development Notes
 
