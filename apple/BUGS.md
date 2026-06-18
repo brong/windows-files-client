@@ -363,7 +363,7 @@ No inline string interpolation for identity strings anywhere in the codebase.
 ---
 
 ## BUG-026 — SSE reconnect storm hammered the server ~1 req/s/account
-**Status:** Fixed (commits 0328b70 + 910fa20 + 820f534, reliability D5)
+**Status:** Fixed (commits 0328b70 + 910fa20 + 820f534, reliability D5; FUSE CLI got the same change-detection fix in 3b47f7e)
 **Symptom:** A dev client with the account added pounded the server in a tight loop — one SSE (re)connect plus a `FileNode/changes` poll per account every ~1 second, for every account, indefinitely. The client traffic log grew to **482 MB**. Server logs showed a new `EVENTREDIRECT` every second and `FileNode/changes {sinceState:67/964/25860}` whose states never advanced (i.e. nothing was actually changing).
 **Root cause (two compounding bugs):**
 1. `handleEvent` triggered a poll whenever a push payload *contained* a FileNode/StorageNode key (`sseStateChangeHasFileNode` — presence, not change). The server's initial `connect` event — sent on every reconnect — always includes the current state, so every reconnect fired a poll even though the state value was unchanged.
