@@ -14,7 +14,7 @@ This document captures the architecture, design decisions, protocol details, and
 8. [Pin/Unpin & Offline Access](#8-pinunpin--offline-access)
 9. [Thumbnails & Previews](#9-thumbnails--previews)
 10. [Authentication & Session Management](#10-authentication--session-management)
-11. [IPC Between UI and Sync Service](#11-ipc-between-ui-and-sync-service)
+11. [Sync State → UI](#11-sync-state--ui)
 12. [Error Handling & Resilience](#12-error-handling--resilience)
 13. [Permissions & Read-Only Folders](#13-permissions--read-only-folders)
 14. [File Naming & Sanitization](#14-file-naming--sanitization)
@@ -27,32 +27,40 @@ This document captures the architecture, design decisions, protocol details, and
 
 ## 1. System Architecture
 
-### Two-Process Model
+### Process Model
 
-The client runs as two cooperating processes:
+Use the fewest processes the platform forces on you, and never add an RPC
+layer the platform doesn't require:
 
-- **Service** (background, headless): Owns the sync engine, JMAP connections, file system callbacks, and blob transfers. Runs continuously. On Windows this is a background process launched by the tray app; on other platforms it would be whatever the OS provides (launchd agent, Android foreground service, systemd user unit).
-
-- **App** (UI, user-facing): System tray icon (Windows/macOS/Linux) or settings activity (mobile). Displays sync status, pending changes, account management. Communicates with Service over IPC.
-
-### Why Two Processes
-
-1. The sync engine must survive UI dismissal (mobile) or tray icon restart.
-2. Platform file provider APIs (cfapi, FileProvider, FUSE) require a long-lived process.
-3. Clean separation: the UI never touches the file system or network directly.
+- **Windows**: one long-lived tray process hosts the sync engine, cfapi
+  callbacks, COM handlers and the WinForms UI. (An earlier design split this
+  into a `Service.exe` plus a named-pipe IPC layer; it added ~2,500 lines and a
+  reconnect/version-handshake failure surface for no benefit — the tray process
+  is already long-lived, and a crashed service was never auto-restarted anyway.)
+  None of the Windows APIs need a headless host: the first week of the client
+  ran cfapi placeholders, hydration, uploads and nav-pane registration inside
+  the tray process. The one thing to honour is the manifest `com:ExeServer`
+  contract — COM may launch the executable with `-Embedding` when Explorer
+  activates the URI-source class before the app is running — so the entry
+  point accepts that flag and a second instance launched that way exits
+  quietly.
+- **Apple**: the OS forces a split — the FileProvider extension is a separate
+  process managed by `fileproviderd`. The app and extension share state through
+  files in the App Group container plus Darwin notifications; there is no
+  request/response RPC.
+- **Linux**: one FUSE process.
 
 ### Project Layering
 
 ```
-┌─────────────┐  ┌─────────────┐
-│     App      │  │   Service   │
-│  (UI, tray)  │  │ (sync, I/O) │
-└──────┬───────┘  └──────┬──────┘
-       │    IPC (pipes)   │
-       └────────┬─────────┘
-                │
-     ┌──────────┼──────────┐
-     │          │          │
+┌──────────────────────────────┐
+│  Host (tray app / extension) │
+│  login + account supervision │
+│  UI                          │
+└──────────────┬───────────────┘
+               │
+     ┌─────────┼──────────┐
+     │         │          │
 ┌────┴────┐ ┌──┴───┐ ┌────┴─────┐
 │ Platform│ │ Jmap │ │ Logging  │
 │ (cfapi/ │ │(proto)│ │          │
@@ -61,7 +69,7 @@ The client runs as two cooperating processes:
 └─────────┘
 ```
 
-The **Jmap** and **Logging** layers are cross-platform (no OS dependencies). The **Platform** layer is the only part that changes per OS. The **IPC** layer needs platform-appropriate transport but the message schema is portable.
+The **Jmap** and **Logging** layers are cross-platform (no OS dependencies). The **Platform** layer is the only part that changes per OS.
 
 ---
 
@@ -574,49 +582,27 @@ The PACC spec also defines a DNS TXT record at `_ua-auto-config.{domain}` carryi
 
 ---
 
-## 11. IPC Between UI and Sync Service
+## 11. Sync State → UI
 
-### Message Types
+The UI renders immutable per-account snapshots produced by the sync side; it
+never reaches into engine internals.
 
-**Commands** (UI → Service):
-- GetStatus, AddLogin, RemoveLogin, ConfigureLogin
-- DiscoverAccounts (list available accounts from session)
-- Pause, Resume, SyncNow
-- GetOutbox (list pending changes)
+**Status** (per account): `accountId, loginId, displayName, syncRootPath,
+username, status: Idle | Syncing | Error | Disconnected | Paused, statusDetail,
+pendingCount, quotaUsed, quotaLimit, pauseReason`.
 
-**Events** (Service → UI, push-based):
-- StatusSnapshot (all accounts)
-- AccountStatusChanged (one account)
-- ActivityChanged (per-account activity snapshot: active/pending/rejected uploads, active/pending downloads, counts)
+**Activity** (per account): active / error / pending / rejected upload entries,
+active + pending downloads, recently-completed items, and a sync-progress phase.
 
-The activity feed is push-based (not polled). The service fires a throttled event (100ms) whenever outbox or download state changes. The UI debounces (50ms) and renders from a cached snapshot per account. Initial state is fetched via `GetOutbox` on connect; after that, pushes take over.
+The activity feed is event-driven (not polled). The sync side coalesces
+outbox/download events (100ms) into one snapshot rebuild; the UI debounces
+(50ms) and renders from a cached snapshot per account. On Windows this is an
+in-process event (`SyncController`); on Apple the extension writes a status
+file and posts a Darwin notification.
 
-Upload progress is reported as **bytes uploaded** (not percentage). The service streams push `uploadedBytes` and `fileSize` per entry; the UI calculates percentage locally. This avoids rounding artifacts, enables accurate display for any file size, and lets the UI show bytes/total in tooltips. Progress callbacks from the upload streams are throttled to 100ms to avoid flooding the IPC channel.
-
-### Per-Account Status
-
-```
-{
-    accountId, loginId, displayName, syncRootPath, username,
-    status: Idle | Syncing | Error | Disconnected | Paused,
-    statusDetail: "human readable message",
-    pendingCount: 5,
-    quotaUsed: 1073741824,
-    quotaLimit: 5368709120,
-    pauseReason: "UserRequested" | "DiskFull" | "MeteredConnection" | null
-}
-```
-
-### Transport
-
-Platform-appropriate:
-- **Windows**: Named pipes
-- **macOS**: XPC (preferred for sandboxed apps) or Unix domain sockets
-- **Linux**: Unix domain sockets or D-Bus
-- **Android**: Bound service with AIDL or Messenger
-- **iOS**: App Groups shared container + Darwin notifications (limited)
-
-The message format (JSON lines or similar) can be shared.
+Upload progress is reported as **bytes uploaded** (not percentage), with the
+file size alongside; the UI calculates percentage locally. Progress callbacks
+from the upload streams are throttled to 100ms.
 
 ---
 

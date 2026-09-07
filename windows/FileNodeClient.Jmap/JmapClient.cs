@@ -9,12 +9,28 @@ using FileNodeClient.Jmap.Models;
 
 namespace FileNodeClient.Jmap;
 
+/// <summary>
+/// JMAP FileNode client for one account. A login (HttpClient + session) may
+/// serve several accounts: <see cref="ForAccount"/> returns another view over
+/// the same connection targeting a different accountId.
+/// </summary>
 public class JmapClient : IJmapClient
 {
-    private readonly HttpClient _http;
-    private JmapSession? _session;
-    private JmapContext? _context;
-    private int _nextCallId;
+    /// <summary>State shared by every per-account view of one login.</summary>
+    private sealed class Connection(HttpClient http)
+    {
+        public readonly HttpClient Http = http;
+        public JmapSession? Session;
+        public int NextCallId;
+        // Some accounts advertise the Quota capability at session level but reject
+        // Quota/get at HTTP level (403 Forbidden). Once we hit that, stop including
+        // Quota/get in batched calls for every account on this login.
+        public volatile bool QuotaForbidden;
+    }
+
+    private readonly Connection _conn;
+    private readonly bool _ownsConnection;
+    private string? _accountId;
     private readonly ConcurrentDictionary<string, DateTime> _pendingAccessed = new();
     private Timer? _accessedFlushTimer;
 
@@ -34,131 +50,26 @@ public class JmapClient : IJmapClient
     internal static readonly string[] FileNodeProperties =
         ["id", "parentId", "blobId", "name", "type", "size", "created", "modified", "role", "myRights", "shareWith", "executable", "accessed", "isSubscribed"];
     private static readonly HashSet<string> SupportedDigests = ["sha", "sha-256"];
-    private string? _preferredDigestAlgorithm;
-    private bool _preferredDigestResolved;
-    private long? _chunkSize;
-    private bool _chunkSizeResolved;
-    private int? _maxDataSources;
-    private bool _maxDataSourcesResolved;
-    private long? _maxSizeBlobSet;
-    private bool _maxSizeBlobSetResolved;
-    private string? _trashUrl;
-    private bool _trashUrlResolved;
-    private string? _webUrlTemplate;
-    private bool _webUrlTemplateResolved;
-    private string? _webWriteUrlTemplate;
-    private bool _webWriteUrlTemplateResolved;
-    // Some accounts advertise the Quota capability at session level but reject
-    // Quota/get at HTTP level (403 Forbidden). Once we hit that, stop including
-    // Quota/get in batched calls for this session. Shared with AccountScopedJmapClient
-    // wrappers so a 403 on any sibling account suppresses retries on all of them.
-    private volatile bool _quotaForbidden;
-    internal bool IsQuotaForbidden => _quotaForbidden;
-    internal void MarkQuotaForbidden() => _quotaForbidden = true;
 
-    public JmapSession Session => _session
+    public JmapSession Session => _conn.Session
         ?? throw new InvalidOperationException("Session not initialised — call ConnectAsync first");
 
-    public JmapContext Context => _context
-        ?? throw new InvalidOperationException("Context not initialised — call ConnectAsync first");
+    public string AccountId => _accountId
+        ?? throw new InvalidOperationException("Account not initialised — call ConnectAsync first");
 
-    public string AccountId => Context.AccountId;
-    public string Username => Context.Username;
+    public string Username => Session.Username;
+    public JmapContext Context => new(Username, AccountId);
 
-    public string? PreferredDigestAlgorithm
-    {
-        get
-        {
-            if (!_preferredDigestResolved)
-            {
-                var algos = Session.GetSupportedDigestAlgorithms(AccountId);
-                _preferredDigestAlgorithm = algos.FirstOrDefault(a => SupportedDigests.Contains(a));
-                _preferredDigestResolved = true;
-            }
-            return _preferredDigestAlgorithm;
-        }
-    }
-
-    public long? ChunkSize
-    {
-        get
-        {
-            if (!_chunkSizeResolved)
-            {
-                _chunkSize = Session.GetChunkSize(AccountId);
-                _chunkSizeResolved = true;
-            }
-            return _chunkSize;
-        }
-    }
-
-    public int? MaxDataSources
-    {
-        get
-        {
-            if (!_maxDataSourcesResolved)
-            {
-                _maxDataSources = Session.GetMaxDataSources(AccountId);
-                _maxDataSourcesResolved = true;
-            }
-            return _maxDataSources;
-        }
-    }
-
-    public long? MaxSizeBlobSet
-    {
-        get
-        {
-            if (!_maxSizeBlobSetResolved)
-            {
-                _maxSizeBlobSet = Session.GetMaxSizeBlobSet(AccountId);
-                _maxSizeBlobSetResolved = true;
-            }
-            return _maxSizeBlobSet;
-        }
-    }
-
+    public string? PreferredDigestAlgorithm =>
+        Session.GetSupportedDigestAlgorithms(AccountId).FirstOrDefault(SupportedDigests.Contains);
+    public long? ChunkSize => Session.GetChunkSize(AccountId);
+    public int? MaxDataSources => Session.GetMaxDataSources(AccountId);
+    public long? MaxSizeBlobSet => Session.GetMaxSizeBlobSet(AccountId);
     public bool HasBlob2 => Session.HasAccountCapability(AccountId, Blob2Capability);
     public bool HasBlobConvert => HasBlob2;
-
-    public string? TrashUrl
-    {
-        get
-        {
-            if (!_trashUrlResolved)
-            {
-                _trashUrl = Session.GetTrashUrl(AccountId);
-                _trashUrlResolved = true;
-            }
-            return _trashUrl;
-        }
-    }
-
-    public string? WebUrlTemplate
-    {
-        get
-        {
-            if (!_webUrlTemplateResolved)
-            {
-                _webUrlTemplate = Session.GetWebUrlTemplate(AccountId);
-                _webUrlTemplateResolved = true;
-            }
-            return _webUrlTemplate;
-        }
-    }
-
-    public string? WebWriteUrlTemplate
-    {
-        get
-        {
-            if (!_webWriteUrlTemplateResolved)
-            {
-                _webWriteUrlTemplate = Session.GetWebWriteUrlTemplate(AccountId);
-                _webWriteUrlTemplateResolved = true;
-            }
-            return _webWriteUrlTemplate;
-        }
-    }
+    public string? TrashUrl => Session.GetTrashUrl(AccountId);
+    public string? WebUrlTemplate => Session.GetWebUrlTemplate(AccountId);
+    public string? WebWriteUrlTemplate => Session.GetWebWriteUrlTemplate(AccountId);
 
     public JmapClient(string token, bool debug = false)
         : this(new TokenAuth(token), debug) { }
@@ -170,158 +81,168 @@ public class JmapClient : IJmapClient
             Log.Debug("[JMAP] Debug logging enabled");
             handler = new DebugLoggingHandler(handler);
         }
-        _http = new HttpClient(handler) { Timeout = Timeout.InfiniteTimeSpan };
+        _conn = new Connection(new HttpClient(handler) { Timeout = Timeout.InfiniteTimeSpan });
+        _ownsConnection = true;
+    }
+
+    private JmapClient(Connection conn, string accountId)
+    {
+        _conn = conn;
+        _accountId = accountId;
     }
 
     public async Task ConnectAsync(string sessionUrl, CancellationToken ct = default)
     {
-        var response = await _http.GetAsync(sessionUrl, ct);
+        var response = await _conn.Http.GetAsync(sessionUrl, ct);
         response.EnsureSuccessStatusCode();
         var json = await response.Content.ReadAsStringAsync(ct);
-        _session = JsonSerializer.Deserialize<JmapSession>(json)
+        var session = JsonSerializer.Deserialize<JmapSession>(json)
             ?? throw new InvalidOperationException("Failed to parse JMAP session");
+        _conn.Session = session;
+        _accountId = session.GetPrimaryAccount(FileNodeCapability);
+    }
 
-        var accountId = _session.GetPrimaryAccount(FileNodeCapability);
-        _context = new JmapContext(_session.Username, accountId);
+    /// <summary>
+    /// Returns all accounts in this session that have the FileNode capability.
+    /// Each entry contains the accountId, display name, and whether it's the
+    /// primary account for FileNode.
+    /// </summary>
+    public List<(string AccountId, string Name, bool IsPrimary)> GetFileNodeAccounts()
+    {
+        var primary = Session.PrimaryAccounts.GetValueOrDefault(FileNodeCapability);
+        var result = new List<(string, string, bool)>();
+        foreach (var (accountId, account) in Session.Accounts)
+        {
+            if (account.AccountCapabilities.ContainsKey(FileNodeCapability))
+                result.Add((accountId, account.Name, accountId == primary));
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Returns a client that shares this login's HttpClient and session but
+    /// targets a different account.
+    /// </summary>
+    public JmapClient ForAccount(string accountId)
+    {
+        if (!Session.Accounts.ContainsKey(accountId))
+            throw new ArgumentException($"Account {accountId} not found in session");
+        return new JmapClient(_conn, accountId);
+    }
+
+    // ---- Request plumbing ----
+
+    private string NextCallId() => "c" + Interlocked.Increment(ref _conn.NextCallId);
+
+    /// <summary>Responses of one batched request, keyed by call id.</summary>
+    private sealed class Batch(Dictionary<string, (string Method, JsonElement Args)> byCallId)
+    {
+        public bool TryGet(string callId, out (string Method, JsonElement Args) response) =>
+            byCallId.TryGetValue(callId, out response);
+
+        /// <summary>The raw result of a call, throwing if it's missing or an error.</summary>
+        public JsonElement Get(string callId, string expectedMethod)
+        {
+            if (!byCallId.TryGetValue(callId, out var resp))
+                throw new InvalidOperationException($"No response for call ID {callId}");
+            if (resp.Method == "error")
+                throw new InvalidOperationException($"JMAP error: {resp.Args}");
+            if (resp.Method != expectedMethod)
+                throw new InvalidOperationException(
+                    $"JMAP method mismatch: expected {expectedMethod}, got {resp.Method}");
+            return resp.Args;
+        }
+
+        public T Get<T>(string callId, string expectedMethod) =>
+            Get(callId, expectedMethod).Deserialize<T>(JmapSerializerOptions.Default)
+            ?? throw new InvalidOperationException($"Failed to deserialize {expectedMethod} response");
+    }
+
+    /// <summary>
+    /// POST one or more method calls in a single request. Pending `accessed`
+    /// timestamps recorded via <see cref="RecordAccess"/> are piggybacked as an
+    /// extra FileNode/set call.
+    /// </summary>
+    private async Task<Batch> CallBatchAsync(string[] capabilities,
+        IEnumerable<(string method, object args, string callId)> calls, CancellationToken ct)
+    {
+        var callList = calls.ToList();
+        var accessedBatch = DrainPendingAccessed();
+        if (accessedBatch.Count > 0)
+        {
+            var accessedUpdate = new Dictionary<string, object>();
+            foreach (var (nodeId, time) in accessedBatch)
+                accessedUpdate[nodeId] = new { accessed = time.ToUniversalTime() };
+            callList.Add(("FileNode/set", new { accountId = AccountId, update = accessedUpdate }, "_accessed"));
+            if (!capabilities.Contains(FileNodeCapability))
+                capabilities = [.. capabilities, FileNodeCapability];
+        }
+
+        var request = JmapRequest.Create(capabilities, callList.ToArray());
+        var json = JsonSerializer.Serialize(request, JmapSerializerOptions.Default);
+        var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+        var httpResponse = await _conn.Http.PostAsync(Session.ApiUrl, content, ct);
+        httpResponse.EnsureSuccessStatusCode();
+        var responseJson = await httpResponse.Content.ReadAsStringAsync(ct);
+        var response = JsonSerializer.Deserialize<JmapResponse>(responseJson, JmapSerializerOptions.Default)
+            ?? throw new InvalidOperationException("Failed to parse JMAP response");
+
+        var byCallId = new Dictionary<string, (string, JsonElement)>();
+        foreach (var entry in response.MethodResponses)
+            byCallId[entry[2].GetString() ?? ""] = (entry[0].GetString() ?? "", entry[1]);
+        return new Batch(byCallId);
     }
 
     private async Task<JsonElement> CallAsync(string[] capabilities, string method, object args, CancellationToken ct)
     {
-        var callId = "c" + Interlocked.Increment(ref _nextCallId);
-
-        // Check for pending accessed timestamps to piggyback
-        var accessedBatch = DrainPendingAccessed();
-
-        JmapRequest request;
-        if (accessedBatch.Count > 0)
-        {
-            var accessedCallId = "_accessed";
-            var accessedUpdate = new Dictionary<string, object>();
-            foreach (var (nodeId, time) in accessedBatch)
-                accessedUpdate[nodeId] = new { accessed = time.ToUniversalTime() };
-
-            // Ensure FileNode capability is included
-            var caps = capabilities.Contains(FileNodeCapability)
-                ? capabilities
-                : capabilities.Append(FileNodeCapability).ToArray();
-
-            request = JmapRequest.Create(caps,
-                (method, args, callId),
-                ("FileNode/set", new { accountId = AccountId, update = accessedUpdate }, accessedCallId));
-        }
-        else
-        {
-            request = JmapRequest.Create(capabilities, (method, args, callId));
-        }
-
-        var json = JsonSerializer.Serialize(request, JmapSerializerOptions.Default);
-        var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
-        var httpResponse = await _http.PostAsync(Session.ApiUrl, content, ct);
-        httpResponse.EnsureSuccessStatusCode();
-        var responseJson = await httpResponse.Content.ReadAsStringAsync(ct);
-        var response = JsonSerializer.Deserialize<JmapResponse>(responseJson, JmapSerializerOptions.Default)
-            ?? throw new InvalidOperationException("Failed to parse JMAP response");
-
-        if (response.MethodResponses.Length == 0)
-            throw new InvalidOperationException($"No response for {method} call");
-
-        // Return only the primary response (index 0), ignore the piggybacked accessed response
-        var entry = response.MethodResponses[0];
-        var respMethod = entry[0].GetString() ?? "";
-        if (respMethod == "error")
-            throw new InvalidOperationException($"JMAP error: {entry[1]}");
-        if (respMethod != method)
-            throw new InvalidOperationException($"JMAP method mismatch: expected {method}, got {respMethod}");
-
-        return entry[1];
+        var callId = NextCallId();
+        var batch = await CallBatchAsync(capabilities, [(method, args, callId)], ct);
+        return batch.Get(callId, method);
     }
 
     private async Task<T> CallAsync<T>(string[] capabilities, string method, object args, CancellationToken ct)
     {
-        var result = await CallAsync(capabilities, method, args, ct);
-        return result.Deserialize<T>(JmapSerializerOptions.Default)
-            ?? throw new InvalidOperationException($"Failed to deserialize {method} response");
+        var callId = NextCallId();
+        var batch = await CallBatchAsync(capabilities, [(method, args, callId)], ct);
+        return batch.Get<T>(callId, method);
     }
 
-    public async Task<string> FindHomeNodeIdAsync(CancellationToken ct = default)
+    /// <summary>FileNode/query chained into FileNode/get via a result reference.</summary>
+    private async Task<FileNode[]> QueryAndGetAsync(object filter, object? sort, CancellationToken ct)
     {
-        var queryCallId = "c" + Interlocked.Increment(ref _nextCallId);
-        var getCallId = "c" + Interlocked.Increment(ref _nextCallId);
+        var queryCallId = NextCallId();
+        var getCallId = NextCallId();
+        var queryArgs = new Dictionary<string, object?> { ["accountId"] = AccountId, ["filter"] = filter };
+        if (sort != null) queryArgs["sort"] = sort;
 
-        var request = JmapRequest.Create(FileNodeUsing,
-            ("FileNode/query", new
-            {
-                accountId = AccountId,
-                filter = new { role = "home" },
-            }, queryCallId),
+        var batch = await CallBatchAsync(FileNodeUsing,
+        [
+            ("FileNode/query", queryArgs, queryCallId),
             ("FileNode/get", new Dictionary<string, object>
             {
                 ["accountId"] = AccountId,
                 ["#ids"] = new { resultOf = queryCallId, name = "FileNode/query", path = "/ids" },
-            }, getCallId));
+                ["properties"] = FileNodeProperties,
+            }, getCallId),
+        ], ct);
 
-        var json = JsonSerializer.Serialize(request, JmapSerializerOptions.Default);
-        var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
-        var httpResponse = await _http.PostAsync(Session.ApiUrl, content, ct);
-        httpResponse.EnsureSuccessStatusCode();
-        var responseJson = await httpResponse.Content.ReadAsStringAsync(ct);
-        var response = JsonSerializer.Deserialize<JmapResponse>(responseJson, JmapSerializerOptions.Default)
-            ?? throw new InvalidOperationException("Failed to parse JMAP response");
+        batch.Get(queryCallId, "FileNode/query"); // surface query errors first
+        return batch.Get<GetResponse<FileNode>>(getCallId, "FileNode/get").List;
+    }
 
-        var responseMap = new Dictionary<string, (string method, JsonElement args)>();
-        foreach (var entry in response.MethodResponses)
-        {
-            var respCallId = entry[2].GetString() ?? "";
-            var respMethod = entry[0].GetString() ?? "";
-            responseMap[respCallId] = (respMethod, entry[1]);
-        }
+    // ---- FileNode reads ----
 
-        GetValidatedResult<QueryResponse>(responseMap, queryCallId, "FileNode/query");
-        var getResult = GetValidatedResult<GetResponse<FileNode>>(responseMap, getCallId, "FileNode/get");
-
-        if (getResult.List.Length == 0)
-            throw new InvalidOperationException("No FileNode with role 'home' found");
-
-        return getResult.List[0].Id;
+    public async Task<string> FindHomeNodeIdAsync(CancellationToken ct = default)
+    {
+        var nodes = await QueryAndGetAsync(new { role = "home" }, null, ct);
+        return nodes.FirstOrDefault()?.Id
+            ?? throw new InvalidOperationException("No FileNode with role 'home' found");
     }
 
     public async Task<string?> FindTrashNodeIdAsync(CancellationToken ct = default)
     {
-        var queryCallId = "c" + Interlocked.Increment(ref _nextCallId);
-        var getCallId = "c" + Interlocked.Increment(ref _nextCallId);
-
-        var request = JmapRequest.Create(FileNodeUsing,
-            ("FileNode/query", new
-            {
-                accountId = AccountId,
-                filter = new { role = "trash" },
-            }, queryCallId),
-            ("FileNode/get", new Dictionary<string, object>
-            {
-                ["accountId"] = AccountId,
-                ["#ids"] = new { resultOf = queryCallId, name = "FileNode/query", path = "/ids" },
-            }, getCallId));
-
-        var json = JsonSerializer.Serialize(request, JmapSerializerOptions.Default);
-        var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
-        var httpResponse = await _http.PostAsync(Session.ApiUrl, content, ct);
-        httpResponse.EnsureSuccessStatusCode();
-        var responseJson = await httpResponse.Content.ReadAsStringAsync(ct);
-        var response = JsonSerializer.Deserialize<JmapResponse>(responseJson, JmapSerializerOptions.Default)
-            ?? throw new InvalidOperationException("Failed to parse JMAP response");
-
-        var responseMap = new Dictionary<string, (string method, JsonElement args)>();
-        foreach (var entry in response.MethodResponses)
-        {
-            var respCallId = entry[2].GetString() ?? "";
-            var respMethod = entry[0].GetString() ?? "";
-            responseMap[respCallId] = (respMethod, entry[1]);
-        }
-
-        GetValidatedResult<QueryResponse>(responseMap, queryCallId, "FileNode/query");
-        var getResult = GetValidatedResult<GetResponse<FileNode>>(responseMap, getCallId, "FileNode/get");
-
-        return getResult.List.Length > 0 ? getResult.List[0].Id : null;
+        var nodes = await QueryAndGetAsync(new { role = "trash" }, null, ct);
+        return nodes.FirstOrDefault()?.Id;
     }
 
     public async Task<FileNode[]> GetFileNodesAsync(string[] ids, CancellationToken ct = default)
@@ -331,46 +252,8 @@ public class JmapClient : IJmapClient
         return result.List;
     }
 
-    public async Task<FileNode[]> GetChildrenAsync(string parentId, CancellationToken ct = default)
-    {
-        var queryCallId = "c" + Interlocked.Increment(ref _nextCallId);
-        var getCallId = "c" + Interlocked.Increment(ref _nextCallId);
-
-        var request = JmapRequest.Create(FileNodeUsing,
-            ("FileNode/query", new
-            {
-                accountId = AccountId,
-                filter = new { parentId },
-                sort = new[] { new { property = "name", isAscending = true } },
-            }, queryCallId),
-            ("FileNode/get", new Dictionary<string, object>
-            {
-                ["accountId"] = AccountId,
-                ["#ids"] = new { resultOf = queryCallId, name = "FileNode/query", path = "/ids" },
-                ["properties"] = FileNodeProperties,
-            }, getCallId));
-
-        var json = JsonSerializer.Serialize(request, JmapSerializerOptions.Default);
-        var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
-        var httpResponse = await _http.PostAsync(Session.ApiUrl, content, ct);
-        httpResponse.EnsureSuccessStatusCode();
-        var responseJson = await httpResponse.Content.ReadAsStringAsync(ct);
-        var response = JsonSerializer.Deserialize<JmapResponse>(responseJson, JmapSerializerOptions.Default)
-            ?? throw new InvalidOperationException("Failed to parse JMAP response");
-
-        var responseMap = new Dictionary<string, (string method, JsonElement args)>();
-        foreach (var entry in response.MethodResponses)
-        {
-            var respCallId = entry[2].GetString() ?? "";
-            var respMethod = entry[0].GetString() ?? "";
-            responseMap[respCallId] = (respMethod, entry[1]);
-        }
-
-        GetValidatedResult<QueryResponse>(responseMap, queryCallId, "FileNode/query");
-        var getResult = GetValidatedResult<GetResponse<FileNode>>(responseMap, getCallId, "FileNode/get");
-
-        return getResult.List;
-    }
+    public Task<FileNode[]> GetChildrenAsync(string parentId, CancellationToken ct = default) =>
+        QueryAndGetAsync(new { parentId }, new[] { new { property = "name", isAscending = true } }, ct);
 
     public async Task<ChangesResponse> GetChangesAsync(string sinceState, CancellationToken ct = default)
     {
@@ -381,23 +264,18 @@ public class JmapClient : IJmapClient
     public async Task<(ChangesResponse Changes, FileNode[] Created, FileNode[] Updated, Quota[]? Quotas)>
         GetChangesAndNodesAsync(string sinceState, CancellationToken ct = default)
     {
-        // Try batching Quota/get when the server advertises the capability.
-        // Some accounts have the capability at session level but the server
-        // still rejects Quota/get at HTTP 403 — handled via one-shot fallback
-        // below, after which _quotaForbidden suppresses future attempts for
-        // this session.
-        bool includeQuota = Session.HasCapability(QuotaCapability) && !_quotaForbidden;
-
+        // Batch Quota/get in when the server advertises the capability. Some
+        // accounts still reject it with HTTP 403 — retry once without it and
+        // remember so we don't repeat the wasted call.
+        bool includeQuota = Session.HasCapability(QuotaCapability) && !_conn.QuotaForbidden;
         try
         {
             return await ExecuteChangesAndNodesAsync(sinceState, includeQuota, ct);
         }
         catch (HttpRequestException ex) when (includeQuota && ex.StatusCode == System.Net.HttpStatusCode.Forbidden)
         {
-            // Server forbids the Quota capability for this account — retry
-            // without it and remember so we don't repeat the wasted call.
             Log.Info($"[JMAP] Quota/get forbidden for {AccountId}; disabling Quota batching for this session");
-            _quotaForbidden = true;
+            _conn.QuotaForbidden = true;
             return await ExecuteChangesAndNodesAsync(sinceState, includeQuota: false, ct);
         }
     }
@@ -405,32 +283,29 @@ public class JmapClient : IJmapClient
     private async Task<(ChangesResponse Changes, FileNode[] Created, FileNode[] Updated, Quota[]? Quotas)>
         ExecuteChangesAndNodesAsync(string sinceState, bool includeQuota, CancellationToken ct)
     {
-        var changesCallId = "c" + Interlocked.Increment(ref _nextCallId);
-        var createdCallId = "c" + Interlocked.Increment(ref _nextCallId);
-        var updatedCallId = "c" + Interlocked.Increment(ref _nextCallId);
+        var changesCallId = NextCallId();
+        var createdCallId = NextCallId();
+        var updatedCallId = NextCallId();
+
+        Dictionary<string, object> GetByRef(string path) => new()
+        {
+            ["accountId"] = AccountId,
+            ["#ids"] = new { resultOf = changesCallId, name = "FileNode/changes", path },
+            ["properties"] = FileNodeProperties,
+        };
 
         var calls = new List<(string method, object args, string callId)>
         {
             ("FileNode/changes", new { accountId = AccountId, sinceState }, changesCallId),
-            ("FileNode/get", new Dictionary<string, object>
-            {
-                ["accountId"] = AccountId,
-                ["#ids"] = new { resultOf = changesCallId, name = "FileNode/changes", path = "/created" },
-                ["properties"] = FileNodeProperties,
-            }, createdCallId),
-            ("FileNode/get", new Dictionary<string, object>
-            {
-                ["accountId"] = AccountId,
-                ["#ids"] = new { resultOf = changesCallId, name = "FileNode/changes", path = "/updated" },
-                ["properties"] = FileNodeProperties,
-            }, updatedCallId),
+            ("FileNode/get", GetByRef("/created"), createdCallId),
+            ("FileNode/get", GetByRef("/updated"), updatedCallId),
         };
 
         string? quotaCallId = null;
         string[] capabilities = FileNodeUsing;
         if (includeQuota)
         {
-            quotaCallId = "c" + Interlocked.Increment(ref _nextCallId);
+            quotaCallId = NextCallId();
             capabilities = [CoreCapability, FileNodeCapability, QuotaCapability];
             calls.Add(("Quota/get", new Dictionary<string, JsonElement>
             {
@@ -439,64 +314,28 @@ public class JmapClient : IJmapClient
             }, quotaCallId));
         }
 
-        var request = JmapRequest.Create(capabilities, calls.ToArray());
-        var json = JsonSerializer.Serialize(request, JmapSerializerOptions.Default);
-        var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
-        var httpResponse = await _http.PostAsync(Session.ApiUrl, content, ct);
-        httpResponse.EnsureSuccessStatusCode();
-        var responseJson = await httpResponse.Content.ReadAsStringAsync(ct);
-        var response = JsonSerializer.Deserialize<JmapResponse>(responseJson, JmapSerializerOptions.Default)
-            ?? throw new InvalidOperationException("Failed to parse JMAP response");
+        var batch = await CallBatchAsync(capabilities, calls, ct);
 
-        var responseMap = new Dictionary<string, (string method, JsonElement args)>();
-        foreach (var entry in response.MethodResponses)
-        {
-            var respCallId = entry[2].GetString() ?? "";
-            var respMethod = entry[0].GetString() ?? "";
-            responseMap[respCallId] = (respMethod, entry[1]);
-        }
+        // These feed each other via result references, so a failure in any one
+        // makes the rest meaningless. Let the exception bubble.
+        var changes = batch.Get<ChangesResponse>(changesCallId, "FileNode/changes");
+        var created = batch.Get<GetResponse<FileNode>>(createdCallId, "FileNode/get");
+        var updated = batch.Get<GetResponse<FileNode>>(updatedCallId, "FileNode/get");
 
-        // Critical methods: these feed each other via result references, so a
-        // failure in any one makes the rest meaningless. Let the exception bubble.
-        var changes = GetValidatedResult<ChangesResponse>(responseMap, changesCallId, "FileNode/changes");
-        var created = GetValidatedResult<GetResponse<FileNode>>(responseMap, createdCallId, "FileNode/get");
-        var updated = GetValidatedResult<GetResponse<FileNode>>(responseMap, updatedCallId, "FileNode/get");
-
-        // Optional method: tolerate per-method errors without failing the call.
-        // Also flip _quotaForbidden if we see a method-level Quota failure so we
-        // stop asking in future batches.
+        // Quota is optional: tolerate a method-level error, but stop asking.
         Quota[]? quotas = null;
-        if (quotaCallId != null && responseMap.TryGetValue(quotaCallId, out var quotaResp))
+        if (quotaCallId != null && batch.TryGet(quotaCallId, out var quotaResp))
         {
-            if (quotaResp.method == "Quota/get")
-            {
-                var quotaResult = quotaResp.args.Deserialize<GetResponse<Quota>>(JmapSerializerOptions.Default);
-                if (quotaResult != null)
-                    quotas = quotaResult.List;
-            }
+            if (quotaResp.Method == "Quota/get")
+                quotas = quotaResp.Args.Deserialize<GetResponse<Quota>>(JmapSerializerOptions.Default)?.List;
             else
             {
-                Log.Info($"[JMAP] Quota/get returned {quotaResp.method} for {AccountId}; disabling Quota batching for this session");
-                _quotaForbidden = true;
+                Log.Info($"[JMAP] Quota/get returned {quotaResp.Method} for {AccountId}; disabling Quota batching for this session");
+                _conn.QuotaForbidden = true;
             }
         }
 
         return (changes, created.List, updated.List, quotas);
-    }
-
-    private static T GetValidatedResult<T>(
-        Dictionary<string, (string method, JsonElement args)> responseMap,
-        string callId, string expectedMethod)
-    {
-        if (!responseMap.TryGetValue(callId, out var resp))
-            throw new InvalidOperationException($"No response for call ID {callId}");
-        if (resp.method == "error")
-            throw new InvalidOperationException($"JMAP error: {resp.args}");
-        if (resp.method != expectedMethod)
-            throw new InvalidOperationException(
-                $"JMAP method mismatch: expected {expectedMethod}, got {resp.method}");
-        return resp.args.Deserialize<T>(JmapSerializerOptions.Default)
-            ?? throw new InvalidOperationException($"Failed to deserialize {expectedMethod} response");
     }
 
     public async Task<string> GetStateAsync(string homeNodeId, CancellationToken ct = default)
@@ -561,22 +400,17 @@ public class JmapClient : IJmapClient
         }
 
         var results = await Task.WhenAll(tasks);
-        var total = results.Sum(r => r.List.Length);
-        var allNodes = new FileNode[total];
-        int offset = 0;
-        foreach (var r in results)
-        {
-            r.List.CopyTo(allNodes, offset);
-            offset += r.List.Length;
-        }
+        var allNodes = results.SelectMany(r => r.List).ToArray();
         // State should be identical across pages for a consistent snapshot; use the last.
         return (allNodes, results[^1].State);
     }
 
+    // ---- Blob transfer ----
+
     public async Task<Stream> DownloadBlobAsync(string blobId, string? type = null, string? name = null, CancellationToken ct = default)
     {
         var url = Session.GetDownloadUrl(AccountId, blobId, type, name);
-        var response = await _http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
+        var response = await _conn.Http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
         response.EnsureSuccessStatusCode();
         return await response.Content.ReadAsStreamAsync(ct);
     }
@@ -587,7 +421,7 @@ public class JmapClient : IJmapClient
         var request = new HttpRequestMessage(HttpMethod.Get, url);
         request.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(offset, offset + length - 1);
 
-        var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+        var response = await _conn.Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
         response.EnsureSuccessStatusCode();
 
         var stream = await response.Content.ReadAsStreamAsync(ct);
@@ -595,18 +429,69 @@ public class JmapClient : IJmapClient
         return (stream, isPartial);
     }
 
-    public async Task<string> UploadBlobAsync(Stream data, string contentType, CancellationToken ct = default)
+    /// <summary>
+    /// Raw HTTP POST of bytes to the upload URL. Forced to HTTP/1.1 so each
+    /// upload gets its own TCP connection and doesn't starve interactive
+    /// downloads via HTTP/2 multiplexing contention.
+    /// </summary>
+    private async Task<UploadResponse> PostBlobAsync(Stream data, string contentType, long? contentLength, CancellationToken ct)
     {
-        var url = Session.GetUploadUrl(AccountId);
         var content = new StreamContent(data);
         content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(contentType);
-        using var request = new HttpRequestMessage(HttpMethod.Post, url) { Content = content, Version = System.Net.HttpVersion.Version11 };
-        var response = await _http.SendAsync(request, ct);
+        if (contentLength.HasValue)
+            content.Headers.ContentLength = contentLength;
+        using var request = new HttpRequestMessage(HttpMethod.Post, Session.GetUploadUrl(AccountId))
+        {
+            Content = content,
+            Version = System.Net.HttpVersion.Version11,
+        };
+        var response = await _conn.Http.SendAsync(request, ct);
         response.EnsureSuccessStatusCode();
         var json = await response.Content.ReadAsStringAsync(ct);
-        var upload = JsonSerializer.Deserialize<UploadResponse>(json, JmapSerializerOptions.Default)
+        return JsonSerializer.Deserialize<UploadResponse>(json, JmapSerializerOptions.Default)
             ?? throw new InvalidOperationException("Failed to parse upload response");
+    }
+
+    public async Task<string> UploadBlobAsync(Stream data, string contentType, CancellationToken ct = default)
+    {
+        var upload = await PostBlobAsync(data, contentType, null, ct);
         return upload.BlobId;
+    }
+
+    /// <summary>
+    /// Combine already-uploaded chunks into one blob via Blob/set (blob2),
+    /// with per-chunk and overall digests for server-side integrity checking.
+    /// </summary>
+    private async Task<string> CombineChunksAsync(List<(string BlobId, string Sha1Base64)> chunks,
+        string contentType, string overallSha1Base64, CancellationToken ct)
+    {
+        Log.Info($"[ChunkedUpload] Combining {chunks.Count} chunks for account {AccountId}, blobIds=[{string.Join(", ", chunks.Select(c => c.BlobId))}]");
+        var createId = Guid.NewGuid().ToString("N")[..12];
+        var result = await CallAsync(Blob2Using, "Blob/set", new
+        {
+            accountId = AccountId,
+            create = new Dictionary<string, object>
+            {
+                [createId] = new Dictionary<string, object>
+                {
+                    ["data"] = chunks.Select(c => new Dictionary<string, object?>
+                    {
+                        ["blobId"] = c.BlobId,
+                        ["digest:sha"] = c.Sha1Base64,
+                    }).ToArray(),
+                    ["type"] = contentType,
+                    ["digest:sha"] = overallSha1Base64,
+                },
+            },
+        }, ct);
+
+        var blobUpload = result.Deserialize<BlobUploadResponse>(JmapSerializerOptions.Default)
+            ?? throw new InvalidOperationException("Failed to parse Blob/set response");
+        if (blobUpload.NotCreated != null && blobUpload.NotCreated.TryGetValue(createId, out var err))
+            throw new InvalidOperationException($"Blob/set failed: {err.Type} — {err.Description}");
+        if (blobUpload.Created == null || !blobUpload.Created.TryGetValue(createId, out var created))
+            throw new InvalidOperationException("Blob/set returned no result");
+        return created.Id;
     }
 
     /// <summary>
@@ -646,15 +531,11 @@ public class JmapClient : IJmapClient
         if (effectiveChunkSize > MaxChunkSize)
             effectiveChunkSize = MaxChunkSize;
 
-        return UploadBlobChunkedInternalAsync(_http, Session.GetUploadUrl(AccountId), AccountId,
-            effectiveChunkSize,
-            (caps, method, args) => CallAsync(caps, method, args, ct),
+        return UploadBlobChunkedInternalAsync(effectiveChunkSize,
             data, contentType, totalSize, onProgress, onChunkUploaded, previousChunks, ct);
     }
 
-    internal static async Task<string> UploadBlobChunkedInternalAsync(
-        HttpClient http, string uploadUrl, string accountId, long chunkSize,
-        Func<string[], string, object, Task<JsonElement>> callAsync,
+    private async Task<string> UploadBlobChunkedInternalAsync(long chunkSize,
         Stream data, string contentType, long totalSize,
         Action<long>? onProgress, Action<UploadedChunkInfo>? onChunkUploaded,
         List<UploadedChunkInfo>? previousChunks,
@@ -678,12 +559,12 @@ public class JmapClient : IJmapClient
             int validCount = previousChunks.Count;
             try
             {
-                var blobCheck = await callAsync(Blob2Using, "Blob/get", new
+                var blobCheck = await CallAsync(Blob2Using, "Blob/get", new
                 {
-                    accountId,
+                    accountId = AccountId,
                     ids = blobIds,
                     properties = new[] { "id", "size" },
-                });
+                }, ct);
                 var blobResponse = blobCheck.Deserialize<BlobGetResponse>(JmapSerializerOptions.Default);
                 if (blobResponse != null)
                 {
@@ -711,8 +592,7 @@ public class JmapClient : IJmapClient
             {
                 // All chunks expired — start from scratch
                 data.Position = 0;
-                return await UploadBlobChunkedInternalAsync(http, uploadUrl, accountId,
-                    chunkSize, callAsync, data, contentType, totalSize,
+                return await UploadBlobChunkedInternalAsync(chunkSize, data, contentType, totalSize,
                     onProgress, onChunkUploaded, null, ct);
             }
 
@@ -741,9 +621,7 @@ public class JmapClient : IJmapClient
                     {
                         // File has changed since chunks were uploaded — start over
                         data.Position = 0;
-                        ArrayPool<byte>.Shared.Return(hashBuf);
-                        return await UploadBlobChunkedInternalAsync(http, uploadUrl, accountId,
-                            chunkSize, callAsync, data, contentType, totalSize,
+                        return await UploadBlobChunkedInternalAsync(chunkSize, data, contentType, totalSize,
                             onProgress, onChunkUploaded, null, ct);
                     }
 
@@ -769,18 +647,8 @@ public class JmapClient : IJmapClient
                 data, thisChunkSize, chunkHash, overallHash,
                 totalUploaded, totalSize, onProgress, null);
 
-            // Upload chunk via HTTP POST (chunks are raw bytes, not the final content type).
-            // Force HTTP/1.1 so each upload gets its own TCP connection and doesn't
-            // starve interactive downloads via HTTP/2 multiplexing contention.
-            var chunkContent = new StreamContent(chunkStream);
-            chunkContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
-            chunkContent.Headers.ContentLength = thisChunkSize;
-            using var chunkRequest = new HttpRequestMessage(HttpMethod.Post, uploadUrl) { Content = chunkContent, Version = System.Net.HttpVersion.Version11 };
-            var response = await http.SendAsync(chunkRequest, ct);
-            response.EnsureSuccessStatusCode();
-            var json = await response.Content.ReadAsStringAsync(ct);
-            var upload = JsonSerializer.Deserialize<UploadResponse>(json, JmapSerializerOptions.Default)
-                ?? throw new InvalidOperationException("Failed to parse chunk upload response");
+            // Chunks are raw bytes, not the final content type.
+            var upload = await PostBlobAsync(chunkStream, "application/octet-stream", thisChunkSize, ct);
 
             var chunkSha1Base64 = chunkStream.GetChunkSha1Base64();
             var bytesRead = chunkStream.TotalBytesRead;
@@ -793,72 +661,13 @@ public class JmapClient : IJmapClient
             await Task.Yield();
         }
 
-        // Compute overall SHA1
-        var overallSha1 = overallHash.GetHashAndReset();
-        var overallSha1Base64 = Convert.ToBase64String(overallSha1);
+        // Signal final progress — all bytes uploaded, now combining.
+        // This resets the stall timer so the combine call has a full
+        // timeout window without being cancelled prematurely.
+        onProgress?.Invoke(totalSize);
 
-            // Signal final progress — all bytes uploaded, now combining.
-            // This resets the stall timer so the combine call has a full
-            // timeout window without being cancelled prematurely.
-            onProgress?.Invoke(totalSize);
-
-            // Verify chunk blobIds exist before combining
-            var verifyIds = chunkBlobIds.Select(c => c.BlobId).ToArray();
-            try
-            {
-                var verifyResult = await callAsync(Blob2Using, "Blob/get", new
-                {
-                    accountId,
-                    ids = verifyIds,
-                    properties = new[] { "id", "size" },
-                });
-                var verifyResponse = verifyResult.Deserialize<BlobGetResponse>(JmapSerializerOptions.Default);
-                if (verifyResponse != null)
-                {
-                    var found = verifyResponse.List.Select(b => b.Id).ToHashSet();
-                    var notFoundIds = verifyResponse.NotFound;
-                    Log.Info($"[ChunkedUpload] Blob/get verify: {found.Count}/{verifyIds.Length} found, notFound=[{string.Join(", ", notFoundIds)}]");
-                    foreach (var b in verifyResponse.List)
-                        Log.Info($"[ChunkedUpload]   blob {b.Id} size={b.Size}");
-                }
-            }
-            catch (Exception ex)
-            {
-                Log.Info($"[ChunkedUpload] Blob/get verify failed: {ex.Message}");
-            }
-
-            // Combine chunks via Blob/set (blob2)
-            Log.Info($"[ChunkedUpload] Combining {chunkBlobIds.Count} chunks for account {accountId}, blobIds=[{string.Join(", ", chunkBlobIds.Select(c => c.BlobId))}]");
-            var dataArray = chunkBlobIds.Select(c => new Dictionary<string, object?>
-            {
-                ["blobId"] = c.BlobId,
-                ["digest:sha"] = c.Sha1Base64,
-            }).ToArray();
-
-            var createId = Guid.NewGuid().ToString("N")[..12];
-            var createItem = new Dictionary<string, object>
-            {
-                ["data"] = dataArray,
-                ["type"] = contentType,
-                ["digest:sha"] = overallSha1Base64,
-            };
-
-            var result = await callAsync(Blob2Using, "Blob/set", new
-            {
-                accountId,
-                create = new Dictionary<string, object> { [createId] = createItem },
-            });
-
-            var blobUpload = result.Deserialize<BlobUploadResponse>(JmapSerializerOptions.Default)
-                ?? throw new InvalidOperationException("Failed to parse Blob/set response");
-
-            if (blobUpload.NotCreated != null && blobUpload.NotCreated.TryGetValue(createId, out var err))
-                throw new InvalidOperationException($"Blob/set failed: {err.Type} — {err.Description}");
-
-            if (blobUpload.Created == null || !blobUpload.Created.TryGetValue(createId, out var created))
-                throw new InvalidOperationException("Blob/set returned no result");
-
-            return created.Id;
+        var overallSha1Base64 = Convert.ToBase64String(overallHash.GetHashAndReset());
+        return await CombineChunksAsync(chunkBlobIds, contentType, overallSha1Base64, ct);
     }
 
     public async Task<string> UploadBlobDeltaAsync(Stream data, string contentType, long totalSize,
@@ -873,22 +682,15 @@ public class JmapClient : IJmapClient
         List<(string blobId, long size, string? digestSha)>? serverChunks = null;
         try
         {
-            var blobResult = await CallAsync(Blob2Using, "Blob/get", new
+            var blobResult = await CallAsync<BlobGetResponse>(Blob2Using, "Blob/get", new
             {
                 accountId = AccountId,
                 ids = new[] { oldBlobId },
                 properties = new[] { "id", "size", "chunks" },
             }, ct);
 
-            var blobResponse = blobResult.Deserialize<BlobGetResponse>(JmapSerializerOptions.Default);
-            if (blobResponse?.List.Length > 0)
-            {
-                var blob = blobResponse.List[0];
-                if (blob.Chunks != null && blob.Chunks.Length > 0)
-                {
-                    serverChunks = blob.Chunks.Select(c => (c.BlobId, c.Size, c.DigestSha)).ToList();
-                }
-            }
+            if (blobResult.List.Length > 0 && blobResult.List[0].Chunks is { Length: > 0 } chunks)
+                serverChunks = chunks.Select(c => (c.BlobId, c.Size, c.DigestSha)).ToList();
         }
         catch
         {
@@ -898,19 +700,20 @@ public class JmapClient : IJmapClient
         if (serverChunks == null || serverChunks.Count == 0)
             return await UploadBlobChunkedAsync(data, contentType, totalSize, onProgress, ct: ct);
 
-        // Delta upload: compare local chunks against server chunks
-        var uploadUrl = Session.GetUploadUrl(AccountId);
+        // Delta upload: walk the file in the server's chunk boundaries, reusing
+        // any chunk whose SHA1 matches and uploading the rest. Data beyond the
+        // server's chunk count is uploaded in MaxChunkSize pieces.
         var chunkBlobIds = new List<(string BlobId, string Sha1Base64)>();
         using var overallHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA1);
         long totalUploaded = 0;
         int reusedChunks = 0;
 
-        for (int i = 0; i < serverChunks.Count && totalUploaded < totalSize; i++)
+        for (int i = 0; totalUploaded < totalSize; i++)
         {
-            var serverChunk = serverChunks[i];
-            var thisChunkSize = (int)Math.Min(serverChunk.size, totalSize - totalUploaded);
+            var serverChunk = i < serverChunks.Count ? serverChunks[i] : default;
+            var thisChunkSize = (int)Math.Min(i < serverChunks.Count ? serverChunk.size : MaxChunkSize,
+                totalSize - totalUploaded);
 
-            // Read local chunk data and compute hash
             var chunkData = ArrayPool<byte>.Shared.Rent(thisChunkSize);
             try
             {
@@ -925,7 +728,6 @@ public class JmapClient : IJmapClient
                 overallHash.AppendData(chunkData, 0, bytesRead);
                 var localSha1 = Convert.ToBase64String(SHA1.HashData(chunkData.AsSpan(0, bytesRead)));
 
-                // Compare: if server has a digest and it matches, reuse the server chunk
                 if (serverChunk.digestSha != null && localSha1 == serverChunk.digestSha)
                 {
                     chunkBlobIds.Add((serverChunk.blobId, localSha1));
@@ -934,57 +736,12 @@ public class JmapClient : IJmapClient
                 }
                 else
                 {
-                    // Upload this chunk
                     using var chunkStream = new MemoryStream(chunkData, 0, bytesRead);
-                    var chunkContent = new StreamContent(chunkStream);
-                    chunkContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
-                    using var chunkRequest = new HttpRequestMessage(HttpMethod.Post, uploadUrl) { Content = chunkContent, Version = System.Net.HttpVersion.Version11 };
-                    var response = await _http.SendAsync(chunkRequest, ct);
-                    response.EnsureSuccessStatusCode();
-                    var json = await response.Content.ReadAsStringAsync(ct);
-                    var upload = JsonSerializer.Deserialize<UploadResponse>(json, JmapSerializerOptions.Default)
-                        ?? throw new InvalidOperationException("Failed to parse chunk upload response");
+                    var upload = await PostBlobAsync(chunkStream, "application/octet-stream", null, ct);
                     chunkBlobIds.Add((upload.BlobId, localSha1));
                     Log.Info($"[DeltaUpload] Chunk {i}: uploaded new ({bytesRead} bytes)");
                 }
 
-                totalUploaded += bytesRead;
-                onProgress?.Invoke(totalUploaded);
-            }
-            finally
-            {
-                ArrayPool<byte>.Shared.Return(chunkData);
-            }
-        }
-
-        // If there's remaining data beyond the server's chunk count, upload those too
-        while (totalUploaded < totalSize)
-        {
-            var remaining = (int)Math.Min(MaxChunkSize, totalSize - totalUploaded);
-            var chunkData = ArrayPool<byte>.Shared.Rent(remaining);
-            try
-            {
-                int bytesRead = 0;
-                while (bytesRead < remaining)
-                {
-                    var n = await data.ReadAsync(chunkData.AsMemory(bytesRead, remaining - bytesRead), ct);
-                    if (n == 0) break;
-                    bytesRead += n;
-                }
-
-                overallHash.AppendData(chunkData, 0, bytesRead);
-                var localSha1 = Convert.ToBase64String(SHA1.HashData(chunkData.AsSpan(0, bytesRead)));
-
-                using var chunkStream = new MemoryStream(chunkData, 0, bytesRead);
-                var chunkContent = new StreamContent(chunkStream);
-                chunkContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
-                using var chunkRequest = new HttpRequestMessage(HttpMethod.Post, uploadUrl) { Content = chunkContent, Version = System.Net.HttpVersion.Version11 };
-                var uploadResp = await _http.SendAsync(chunkRequest, ct);
-                uploadResp.EnsureSuccessStatusCode();
-                var uploadJson = await uploadResp.Content.ReadAsStringAsync(ct);
-                var upload = JsonSerializer.Deserialize<UploadResponse>(uploadJson, JmapSerializerOptions.Default)
-                    ?? throw new InvalidOperationException("Failed to parse chunk upload response");
-                chunkBlobIds.Add((upload.BlobId, localSha1));
                 totalUploaded += bytesRead;
                 onProgress?.Invoke(totalUploaded);
             }
@@ -999,37 +756,53 @@ public class JmapClient : IJmapClient
         if (chunkBlobIds.Count == 1)
             return chunkBlobIds[0].BlobId;
 
-        // Combine chunks via Blob/set (blob2)
         var overallSha1Base64 = Convert.ToBase64String(overallHash.GetHashAndReset());
-        var dataArray = chunkBlobIds.Select(c => new Dictionary<string, object?>
-        {
-            ["blobId"] = c.BlobId,
-            ["digest:sha"] = c.Sha1Base64,
-        }).ToArray();
-
-        var createId = "delta0";
-        var createItem = new Dictionary<string, object>
-        {
-            ["data"] = dataArray,
-            ["type"] = contentType,
-            ["digest:sha"] = overallSha1Base64,
-        };
-
-        var result = await CallAsync(Blob2Using, "Blob/set", new
-        {
-            accountId = AccountId,
-            create = new Dictionary<string, object> { [createId] = createItem },
-        }, ct);
-
-        var blobUpload = result.Deserialize<BlobUploadResponse>(JmapSerializerOptions.Default)
-            ?? throw new InvalidOperationException("Failed to parse Blob/set response");
-        if (blobUpload.NotCreated != null && blobUpload.NotCreated.TryGetValue(createId, out var err))
-            throw new InvalidOperationException($"Blob/set failed: {err.Type} — {err.Description}");
-        if (blobUpload.Created == null || !blobUpload.Created.TryGetValue(createId, out var created))
-            throw new InvalidOperationException("Blob/set returned no result");
-
-        return created.Id;
+        return await CombineChunksAsync(chunkBlobIds, contentType, overallSha1Base64, ct);
     }
+
+    /// <summary>
+    /// Direct HTTP Write: PUT to webWriteUrlTemplate/{id} to replace file content.
+    /// Only suitable for files under ~16 MB. Returns the new blobId, size, and type.
+    /// </summary>
+    public async Task<(string BlobId, long Size, string Type)> DirectWriteAsync(
+        string nodeId, Stream data, string contentType, CancellationToken ct = default)
+    {
+        var template = WebWriteUrlTemplate
+            ?? throw new InvalidOperationException("Server does not support direct HTTP write");
+        var url = template.Replace("{id}", Uri.EscapeDataString(nodeId));
+        var content = new StreamContent(data);
+        content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(contentType);
+        using var request = new HttpRequestMessage(HttpMethod.Put, url) { Content = content };
+        var response = await _conn.Http.SendAsync(request, ct);
+        response.EnsureSuccessStatusCode();
+        var json = await response.Content.ReadAsStringAsync(ct);
+        var result = JsonSerializer.Deserialize<DirectWriteResponse>(json, JmapSerializerOptions.Default)
+            ?? throw new InvalidOperationException("Failed to parse direct write response");
+        return (result.BlobId, result.Size, result.Type);
+    }
+
+    public async Task<BlobDataItem> GetBlobAsync(string blobId, string[] properties,
+        long? offset = null, long? length = null, CancellationToken ct = default)
+    {
+        var blobArgs = new Dictionary<string, object?>
+        {
+            ["accountId"] = AccountId,
+            ["ids"] = new[] { blobId },
+            ["properties"] = properties,
+        };
+        if (offset.HasValue) blobArgs["offset"] = offset.Value;
+        if (length.HasValue) blobArgs["length"] = length.Value;
+
+        var blobResponse = await CallAsync<BlobGetResponse>(Blob2Using, "Blob/get", blobArgs, ct);
+        if (blobResponse.NotFound.Length > 0)
+            throw new FileNotFoundException($"Blob not found: {blobId}");
+        if (blobResponse.List.Length == 0)
+            throw new InvalidOperationException($"Blob/get returned no results for {blobId}");
+
+        return blobResponse.List[0];
+    }
+
+    // ---- FileNode writes ----
 
     public async Task<FileNode> CreateFileNodeAsync(string parentId, string? blobId, string name, string? type = null, string? onExists = null, DateTime? createdAt = null, DateTime? modifiedAt = null, CancellationToken ct = default)
     {
@@ -1051,8 +824,7 @@ public class JmapClient : IJmapClient
         if (onExists != null)
             args["onExists"] = onExists;
 
-        var setResponse = await CallAsync<SetResponse>(
-            FileNodeUsing, "FileNode/set", args, ct);
+        var setResponse = await CallAsync<SetResponse>(FileNodeUsing, "FileNode/set", args, ct);
 
         if (setResponse.NotCreated != null && setResponse.NotCreated.TryGetValue("c0", out var setError))
             throw new InvalidOperationException($"FileNode/set create failed: {setError.Type} — {setError.Description}");
@@ -1063,28 +835,37 @@ public class JmapClient : IJmapClient
         return created;
     }
 
+    /// <summary>
+    /// FileNode/set update of a single node, throwing on a notUpdated error.
+    /// </summary>
+    private async Task UpdateFileNodeAsync(string nodeId, Dictionary<string, object?> fields,
+        string? onExists, string what, CancellationToken ct)
+    {
+        var args = new Dictionary<string, object>
+        {
+            ["accountId"] = AccountId,
+            ["compareCaseInsensitively"] = true,
+            ["update"] = new Dictionary<string, object?> { [nodeId] = fields },
+        };
+        if (onExists != null)
+            args["onExists"] = onExists;
+
+        var setResponse = await CallAsync<SetResponse>(FileNodeUsing, "FileNode/set", args, ct);
+        if (setResponse.NotUpdated != null && setResponse.NotUpdated.TryGetValue(nodeId, out var setError))
+            throw new InvalidOperationException($"FileNode/set {what} failed: {setError.Type} — {setError.Description}");
+    }
+
     public async Task<FileNode> ReplaceFileNodeBlobAsync(string nodeId, string parentId, string name, string blobId, string? type = null, DateTime? createdAt = null, DateTime? modifiedAt = null, CancellationToken ct = default)
     {
-        // v10: blobId is now mutable — update directly via FileNode/set update.
+        // v10: blobId is mutable — update directly via FileNode/set update.
         // Node ID stays the same (no destroy+create needed).
-        var updateFields = new Dictionary<string, object?>
-        {
-            ["blobId"] = blobId,
-        };
+        var updateFields = new Dictionary<string, object?> { ["blobId"] = blobId };
         if (type != null)
             updateFields["type"] = type;
         if (modifiedAt.HasValue)
             updateFields["modified"] = modifiedAt.Value.ToUniversalTime();
 
-        var setResponse = await CallAsync<SetResponse>(
-            FileNodeUsing, "FileNode/set", new
-            {
-                accountId = AccountId,
-                update = new Dictionary<string, object?> { [nodeId] = updateFields },
-            }, ct);
-
-        if (setResponse.NotUpdated != null && setResponse.NotUpdated.TryGetValue(nodeId, out var updateError))
-            throw new InvalidOperationException($"FileNode/set update failed: {updateError.Type} — {updateError.Description}");
+        await UpdateFileNodeAsync(nodeId, updateFields, null, "update", ct);
 
         // Return a FileNode with the known values since update response only has changed fields
         return new FileNode
@@ -1099,30 +880,16 @@ public class JmapClient : IJmapClient
         };
     }
 
-    public async Task MoveFileNodeAsync(string nodeId, string parentId, string newName, string? onExists = null, DateTime? modifiedAt = null, CancellationToken ct = default)
+    public Task MoveFileNodeAsync(string nodeId, string parentId, string newName, string? onExists = null, DateTime? modifiedAt = null, CancellationToken ct = default)
     {
-        var updateFields = new Dictionary<string, object?> { };
-        updateFields["parentId"] = parentId;
-        updateFields["name"] = newName;
-        if (modifiedAt.HasValue)
-            updateFields["modified"] = modifiedAt.Value.ToUniversalTime();
-        else
-            updateFields["modified"] = null; // Server sets current time
-
-        var args = new Dictionary<string, object>
+        var updateFields = new Dictionary<string, object?>
         {
-            ["accountId"] = AccountId,
-            ["compareCaseInsensitively"] = true,
-            ["update"] = new Dictionary<string, object?> { [nodeId] = updateFields },
+            ["parentId"] = parentId,
+            ["name"] = newName,
+            // null tells the server to set the current time
+            ["modified"] = modifiedAt?.ToUniversalTime(),
         };
-        if (onExists != null)
-            args["onExists"] = onExists;
-
-        var setResponse = await CallAsync<SetResponse>(
-            FileNodeUsing, "FileNode/set", args, ct);
-
-        if (setResponse.NotUpdated != null && setResponse.NotUpdated.TryGetValue(nodeId, out var setError))
-            throw new InvalidOperationException($"FileNode/set move failed: {setError.Type} — {setError.Description}");
+        return UpdateFileNodeAsync(nodeId, updateFields, onExists, "move", ct);
     }
 
     public async Task BatchUpdateAccessedAsync(Dictionary<string, DateTime> accessed, CancellationToken ct = default)
@@ -1131,27 +898,15 @@ public class JmapClient : IJmapClient
 
         var update = new Dictionary<string, object>();
         foreach (var (nodeId, time) in accessed)
-        {
             update[nodeId] = new { accessed = time.ToUniversalTime() };
-        }
 
-        var setResponse = await CallAsync<SetResponse>(
-            FileNodeUsing, "FileNode/set", new
-            {
-                accountId = AccountId,
-                update,
-            }, ct);
+        await CallAsync<SetResponse>(FileNodeUsing, "FileNode/set", new { accountId = AccountId, update }, ct);
         // Ignore individual notUpdated errors — node may have been deleted
     }
 
     public void RecordAccess(string nodeId)
     {
         _pendingAccessed[nodeId] = DateTime.UtcNow;
-        ResetAccessedFlushTimer();
-    }
-
-    private void ResetAccessedFlushTimer()
-    {
         _accessedFlushTimer?.Dispose();
         _accessedFlushTimer = new Timer(async _ =>
         {
@@ -1203,6 +958,8 @@ public class JmapClient : IJmapClient
             throw new InvalidOperationException($"FileNode/set destroy failed: {setError.Type} — {setError.Description}");
     }
 
+    // ---- Push ----
+
     public async IAsyncEnumerable<string> WatchForChangesAsync([EnumeratorCancellation] CancellationToken ct = default)
     {
         await foreach (var (accountId, state) in WatchAllAccountChangesAsync(ct))
@@ -1224,7 +981,7 @@ public class JmapClient : IJmapClient
         var request = new HttpRequestMessage(HttpMethod.Get, url);
         request.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("text/event-stream"));
 
-        using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+        using var response = await _conn.Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
         response.EnsureSuccessStatusCode();
         Log.Debug($"SSE connected: {response.StatusCode} {response.Content.Headers.ContentType}");
 
@@ -1293,29 +1050,7 @@ public class JmapClient : IJmapClient
         return results;
     }
 
-    public async Task<BlobDataItem> GetBlobAsync(string blobId, string[] properties,
-        long? offset = null, long? length = null, CancellationToken ct = default)
-    {
-        var blobArgs = new Dictionary<string, object?>
-        {
-            ["accountId"] = AccountId,
-            ["ids"] = new[] { blobId },
-            ["properties"] = properties,
-        };
-
-        if (offset.HasValue)
-            blobArgs["offset"] = offset.Value;
-        if (length.HasValue)
-            blobArgs["length"] = length.Value;
-
-        var blobResponse = await CallAsync<BlobGetResponse>(Blob2Using, "Blob/get", blobArgs, ct);
-        if (blobResponse.NotFound.Length > 0)
-            throw new FileNotFoundException($"Blob not found: {blobId}");
-        if (blobResponse.List.Length == 0)
-            throw new InvalidOperationException($"Blob/get returned no results for {blobId}");
-
-        return blobResponse.List[0];
-    }
+    // ---- Quota / thumbnails ----
 
     public async Task<Quota[]> GetQuotasAsync(CancellationToken ct = default)
     {
@@ -1334,29 +1069,10 @@ public class JmapClient : IJmapClient
     public async Task<string> ConvertImageAsync(string blobId, uint width, uint height,
         string mimeType = "image/png", CancellationToken ct = default)
     {
-        var createId = "t0";
-        var result = await CallAsync(Blob2Using, "Blob/convert", new
-        {
-            accountId = AccountId,
-            create = new Dictionary<string, object>
-            {
-                [createId] = new
-                {
-                    imageConvert = new { blobId, width, height, type = mimeType, autoOrient = true },
-                },
-            },
-        }, ct);
-
-        var response = result.Deserialize<BlobUploadResponse>(JmapSerializerOptions.Default)
-            ?? throw new InvalidOperationException("Failed to parse Blob/convert response");
-
-        if (response.NotCreated != null && response.NotCreated.TryGetValue(createId, out var err))
-            throw new InvalidOperationException($"Blob/convert failed: {err.Type} — {err.Description}");
-
-        if (response.Created == null || !response.Created.TryGetValue(createId, out var created))
-            throw new InvalidOperationException("Blob/convert returned no result");
-
-        return created.Id;
+        var converted = await ConvertImagesAsync([(blobId, width, height)], mimeType, ct);
+        return converted.TryGetValue(blobId, out var thumbBlobId)
+            ? thumbBlobId
+            : throw new InvalidOperationException($"Blob/convert failed for {blobId}");
     }
 
     public async Task<Dictionary<string, string>> ConvertImagesAsync(
@@ -1386,14 +1102,11 @@ public class JmapClient : IJmapClient
                 idToBlobId[createId] = blobId;
             }
 
-            var result = await CallAsync(Blob2Using, "Blob/convert", new
+            var response = await CallAsync<BlobUploadResponse>(Blob2Using, "Blob/convert", new
             {
                 accountId = AccountId,
                 create,
             }, ct);
-
-            var response = result.Deserialize<BlobUploadResponse>(JmapSerializerOptions.Default)
-                ?? throw new InvalidOperationException("Failed to parse Blob/convert response");
 
             if (response.Created != null)
             {
@@ -1403,68 +1116,21 @@ public class JmapClient : IJmapClient
                         allConverted[blobId] = item.Id;
                 }
             }
+            if (response.NotCreated != null)
+            {
+                foreach (var (createId, err) in response.NotCreated)
+                    Log.Debug($"[JMAP] Blob/convert failed for {idToBlobId.GetValueOrDefault(createId)}: {err.Type} — {err.Description}");
+            }
         }
         return allConverted;
     }
-
-    /// <summary>
-    /// Returns all accounts in this session that have the FileNode capability.
-    /// Each entry contains the accountId, display name, and whether it's the
-    /// primary account for FileNode.
-    /// </summary>
-    public List<(string AccountId, string Name, bool IsPrimary)> GetFileNodeAccounts()
-    {
-        var primary = Session.PrimaryAccounts.GetValueOrDefault(FileNodeCapability);
-        var result = new List<(string, string, bool)>();
-        foreach (var (accountId, account) in Session.Accounts)
-        {
-            if (account.AccountCapabilities.ContainsKey(FileNodeCapability))
-                result.Add((accountId, account.Name, accountId == primary));
-        }
-        return result;
-    }
-
-    /// <summary>
-    /// Returns an <see cref="AccountScopedJmapClient"/> that shares this client's
-    /// HttpClient and session but targets a different account.
-    /// </summary>
-    public AccountScopedJmapClient ForAccount(string accountId)
-    {
-        if (!Session.Accounts.ContainsKey(accountId))
-            throw new ArgumentException($"Account {accountId} not found in session");
-        return new AccountScopedJmapClient(this, accountId);
-    }
-
-    /// <summary>
-    /// Direct HTTP Write: PUT to webWriteUrlTemplate/{id} to replace file content.
-    /// Only suitable for files under ~16 MB. Returns the new blobId, size, and type.
-    /// </summary>
-    public async Task<(string BlobId, long Size, string Type)> DirectWriteAsync(
-        string nodeId, Stream data, string contentType, CancellationToken ct = default)
-    {
-        var template = WebWriteUrlTemplate
-            ?? throw new InvalidOperationException("Server does not support direct HTTP write");
-        var url = template.Replace("{id}", Uri.EscapeDataString(nodeId));
-        var content = new StreamContent(data);
-        content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(contentType);
-        using var request = new HttpRequestMessage(HttpMethod.Put, url) { Content = content };
-        var response = await _http.SendAsync(request, ct);
-        response.EnsureSuccessStatusCode();
-        var json = await response.Content.ReadAsStringAsync(ct);
-        var result = JsonSerializer.Deserialize<DirectWriteResponse>(json, JmapSerializerOptions.Default)
-            ?? throw new InvalidOperationException("Failed to parse direct write response");
-        return (result.BlobId, result.Size, result.Type);
-    }
-
-    // Expose internals needed by AccountScopedJmapClient
-    internal HttpClient Http => _http;
-    internal ref int NextCallIdRef => ref _nextCallId;
 
     public void Dispose()
     {
         _accessedFlushTimer?.Dispose();
         // Best-effort flush
         try { FlushPendingAccessedAsync().GetAwaiter().GetResult(); } catch { }
-        _http.Dispose();
+        if (_ownsConnection)
+            _conn.Http.Dispose();
     }
 }

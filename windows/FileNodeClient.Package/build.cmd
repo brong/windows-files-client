@@ -25,13 +25,7 @@ if %errorlevel%==0 (
     robocopy "%SRCDIR%" "%BUILDDIR%" /MIR /XD .git .claude bin obj /XF *.user >nul
 )
 
-:: ---- Step 1: Publish both App and Service into shared directory ----
-:: Same directory so ServiceLauncher finds Service.exe via AppContext.BaseDirectory
-echo Publishing FileNodeClient.Service...
-dotnet publish "%BUILDDIR%\FileNodeClient.Service\FileNodeClient.Service.csproj" -c Release -r win-x64 --self-contained -o "%BUILDDIR%\FileNodeClient.Package\publish"
-if errorlevel 1 goto :error
-
-echo.
+:: ---- Step 1: Publish App ----
 echo Publishing FileNodeClient.App...
 dotnet publish "%BUILDDIR%\FileNodeClient.App\FileNodeClient.App.csproj" -c Release -r win-x64 --self-contained -o "%BUILDDIR%\FileNodeClient.Package\publish"
 if errorlevel 1 goto :error

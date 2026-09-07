@@ -46,29 +46,10 @@
           <desktop:StartupTask TaskId="FileNodeClientStartup" Enabled="true" DisplayName="FileNodeClient" />
         </desktop:Extension>
 
-      </Extensions>
-    </Application>
-
-    <Application Id="Service"
-      Executable="FileNodeClient.Service.exe"
-      EntryPoint="Windows.FullTrustApplication">
-      <uap:VisualElements
-        DisplayName="FileNodeClient Service"
-        Description="Fastmail file sync background service"
-        BackgroundColor="transparent"
-        Square150x150Logo="Assets\Square150x150Logo.png"
-        Square44x44Logo="Assets\Square44x44Logo.png"
-        AppListEntry="none" />
-      <Extensions>
-        <!-- Auto-start Service at login -->
-        <desktop:Extension Category="windows.startupTask" Executable="FileNodeClient.Service.exe" EntryPoint="Windows.FullTrustApplication">
-          <desktop:StartupTask TaskId="FileNodeClientServiceStartup" Enabled="true" DisplayName="FileNodeClient Service" />
-        </desktop:Extension>
-
         <!-- Cloud files handler registration -->
         <com:Extension Category="windows.comServer">
           <com:ComServer>
-            <com:ExeServer Executable="FileNodeClient.Service.exe" DisplayName="FileNodeClient Handlers">
+            <com:ExeServer Executable="FileNodeClient.App.exe" DisplayName="FileNodeClient Handlers">
               <com:Class Id="A7B3E2D1-9F4C-4A8B-B5E6-1D3C7F8A2E9B" DisplayName="FileNodeClient UriSource" />
             </com:ExeServer>
             <com:SurrogateServer DisplayName="FileNodeClient ThumbnailProvider">
@@ -92,6 +73,7 @@
         </desktop3:Extension>
       </Extensions>
     </Application>
+
   </Applications>
 
   <Capabilities>

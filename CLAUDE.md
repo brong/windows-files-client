@@ -11,7 +11,7 @@ files-client/
 ├── windows/               # Windows client (C#/.NET, cfapi cloud files)
 │   ├── CLAUDE.md          # Windows-specific build instructions
 │   ├── ROADMAP.md         # Windows cfapi feature roadmap
-│   ├── FileNodeClient.sln # .NET solution (7 projects)
+│   ├── FileNodeClient.sln # .NET solution (5 projects)
 │   └── ...
 ├── apple/                 # macOS & iOS client (Swift, FileProvider)
 │   ├── DESIGN.md          # Apple-specific design document
@@ -46,8 +46,8 @@ All platforms implement the same JMAP protocol. Key invariants:
 - **Language**: C# / .NET 9
 - **File system**: Windows Cloud Files API (cfapi) — native placeholder/hydration support
 - **Build**: `dotnet.exe build windows/FileNodeClient.sln` (from WSL2)
-- **Status**: cfapi feature-complete (sync, thumbnails, URI source, recycle bin, progressive hydration). **Reliability hardening is the active work — see `windows/RELIABILITY.md`.** The fixes are already implemented on Apple (the reference implementation); the Windows port has not started.
-- See `windows/CLAUDE.md` for build/test instructions **and the reliability port plan**
+- **Status**: cfapi feature-complete (sync, thumbnails, URI source, recycle bin, progressive hydration). **Active work: `windows/SIMPLIFICATION.md`** (single process, deduplicated JMAP/login layers — written, needs a Windows build), then the reliability port in `windows/RELIABILITY.md` on top of the collapsed `SyncEngine`.
+- See `windows/CLAUDE.md` for build/test instructions
 
 #### Apple (`apple/`)
 - **Language**: Swift 6

@@ -4,7 +4,7 @@ using FileNodeClient.Jmap;
 using FileNodeClient.Jmap.Models;
 using FileNodeClient.Windows;
 
-namespace FileNodeClient.Service;
+namespace FileNodeClient.App;
 
 /// <summary>
 /// Manages the sync lifecycle for a single JMAP account:
@@ -33,6 +33,8 @@ sealed class AccountSupervisor : IDisposable
     public string DisplayName => _displayName;
     public string AccountId => _jmapClient.AccountId;
     public string Username => _jmapClient.Username;
+    /// <summary>Key for this account's on-disk caches (node cache, outbox).</summary>
+    public string ScopeKey => _jmapClient.Context.ScopeKey;
 
     public SyncStatus Status { get; private set; }
     public string? StatusDetail { get; private set; }

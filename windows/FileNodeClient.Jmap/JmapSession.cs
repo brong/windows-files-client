@@ -59,31 +59,30 @@ public class JmapSession
             .Replace("{name}", Uri.EscapeDataString(name ?? "download"));
     }
 
-    public string[] GetSupportedDigestAlgorithms(string accountId)
-    {
-        if (!Accounts.TryGetValue(accountId, out var account))
-            return [];
-        if (!account.AccountCapabilities.TryGetValue("urn:ietf:params:jmap:blob", out var blobCap))
-            return [];
-        if (blobCap.TryGetProperty("supportedDigestAlgorithms", out var algos) &&
-            algos.ValueKind == JsonValueKind.Array)
-        {
-            return algos.EnumerateArray()
-                .Select(e => e.GetString())
-                .Where(s => s != null)
-                .ToArray()!;
-        }
-        return [];
-    }
-
     public bool HasCapability(string capability) => Capabilities.ContainsKey(capability);
 
-    public bool HasAccountCapability(string accountId, string capability)
+    public bool HasAccountCapability(string accountId, string capability) =>
+        Accounts.TryGetValue(accountId, out var account)
+        && account.AccountCapabilities.ContainsKey(capability);
+
+    /// <summary>
+    /// A property of one of an account's capability objects, or null if the
+    /// account, capability, or property is absent.
+    /// </summary>
+    private JsonElement? AccountCapabilityProperty(string accountId, string capability, string property)
     {
-        if (!Accounts.TryGetValue(accountId, out var account))
-            return false;
-        return account.AccountCapabilities.ContainsKey(capability);
+        if (!Accounts.TryGetValue(accountId, out var account)) return null;
+        if (!account.AccountCapabilities.TryGetValue(capability, out var cap)) return null;
+        return cap.TryGetProperty(property, out var val) ? val : null;
     }
+
+    private string? AccountCapabilityString(string accountId, string capability, string property) =>
+        AccountCapabilityProperty(accountId, capability, property) is { ValueKind: JsonValueKind.String } v
+            ? v.GetString() : null;
+
+    private long? AccountCapabilityNumber(string accountId, string capability, string property) =>
+        AccountCapabilityProperty(accountId, capability, property) is { ValueKind: JsonValueKind.Number } v
+            ? v.GetInt64() : null;
 
     // JMAP core capability limits (RFC 8620 §2)
     public int MaxCallsInRequest => GetCoreInt("maxCallsInRequest", 16);
@@ -93,102 +92,38 @@ public class JmapSession
 
     private int GetCoreInt(string property, int defaultValue)
     {
-        if (!Capabilities.TryGetValue("urn:ietf:params:jmap:core", out var core))
+        if (!Capabilities.TryGetValue(JmapClient.CoreCapability, out var core))
             return defaultValue;
         if (core.TryGetProperty(property, out var val) && val.ValueKind == JsonValueKind.Number)
             return val.GetInt32();
         return defaultValue;
     }
 
-    public long? GetChunkSize(string accountId)
-    {
-        if (!Accounts.TryGetValue(accountId, out var account))
-            return null;
-        if (!account.AccountCapabilities.TryGetValue(
-            JmapClient.Blob2Capability, out var blob2Cap))
-            return null;
-        if (blob2Cap.TryGetProperty("chunkSize", out var chunkSize)
-            && chunkSize.ValueKind == JsonValueKind.Number)
-            return chunkSize.GetInt64();
-        return null;
-    }
+    // Limits advertised under the legacy blob capability's metadata. We never
+    // send that capability in `using`, but the server still publishes these.
+    public string[] GetSupportedDigestAlgorithms(string accountId) =>
+        AccountCapabilityProperty(accountId, JmapClient.BlobCapability, "supportedDigestAlgorithms")
+            is { ValueKind: JsonValueKind.Array } algos
+            ? algos.EnumerateArray().Select(e => e.GetString()).OfType<string>().ToArray()
+            : [];
 
-    public int? GetMaxDataSources(string accountId)
-    {
-        if (!Accounts.TryGetValue(accountId, out var account))
-            return null;
-        if (!account.AccountCapabilities.TryGetValue("urn:ietf:params:jmap:blob", out var blobCap))
-            return null;
-        if (blobCap.TryGetProperty("maxDataSources", out var val)
-            && val.ValueKind == JsonValueKind.Number)
-            return val.GetInt32();
-        return null;
-    }
+    public int? GetMaxDataSources(string accountId) =>
+        (int?)AccountCapabilityNumber(accountId, JmapClient.BlobCapability, "maxDataSources");
 
-    public long? GetMaxSizeBlobSet(string accountId)
-    {
-        if (!Accounts.TryGetValue(accountId, out var account))
-            return null;
-        if (!account.AccountCapabilities.TryGetValue("urn:ietf:params:jmap:blob", out var blobCap))
-            return null;
-        if (blobCap.TryGetProperty("maxSizeBlobSet", out var val)
-            && val.ValueKind == JsonValueKind.Number)
-            return val.GetInt64();
-        return null;
-    }
+    public long? GetMaxSizeBlobSet(string accountId) =>
+        AccountCapabilityNumber(accountId, JmapClient.BlobCapability, "maxSizeBlobSet");
 
-    public string? GetTrashUrl(string accountId)
-    {
-        if (!Accounts.TryGetValue(accountId, out var account))
-            return null;
-        if (!account.AccountCapabilities.TryGetValue(
-            "https://www.fastmail.com/dev/filenode", out var fileNodeCap))
-            return null;
-        if (fileNodeCap.TryGetProperty("webTrashUrl", out var trashUrl)
-            && trashUrl.ValueKind == JsonValueKind.String)
-            return trashUrl.GetString();
-        return null;
-    }
+    public long? GetChunkSize(string accountId) =>
+        AccountCapabilityNumber(accountId, JmapClient.Blob2Capability, "chunkSize");
 
-    public string? GetWebUrlTemplate(string accountId)
-    {
-        if (!Accounts.TryGetValue(accountId, out var account))
-            return null;
-        if (!account.AccountCapabilities.TryGetValue(
-            "https://www.fastmail.com/dev/filenode", out var fileNodeCap))
-            return null;
-        if (fileNodeCap.TryGetProperty("webUrlTemplate", out var webUrlTemplate)
-            && webUrlTemplate.ValueKind == JsonValueKind.String)
-            return webUrlTemplate.GetString();
-        return null;
-    }
+    public string? GetTrashUrl(string accountId) =>
+        AccountCapabilityString(accountId, JmapClient.FileNodeCapability, "webTrashUrl");
 
-    public string? GetWebWriteUrlTemplate(string accountId)
-    {
-        if (!Accounts.TryGetValue(accountId, out var account))
-            return null;
-        if (!account.AccountCapabilities.TryGetValue(
-            "https://www.fastmail.com/dev/filenode", out var fileNodeCap))
-            return null;
-        if (fileNodeCap.TryGetProperty("webWriteUrlTemplate", out var webWriteUrlTemplate)
-            && webWriteUrlTemplate.ValueKind == JsonValueKind.String)
-            return webWriteUrlTemplate.GetString();
-        return null;
-    }
+    public string? GetWebUrlTemplate(string accountId) =>
+        AccountCapabilityString(accountId, JmapClient.FileNodeCapability, "webUrlTemplate");
 
-    public bool? GetMayCreateTopLevelFileNode(string accountId)
-    {
-        if (!Accounts.TryGetValue(accountId, out var account))
-            return null;
-        if (!account.AccountCapabilities.TryGetValue(
-            "https://www.fastmail.com/dev/filenode", out var fileNodeCap))
-            return null;
-        if (fileNodeCap.TryGetProperty("mayCreateTopLevelFileNode", out var val)
-            && (val.ValueKind == JsonValueKind.True || val.ValueKind == JsonValueKind.False))
-            return val.GetBoolean();
-        return null;
-    }
-
+    public string? GetWebWriteUrlTemplate(string accountId) =>
+        AccountCapabilityString(accountId, JmapClient.FileNodeCapability, "webWriteUrlTemplate");
 }
 
 public class JmapAccount

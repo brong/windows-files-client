@@ -7,7 +7,7 @@ sealed class AddAccountForm : Form
 {
     private const string DefaultSessionUrl = "https://api.fastmail.com/jmap/session";
 
-    private readonly ServiceClient _serviceClient;
+    private readonly SyncController _sync;
 
     // OAuth flow controls
     private readonly Button _signInButton;
@@ -26,9 +26,9 @@ sealed class AddAccountForm : Form
     /// <summary>Account IDs selected for sync during this flow.</summary>
     public HashSet<string>? EnabledAccountIds { get; private set; }
 
-    public AddAccountForm(ServiceClient serviceClient)
+    public AddAccountForm(SyncController sync)
     {
-        _serviceClient = serviceClient;
+        _sync = sync;
 
         Font = SystemFonts.MessageBoxFont ?? new Font("Segoe UI", 9f);
         AutoScaleMode = AutoScaleMode.Font;
@@ -215,19 +215,10 @@ sealed class AddAccountForm : Form
             Owner?.Activate();
             Activate();
 
-            // Discover accounts
-            if (!_serviceClient.IsConnected)
-            {
-                _statusLabel.Text = "Service is not running. Start the service first.";
-                _statusLabel.ForeColor = Color.Red;
-                _signInButton.Enabled = _betaButton.Enabled = true;
-                return;
-            }
-
             _statusLabel.Text = "Discovering accounts...";
-            var discoverResult = await _serviceClient.DiscoverAccountsAsync(cred.SessionUrl, cred.AccessToken);
+            var discovered = await _sync.DiscoverAccountsAsync(cred.SessionUrl, cred.AccessToken);
 
-            if (discoverResult.Accounts.Count == 0)
+            if (discovered.Count == 0)
             {
                 _statusLabel.Text = "No FileNode accounts found";
                 _statusLabel.ForeColor = Color.Red;
@@ -237,9 +228,9 @@ sealed class AddAccountForm : Form
 
             // Account selection
             HashSet<string>? enabledAccountIds = null;
-            if (discoverResult.Accounts.Count >= 1)
+            if (discovered.Count >= 1)
             {
-                var accounts = discoverResult.Accounts
+                var accounts = discovered
                     .Select(a => (a.AccountId, a.Name, a.IsPrimary)).ToList();
 
                 using var selectForm = new SelectAccountsForm(accounts, null);
@@ -265,7 +256,7 @@ sealed class AddAccountForm : Form
             DialogResult = DialogResult.OK;
             Close();
 
-            _ = _serviceClient.AddLoginAsync(
+            _ = _sync.AddLoginAsync(
                 cred.SessionUrl, cred.AccessToken, enabledAccountIds,
                 cred.RefreshToken, cred.TokenEndpoint, cred.ClientId,
                 cred.ExpiresAt.ToUnixTimeSeconds());
@@ -295,13 +286,6 @@ sealed class AddAccountForm : Form
         if (string.IsNullOrEmpty(sessionUrl))
             sessionUrl = DefaultSessionUrl;
 
-        if (!_serviceClient.IsConnected)
-        {
-            _statusLabel.Text = "Service is not running. Start the service first.";
-            _statusLabel.ForeColor = Color.Red;
-            return;
-        }
-
         _connectButton.Enabled = false;
         _statusLabel.Text = "Connecting...";
         _statusLabel.ForeColor = Color.DodgerBlue;
@@ -309,9 +293,9 @@ sealed class AddAccountForm : Form
         try
         {
             // Phase 1: Discover accounts
-            var discoverResult = await _serviceClient.DiscoverAccountsAsync(sessionUrl, token);
+            var discovered = await _sync.DiscoverAccountsAsync(sessionUrl, token);
 
-            if (discoverResult.Accounts.Count == 0)
+            if (discovered.Count == 0)
             {
                 _statusLabel.Text = "No FileNode accounts found";
                 _statusLabel.ForeColor = Color.Red;
@@ -321,9 +305,9 @@ sealed class AddAccountForm : Form
 
             // Phase 2: If multiple accounts, show account picker
             HashSet<string>? enabledAccountIds = null;
-            if (discoverResult.Accounts.Count >= 1)
+            if (discovered.Count >= 1)
             {
-                var accounts = discoverResult.Accounts
+                var accounts = discovered
                     .Select(a => (a.AccountId, a.Name, a.IsPrimary)).ToList();
 
                 using var selectForm = new SelectAccountsForm(accounts, null);
@@ -344,12 +328,12 @@ sealed class AddAccountForm : Form
                 }
             }
 
-            // Phase 3: Add login via service (no OAuth fields — manual token)
+            // Phase 3: Add login (no OAuth fields — manual token)
             _statusLabel.Text = "Starting sync...";
             EnabledAccountIds = enabledAccountIds;
-            var addResult = await _serviceClient.AddLoginAsync(sessionUrl, token, enabledAccountIds);
+            var loginId = await _sync.AddLoginAsync(sessionUrl, token, enabledAccountIds);
 
-            _statusLabel.Text = $"Connected: {addResult.LoginId}";
+            _statusLabel.Text = $"Connected: {loginId}";
             _statusLabel.ForeColor = Color.Green;
 
             // Brief pause so the user sees success, then close

@@ -12,27 +12,28 @@ A Windows cloud storage client for [Fastmail](https://www.fastmail.com/) Files u
 - **Recycle bin** — deleted files move to the server trash (FileNode `trash` role)
 - **Progressive hydration** — large files stream via range requests
 - **OAuth and app passwords** — authenticate with either method
-- **Auto-start** — App and Service launch at login via MSIX startup tasks
+- **Auto-start** — launches at login via an MSIX startup task
 
 ## Architecture
 
-The solution has 7 .NET projects plus a native C DLL:
+The solution has 5 .NET projects plus a native C DLL:
 
 ```
 FileNodeClient.sln
 ├── FileNodeClient.Logging/        # Cross-platform structured logging (Log static class)
 ├── FileNodeClient.Jmap/           # Cross-platform JMAP FileNode protocol client
-├── FileNodeClient.Ipc/            # Named-pipe IPC messages between App and Service
 ├── FileNodeClient.Windows/        # cfapi sync engine (placeholders, hydration, callbacks)
-├── FileNodeClient.App/            # System tray UI (login, status, account management)
-├── FileNodeClient.Service/        # Background sync engine + thumbnail/URI COM servers
+├── FileNodeClient.App/            # Single tray process: login management, sync supervision,
+│                                  #   thumbnail/URI COM servers, and the WinForms UI
 └── FileNodeClient.Package/        # MSIX packaging (manifest, assets, build.cmd)
 
 FileNodeClient.ThumbnailExtension/ # Native C DLL — IThumbnailProvider via COM SurrogateServer
                                    # Built separately (not in the .sln)
 ```
 
-**App** runs as a system tray application. It handles authentication and launches **Service** as a child process. Service runs the sync engine, responds to cfapi callbacks, and hosts COM servers for thumbnails and content URIs. The two communicate over named pipes (IPC).
+**App** is one long-lived tray process. `LoginManager` owns the JMAP logins and one
+`AccountSupervisor` (→ `SyncEngine`) per account; `SyncController` turns their events
+into the snapshots the UI renders. There is no separate service process or IPC layer.
 
 ## Prerequisites
 
@@ -67,7 +68,7 @@ The MSIX package provides the package identity required for cloud files shell ex
 FileNodeClient.Package\build.cmd
 ```
 
-This publishes App + Service, compiles the native DLL with MSVC, creates a self-signed dev cert (first run only), and produces `FileNodeClient.Package\bin\Release\FileNodeClient.msix`.
+This publishes App, compiles the native DLL with MSVC, creates a self-signed dev cert (first run only), and produces `FileNodeClient.Package\bin\Release\FileNodeClient.msix`.
 
 > **Note:** `build.cmd` uses MSVC (`cl.exe` via `vcvarsall.bat`) for the native DLL. This can fail if the VS environment doesn't propagate correctly through nested `cmd /c` shells.
 
@@ -84,8 +85,6 @@ rsync -a --exclude='.git' --exclude='.claude' --exclude='bin' --exclude='obj' \
 
 # 2. Publish .NET projects
 cd "$BUILDDIR"
-dotnet.exe publish FileNodeClient.Service/FileNodeClient.Service.csproj \
-    -c Release -r win-x64 --self-contained -o FileNodeClient.Package/publish
 dotnet.exe publish FileNodeClient.App/FileNodeClient.App.csproj \
     -c Release -r win-x64 --self-contained -o FileNodeClient.Package/publish
 
@@ -156,8 +155,7 @@ The `dev-deploy.sh` script automates steps 1-4 plus loose-file registration (no 
 For rapid iteration without rebuilding the full MSIX, publish into the Package directory and register directly:
 
 ```powershell
-# Publish App + Service into shared directory
-dotnet publish FileNodeClient.Service -c Release -r win-x64 --self-contained -o FileNodeClient.Package\publish
+# Publish App
 dotnet publish FileNodeClient.App -c Release -r win-x64 --self-contained -o FileNodeClient.Package\publish
 
 # Copy manifest and assets alongside published files
@@ -168,7 +166,7 @@ xcopy /s /y FileNodeClient.Package\Assets FileNodeClient.Package\publish\Assets\
 Add-AppxPackage -Register FileNodeClient.Package\publish\AppxManifest.xml
 ```
 
-Both executables must be in the same directory (ServiceLauncher finds Service.exe via `AppContext.BaseDirectory`). The manifest must be alongside them so COM SurrogateServer DLL paths resolve correctly.
+The manifest must be alongside the published files so COM SurrogateServer DLL paths resolve correctly.
 
 ## Usage
 

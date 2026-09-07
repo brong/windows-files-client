@@ -8,7 +8,7 @@ namespace FileNodeClient.Windows;
 
 /// <summary>
 /// Static registry bridging the COM ThumbnailHandler to running SyncEngine instances.
-/// The COM handler runs in the Service.exe process (ExeServer via MSIX manifest),
+/// The COM handler runs in the FileNodeClient.App.exe process (ExeServer via MSIX manifest),
 /// so it has direct access to JMAP clients and mappings — no IPC needed.
 ///
 /// Thumbnail requests from Explorer arrive concurrently (one per file). Rather than

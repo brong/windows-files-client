@@ -1,13 +1,10 @@
-using FileNodeClient.Ipc;
-
 namespace FileNodeClient.App;
 
 sealed partial class ManageAccountsForm
 {
     private sealed class ViewModel
     {
-        // --- Service state (snapshotted from ServiceClient events) ---
-        public bool IsConnected;
+        // --- Sync state (snapshotted from SyncController events) ---
         public List<AccountInfo> Accounts = new();
         public List<string> ConnectingLoginIds = new();
         public List<FailedLogin> FailedLogins = new();
@@ -21,7 +18,6 @@ sealed partial class ManageAccountsForm
         public string? SelectedAccountId;
 
         // --- Derived/local state ---
-        public VersionInfo? ServiceVersion;
         public HashSet<string> SettingUpAccounts = new();
         public Dictionary<string, List<DiscoveredAccount>> DiscoveredAccounts = new();
         public Dictionary<string, LoginAccountsResult> LoginAccountResults = new();

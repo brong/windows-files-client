@@ -1,5 +1,4 @@
 using System.Drawing;
-using FileNodeClient.Ipc;
 using FileNodeClient.Logging;
 using FileNodeClient.Jmap.Auth;
 
@@ -7,7 +6,7 @@ namespace FileNodeClient.App;
 
 sealed partial class ManageAccountsForm : Form
 {
-    private readonly ServiceClient _serviceClient;
+    private readonly SyncController _sync;
     private readonly CancellationTokenSource _appCts;
     private readonly TreeView _treeView;
     private readonly Panel _detailPanel;
@@ -64,13 +63,10 @@ sealed partial class ManageAccountsForm : Form
     private string? _renderedLoginId;
     private string? _renderedAccountId;
     private readonly Button _addLoginButton;
-    private readonly Button _startServiceButton;
-    private readonly Button _stopServiceButton;
-    private readonly Button _restartServiceButton;
 
-    public ManageAccountsForm(ServiceClient serviceClient, CancellationTokenSource appCts)
+    public ManageAccountsForm(SyncController sync, CancellationTokenSource appCts)
     {
-        _serviceClient = serviceClient;
+        _sync = sync;
         _appCts = appCts;
 
         Font = SystemFonts.MessageBoxFont ?? new Font("Segoe UI", 9f);
@@ -435,39 +431,8 @@ sealed partial class ManageAccountsForm : Form
             AutoSize = true,
             Height = 30,
             Margin = new Padding(0, 0, 4, 0),
-            Enabled = _serviceClient.IsConnected,
         };
         _addLoginButton.Click += OnAddLoginClicked;
-
-        _startServiceButton = new Button
-        {
-            Text = "Start Service",
-            AutoSize = true,
-            Height = 30,
-            Visible = !_serviceClient.IsConnected,
-            Margin = new Padding(0, 0, 4, 0),
-        };
-        _startServiceButton.Click += OnStartServiceClicked;
-
-        _stopServiceButton = new Button
-        {
-            Text = "Stop Service",
-            AutoSize = true,
-            Height = 30,
-            Visible = _serviceClient.IsConnected,
-            Margin = new Padding(0, 0, 4, 0),
-        };
-        _stopServiceButton.Click += OnStopServiceClicked;
-
-        _restartServiceButton = new Button
-        {
-            Text = "Restart Service",
-            AutoSize = true,
-            Height = 30,
-            Visible = _serviceClient.IsConnected,
-            Margin = new Padding(0, 0, 4, 0),
-        };
-        _restartServiceButton.Click += OnRestartServiceClicked;
 
         var leftButtons = new FlowLayoutPanel
         {
@@ -477,7 +442,7 @@ sealed partial class ManageAccountsForm : Form
             WrapContents = false,
             Location = new Point(10, 9),
         };
-        leftButtons.Controls.AddRange([_addLoginButton, _startServiceButton, _stopServiceButton, _restartServiceButton]);
+        leftButtons.Controls.Add(_addLoginButton);
 
         var exitButton = new Button
         {
@@ -517,13 +482,13 @@ sealed partial class ManageAccountsForm : Form
         _refreshTimer.Tick += (_, _) => { SnapshotServiceState(); ScheduleRender(); };
         _refreshTimer.Start();
 
-        _serviceClient.AccountsChanged += () => { SnapshotServiceState(); ScheduleRender(); };
-        _serviceClient.StatusChanged += () => { SnapshotServiceState(); ScheduleRender(); };
-        _serviceClient.ActivityChanged += OnActivityPushed;
-        _serviceClient.ConnectionChanged += OnConnectionChanged;
+        _sync.AccountsChanged += () => { SnapshotServiceState(); ScheduleRender(); };
+        _sync.StatusChanged += () => { SnapshotServiceState(); ScheduleRender(); };
+        _sync.ActivityChanged += OnActivityPushed;
 
         SnapshotServiceState();
         Render();
+        FetchInitialActivity();
         _ = RefreshAllLoginAccountsAsync();
     }
 
@@ -538,32 +503,10 @@ sealed partial class ManageAccountsForm : Form
 
     private void SnapshotServiceState()
     {
-        _vm.IsConnected = _serviceClient.IsConnected;
-        _vm.Accounts = _serviceClient.Accounts.ToList();
-        _vm.ConnectingLoginIds = _serviceClient.ConnectingLoginIds.ToList();
-        _vm.FailedLogins = _serviceClient.FailedLogins.ToList();
-        _vm.ConnectedLoginIds = _serviceClient.ConnectedLoginIds.ToList();
-    }
-
-    private void OnConnectionChanged(bool connected)
-    {
-        void Handle()
-        {
-            SnapshotServiceState();
-            UpdateServiceButtons();
-            if (connected)
-            {
-                FetchServiceVersion();
-                FetchInitialActivity();
-            }
-            else
-            {
-                _vm.ServiceVersion = null;
-                _vm.ActivityCache.Clear();
-            }
-            ScheduleRender();
-        }
-        if (InvokeRequired) BeginInvoke(Handle); else Handle();
+        _vm.Accounts = _sync.Accounts.ToList();
+        _vm.ConnectingLoginIds = _sync.ConnectingLoginIds.ToList();
+        _vm.FailedLogins = _sync.FailedLogins.ToList();
+        _vm.ConnectedLoginIds = _sync.ConnectedLoginIds.ToList();
     }
 
     private void Render()
@@ -582,16 +525,10 @@ sealed partial class ManageAccountsForm : Form
         var connectingIds = _vm.ConnectingLoginIds;
         var failedLogins = _vm.FailedLogins;
         var connectedLoginIds = _vm.ConnectedLoginIds;
-        var serviceConnected = _vm.IsConnected;
 
         // Build desired tree state as flat list of (loginId, accountId?, text, color, tag)
         var desired = new List<(string LoginId, List<(string Text, Color Color, object Tag)> Children)>();
 
-        if (!serviceConnected)
-        {
-            // Special case: show "Service not running" as a single root node
-        }
-        else
         {
             var byLogin = accounts
                 .Where(a => !string.IsNullOrEmpty(a.LoginId))
@@ -634,7 +571,7 @@ sealed partial class ManageAccountsForm : Form
                         var isMissing = loginRefreshed && discoveredIds != null
                             && !discoveredIds.Contains(account.AccountId);
 
-                        var rejCount = _serviceClient.GetRejectedCount(account.AccountId);
+                        var rejCount = _sync.GetRejectedCount(account.AccountId);
                         var statusText = isMissing ? "Missing on server" : account.Status switch
                         {
                             AccountStatus.Paused when account.PauseReason?.Contains("DiskFull") == true => "Disk full",
@@ -711,21 +648,6 @@ sealed partial class ManageAccountsForm : Form
                 }
                 if (structureChanged) break;
             }
-        }
-
-        if (!serviceConnected)
-        {
-            if (_treeView.Nodes.Count != 1 || _treeView.Nodes[0].Text != "Service not running")
-            {
-                _suppressSelectionChanged = true;
-                _treeView.BeginUpdate();
-                _treeView.Nodes.Clear();
-                _treeView.Nodes.Add(new TreeNode("Service not running")
-                    { ForeColor = Color.Gray });
-                _treeView.EndUpdate();
-                _suppressSelectionChanged = false;
-            }
-            return;
         }
 
         _suppressSelectionChanged = true;
@@ -873,28 +795,13 @@ sealed partial class ManageAccountsForm : Form
         else
         {
             // No selection — show version info
-            if (!_vm.IsConnected)
-            {
-                _noSelectionLabel.Text = "Service is not running. Click \"Start Service\" to connect.";
-            }
-            else
-            {
-                UpdateVersionDisplay();
-            }
+            UpdateVersionDisplay();
             ShowPanel(_noSelectionLabel);
         }
     }
 
     private void RenderActivityView()
     {
-        if (!_vm.IsConnected)
-        {
-            _activityListView.Visible = false;
-            _activityEmptyLabel.Visible = false;
-            _activityListView.Items.Clear();
-            return;
-        }
-
         // Cross-account: gather activity from all accounts (no filtering by selection)
         bool multiAccount = _vm.Accounts.Count(a => a.Status != AccountStatus.Disconnected) > 1;
 
@@ -905,8 +812,8 @@ sealed partial class ManageAccountsForm : Form
     {
         _operationInProgress = true;
         var result = MessageBox.Show(
-            "This will close the FileNodeClient tray icon.\n\n" +
-            "Your files will continue to sync in the background.",
+            "This will quit FileNodeClient.\n\n" +
+            "Your files will stop syncing until it is started again.",
             "FileNodeClient",
             MessageBoxButtons.OKCancel,
             MessageBoxIcon.Information);
@@ -916,93 +823,6 @@ sealed partial class ManageAccountsForm : Form
             Application.ExitThread();
         }
         _operationInProgress = false;
-    }
-
-    private void UpdateServiceButtons()
-    {
-        var connected = _serviceClient.IsConnected;
-        _addLoginButton.Enabled = connected;
-        _startServiceButton.Visible = !connected;
-        _startServiceButton.Enabled = true;
-        _startServiceButton.Text = "Start Service";
-        _stopServiceButton.Visible = connected;
-        _stopServiceButton.Enabled = true;
-        _stopServiceButton.Text = "Stop Service";
-        _restartServiceButton.Visible = connected;
-        _restartServiceButton.Enabled = true;
-        _restartServiceButton.Text = "Restart Service";
-    }
-
-    private async void OnStartServiceClicked(object? sender, EventArgs e)
-    {
-        _startServiceButton.Enabled = false;
-        _startServiceButton.Text = "Starting...";
-
-        var started = ServiceLauncher.TryStartService();
-        if (!started)
-        {
-            _startServiceButton.Text = "Start Service";
-            _startServiceButton.Enabled = true;
-            MessageBox.Show("Could not start the service.\nFileNodeClient.Service.exe was not found.",
-                "FileNodeClient", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            return;
-        }
-
-        // Wait up to 10s for connection, then re-enable button
-        for (var i = 0; i < 20 && !_serviceClient.IsConnected; i++)
-            await Task.Delay(500);
-
-        if (!_serviceClient.IsConnected)
-        {
-            _startServiceButton.Text = "Start Service";
-            _startServiceButton.Enabled = true;
-        }
-    }
-
-    private async void OnStopServiceClicked(object? sender, EventArgs e)
-    {
-        _stopServiceButton.Enabled = false;
-        _restartServiceButton.Enabled = false;
-        _stopServiceButton.Text = "Stopping...";
-
-        ServiceLauncher.StopService();
-        await ServiceLauncher.WaitForExitAsync();
-
-        UpdateServiceButtons();
-    }
-
-    private async void OnRestartServiceClicked(object? sender, EventArgs e)
-    {
-        _stopServiceButton.Enabled = false;
-        _restartServiceButton.Enabled = false;
-        _restartServiceButton.Text = "Restarting...";
-
-        ServiceLauncher.StopService();
-        if (!await ServiceLauncher.WaitForExitAsync())
-        {
-            UpdateServiceButtons();
-            MessageBox.Show("Could not stop the service.", "FileNodeClient",
-                MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            return;
-        }
-
-        // Brief pause to let the pipe fully close before restarting
-        await Task.Delay(500);
-
-        var started = ServiceLauncher.TryStartService();
-        if (!started)
-        {
-            UpdateServiceButtons();
-            MessageBox.Show("Service stopped but could not restart.\nFileNodeClient.Service.exe was not found.",
-                "FileNodeClient", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            return;
-        }
-
-        // Wait up to 10s for reconnection
-        for (var i = 0; i < 20 && !_serviceClient.IsConnected; i++)
-            await Task.Delay(500);
-
-        UpdateServiceButtons();
     }
 
     private void OnOpenFolderClicked(object? sender, EventArgs e)
@@ -1018,26 +838,10 @@ sealed partial class ManageAccountsForm : Form
         ScheduleRender();
     }
 
-    private async void FetchServiceVersion()
-    {
-        try
-        {
-            _vm.ServiceVersion = await _serviceClient.GetVersionAsync();
-            ScheduleRender();
-        }
-        catch { /* IPC not available */ }
-    }
-
     private void UpdateVersionDisplay()
     {
-        var appVersion = VersionHelper.GetVersionInfo();
-        var lines = new List<string>();
-        lines.Add($"App: {appVersion.Version}  ({FormatBuildDate(appVersion.BuildDate)})");
-        if (_vm.ServiceVersion != null)
-            lines.Add($"Service: {_vm.ServiceVersion.Version}  ({FormatBuildDate(_vm.ServiceVersion.BuildDate)})");
-        else
-            lines.Add("Service: not connected");
-        _noSelectionLabel.Text = string.Join("\n", lines);
+        var version = VersionInfo.Current();
+        _noSelectionLabel.Text = $"FileNodeClient {version.Version}  ({FormatBuildDate(version.BuildDate)})";
     }
 
     private static string FormatBuildDate(string buildDate)
@@ -1047,23 +851,11 @@ sealed partial class ManageAccountsForm : Form
         return buildDate;
     }
 
-    private async void FetchInitialActivity()
+    private void FetchInitialActivity()
     {
-        try
-        {
-            var accounts = _serviceClient.Accounts;
-            var tasks = accounts.Select(a => _serviceClient.GetActivityAsync(a.AccountId)).ToList();
-            var results = await Task.WhenAll(tasks);
-
-            for (int i = 0; i < results.Length; i++)
-                _vm.ActivityCache[results[i].AccountId] = results[i];
-
-            ScheduleRender();
-        }
-        catch
-        {
-            // IPC not available
-        }
+        foreach (var account in _sync.Accounts)
+            _vm.ActivityCache[account.AccountId] = _sync.GetActivity(account.AccountId);
+        ScheduleRender();
     }
 
     private void RefreshActivityList(bool multiAccount)
@@ -1303,26 +1095,18 @@ sealed partial class ManageAccountsForm : Form
         if (hit.Item?.Tag is not ActivityItemTag tag) return;
 
         var menu = new ContextMenuStrip();
-        menu.Items.Add("Retry upload", null, async (_, _) =>
-        {
-            try { await _serviceClient.RetryRejectedAsync(tag.AccountId, tag.EntryId); }
-            catch (Exception ex) { Log.Error($"Retry rejected failed: {ex.Message}"); }
-        });
-        menu.Items.Add("Dismiss", null, async (_, _) =>
-        {
-            try { await _serviceClient.DismissRejectedAsync(tag.AccountId, tag.EntryId); }
-            catch (Exception ex) { Log.Error($"Dismiss rejected failed: {ex.Message}"); }
-        });
+        menu.Items.Add("Retry upload", null, (_, _) => _sync.RetryRejected(tag.AccountId, tag.EntryId));
+        menu.Items.Add("Dismiss", null, (_, _) => _sync.DismissRejected(tag.AccountId, tag.EntryId));
         if (tag.LocalPath != null)
         {
             menu.Items.Add(new ToolStripSeparator());
-            menu.Items.Add("Delete local file", null, async (_, _) =>
+            menu.Items.Add("Delete local file", null, (_, _) =>
             {
                 try
                 {
                     if (File.Exists(tag.LocalPath))
                         File.Delete(tag.LocalPath);
-                    await _serviceClient.DismissRejectedAsync(tag.AccountId, tag.EntryId);
+                    _sync.DismissRejected(tag.AccountId, tag.EntryId);
                 }
                 catch (Exception ex) { Log.Error($"Delete rejected file failed: {ex.Message}"); }
             });
@@ -1430,24 +1214,15 @@ sealed partial class ManageAccountsForm : Form
     {
         // Include all known logins — not just those with synced accounts —
         // so that non-synced accounts are discovered for newly added logins.
-        var loginIds = _serviceClient.Accounts.Select(a => a.LoginId)
-            .Union(_serviceClient.ConnectingLoginIds)
-            .Union(_serviceClient.FailedLogins.Select(f => f.LoginId))
+        var loginIds = _sync.Accounts.Select(a => a.LoginId)
+            .Union(_sync.ConnectingLoginIds)
+            .Union(_sync.FailedLogins.Select(f => f.LoginId))
             .Where(id => !string.IsNullOrEmpty(id)).Distinct().ToList();
 
-        // Phase 1: cached accounts (fast, all logins in parallel)
-        var cachedTasks = loginIds.Select(async loginId =>
+        // Phase 1: accounts already known from each login's session (instant)
+        foreach (var loginId in loginIds)
         {
-            try
-            {
-                var result = await _serviceClient.GetLoginAccountsAsync(loginId);
-                return (loginId, result, (Exception?)null);
-            }
-            catch (Exception ex) { return (loginId, (LoginAccountsResult?)null, (Exception?)ex); }
-        }).ToList();
-
-        foreach (var (loginId, result, _) in await Task.WhenAll(cachedTasks))
-        {
+            var result = _sync.GetLoginAccounts(loginId);
             if (result == null) continue;
             _vm.LoginAccountResults[loginId] = result;
             if (result.Accounts != null)
@@ -1461,7 +1236,7 @@ sealed partial class ManageAccountsForm : Form
         {
             try
             {
-                var result = await _serviceClient.RefreshLoginAccountsAsync(loginId);
+                var result = await _sync.RefreshLoginAccountsAsync(loginId);
                 return (loginId, result, (Exception?)null);
             }
             catch (Exception ex) { return (loginId, (LoginAccountsResult?)null, (Exception?)ex); }
@@ -1493,24 +1268,21 @@ sealed partial class ManageAccountsForm : Form
         bool changed = false;
         foreach (var loginId in loginIds)
         {
-            try
+            var result = _sync.GetLoginAccounts(loginId);
+            if (result == null) continue;
+            _vm.LoginAccountResults[loginId] = result;
+            if (result.Accounts != null)
             {
-                var result = await _serviceClient.GetLoginAccountsAsync(loginId);
-                _vm.LoginAccountResults[loginId] = result;
-                if (result.Accounts != null)
-                {
-                    _vm.DiscoveredAccounts[loginId] = result.Accounts;
-                    changed = true;
-                }
+                _vm.DiscoveredAccounts[loginId] = result.Accounts;
+                changed = true;
             }
-            catch { }
         }
 
         foreach (var loginId in loginIds)
         {
             try
             {
-                var result = await _serviceClient.RefreshLoginAccountsAsync(loginId);
+                var result = await _sync.RefreshLoginAccountsAsync(loginId);
                 _vm.LoginAccountResults[loginId] = result;
                 if (result.Accounts != null)
                 {
@@ -1556,7 +1328,7 @@ sealed partial class ManageAccountsForm : Form
             var isUserPaused = info.PauseReason?.Contains("UserRequested") == true;
             var isMetered = info.PauseReason?.Contains("MeteredConnection") == true;
             var isPaused = info.Status == AccountStatus.Paused;
-            var rejectedCount = _serviceClient.GetRejectedCount(accountNode.AccountId);
+            var rejectedCount = _sync.GetRejectedCount(accountNode.AccountId);
 
             _accountStatusLabel.Text = info.Status switch
             {
@@ -1620,7 +1392,7 @@ sealed partial class ManageAccountsForm : Form
         _operationInProgress = true;
         try
         {
-            using var addForm = new AddAccountForm(_serviceClient);
+            using var addForm = new AddAccountForm(_sync);
             if (addForm.ShowDialog(this) == DialogResult.OK)
             {
                 // Mark selected accounts as "Setting up" until their supervisor appears
@@ -1662,7 +1434,7 @@ sealed partial class ManageAccountsForm : Form
         SetAllButtonsEnabled(false);
         try
         {
-            await _serviceClient.UpdateLoginAsync(loginNode.LoginId, sessionUrl, token);
+            await _sync.UpdateLoginAsync(loginNode.LoginId, sessionUrl, token);
             _tokenBox.Text = "";
             _ = RefreshAllLoginAccountsAsync();
         }
@@ -1709,7 +1481,7 @@ sealed partial class ManageAccountsForm : Form
                 sessionUrlOverride: sessionUrlOverride);
 
             _reauthStatusLabel.Text = "Updating credentials...";
-            await _serviceClient.UpdateLoginAsync(
+            await _sync.UpdateLoginAsync(
                 loginNode.LoginId, cred.SessionUrl, cred.AccessToken,
                 cred.RefreshToken, cred.TokenEndpoint, cred.ClientId,
                 cred.ExpiresAt.ToUnixTimeSeconds());
@@ -1738,7 +1510,7 @@ sealed partial class ManageAccountsForm : Form
 
         SetAllButtonsEnabled(false);
 
-        var accountsForLogin = _serviceClient.Accounts.Where(a => a.LoginId == loginNode.LoginId).ToList();
+        var accountsForLogin = _sync.Accounts.Where(a => a.LoginId == loginNode.LoginId).ToList();
         var accountWord = accountsForLogin.Count == 1 ? "account" : $"{accountsForLogin.Count} accounts";
 
         var result = MessageBox.Show(
@@ -1770,7 +1542,7 @@ sealed partial class ManageAccountsForm : Form
 
         try
         {
-            await _serviceClient.RemoveLoginAsync(loginNode.LoginId);
+            await _sync.RemoveLoginAsync(loginNode.LoginId);
             _vm.DiscoveredAccounts.Remove(loginNode.LoginId);
             _vm.LoginAccountResults.Remove(loginNode.LoginId);
             _vm.RefreshedLogins.Remove(loginNode.LoginId);
@@ -1818,7 +1590,7 @@ sealed partial class ManageAccountsForm : Form
         }
         try
         {
-            await _serviceClient.DetachAccountAsync(accountNode.AccountId);
+            await _sync.DetachAccountAsync(accountNode.AccountId);
         }
         catch (Exception ex)
         {
@@ -1860,7 +1632,7 @@ sealed partial class ManageAccountsForm : Form
         }
         try
         {
-            await _serviceClient.CleanUpAccountAsync(accountNode.AccountId);
+            await _sync.CleanUpAccountAsync(accountNode.AccountId);
         }
         catch (Exception ex)
         {
@@ -1900,7 +1672,7 @@ sealed partial class ManageAccountsForm : Form
         }
         try
         {
-            await _serviceClient.RefreshAccountAsync(accountNode.AccountId);
+            await _sync.RefreshAccountAsync(accountNode.AccountId);
         }
         catch (Exception ex)
         {
@@ -1945,7 +1717,7 @@ sealed partial class ManageAccountsForm : Form
 
         try
         {
-            await _serviceClient.CleanAccountAsync(accountNode.AccountId);
+            await _sync.CleanAccountAsync(accountNode.AccountId);
         }
         catch (Exception ex)
         {
@@ -1968,7 +1740,7 @@ sealed partial class ManageAccountsForm : Form
         _vm.SettingUpAccounts.Add(accountNode.AccountId);
         try
         {
-            await _serviceClient.EnableAccountAsync(accountNode.LoginId, accountNode.AccountId);
+            await _sync.EnableAccountAsync(accountNode.LoginId, accountNode.AccountId);
             await RefreshAllLoginAccountsAsync();
         }
         catch (Exception ex)
@@ -1983,34 +1755,22 @@ sealed partial class ManageAccountsForm : Form
         }
     }
 
-    private async void OnPauseClicked(object? sender, EventArgs e)
+    private void OnPauseClicked(object? sender, EventArgs e)
     {
-        if (_operationInProgress) return;
-        if (_treeView.SelectedNode?.Tag is not AccountNode { IsSynced: true } accountNode)
-            return;
-
-        try { await _serviceClient.PauseAccountAsync(accountNode.AccountId); }
-        catch (Exception ex) { Log.Error($"Pause failed: {ex.Message}"); }
+        if (!_operationInProgress && _treeView.SelectedNode?.Tag is AccountNode { IsSynced: true } accountNode)
+            _sync.PauseAccount(accountNode.AccountId);
     }
 
-    private async void OnResumeClicked(object? sender, EventArgs e)
+    private void OnResumeClicked(object? sender, EventArgs e)
     {
-        if (_operationInProgress) return;
-        if (_treeView.SelectedNode?.Tag is not AccountNode { IsSynced: true } accountNode)
-            return;
-
-        try { await _serviceClient.ResumeAccountAsync(accountNode.AccountId); }
-        catch (Exception ex) { Log.Error($"Resume failed: {ex.Message}"); }
+        if (!_operationInProgress && _treeView.SelectedNode?.Tag is AccountNode { IsSynced: true } accountNode)
+            _sync.ResumeAccount(accountNode.AccountId);
     }
 
-    private async void OnSyncNowClicked(object? sender, EventArgs e)
+    private void OnSyncNowClicked(object? sender, EventArgs e)
     {
-        if (_operationInProgress) return;
-        if (_treeView.SelectedNode?.Tag is not AccountNode { IsSynced: true } accountNode)
-            return;
-
-        try { await _serviceClient.SyncNowAsync(accountNode.AccountId); }
-        catch (Exception ex) { Log.Error($"Sync now failed: {ex.Message}"); }
+        if (!_operationInProgress && _treeView.SelectedNode?.Tag is AccountNode { IsSynced: true } accountNode)
+            _sync.SyncNow(accountNode.AccountId);
     }
 
     private void SetAllButtonsEnabled(bool enabled)

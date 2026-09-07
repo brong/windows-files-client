@@ -1,7 +1,7 @@
 using System.Text.Json;
 using FileNodeClient.Logging;
 
-namespace FileNodeClient.Service;
+namespace FileNodeClient.App;
 
 /// <summary>
 /// Persists account metadata (display name, sync path, etc.) so accounts

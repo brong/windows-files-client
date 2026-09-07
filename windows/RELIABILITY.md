@@ -103,7 +103,7 @@ Apple `JmapClient`/`FuseMount` targets are unit-tested via `swift test`.
 | 🟠 D4 permanent-error classification | `c733227` (`JmapError.isRetriable`) | error tiers (`OutboxProcessor.cs`, DESIGN §12 table) |
 | 🟠 D5 push: poll-on-change + backoff | `0328b70`, `910fa20` | Windows SSE handler — parts 1&2 apply. **Part 3 (per-login lease) likely N/A**: Windows runs one Service process, not one per account |
 | 🟡 R1 Verify & Repair | `a7ed026` (`verifyAgainstServer` + force-reconcile) | add a user action: clear state token → full reconcile + retry rejected |
-| 🟡 R2 service watchdog | N/A on Apple (OS-managed) | Windows-specific: auto-restart `Service.exe` |
+| 🟡 R2 crash recovery | N/A on Apple (OS-managed) | Windows: single tray process since the Service merge — restart on crash is the MSIX startup task / user relaunch; make restart recover cleanly from persisted outbox + cache |
 | 🟡 R3 state-token crash window | already safe on Apple (token after changes) | `SyncEngine.cs:1280` — persist/apply ordering |
 | 🟡 R5 cache corruption fallback | Apple SQLite WAL + temp-DB fallback | `NodeCache.cs` load — add integrity check + fallback |
 | 🟡 V1 last-synced signal | `dbbc196` | surface `lastSyncTime` in tray/status |
@@ -191,7 +191,7 @@ foundation the scrubber (A2) reuses.
 `ReconcileFromServerAsync` (`SyncEngine.cs:869`) deletes local nodes whose ids
 are in the cache but absent from a single `QueryAllFileNodeIdsAsync` snapshot.
 That snapshot uses **`position`-offset pagination with no `queryState`
-stability check** (`AccountScopedJmapClient.cs:483`). A network failure throws
+stability check** (`JmapClient.QueryAllFileNodeIdsAsync`). A network failure throws
 (safe — no partial delete), but **concurrent server mutation during pagination**
 can shift a live node past a page boundary, drop it from the set, and **delete
 it locally.**
@@ -256,15 +256,16 @@ today, but it is fragile and interacts badly with destroys.
 each applied change individually idempotent and safe to replay). Bound the
 `hasMoreChanges` loop (convert recursion to iteration with a guard).
 
-### 🟡 R2. No service watchdog
+### 🟡 R2. No crash recovery
 
-If `Service.exe` crashes it stays dead until the user manually restarts it from
-the tray/UI; in-flight state is whatever was last persisted.
+The sync engine now runs inside the single tray process (the separate
+`Service.exe` + IPC layer was removed). If it crashes it stays dead until the
+user relaunches it; in-flight state is whatever was last persisted.
 
-**Fix.** Supervise the service: auto-restart with backoff (the tray App already
-detects the dead pipe — have it relaunch, or use a Windows recovery mechanism),
-and surface "sync service restarted" rather than silent death. Ensure restart
-recovers cleanly from persisted outbox + cache (depends on R3 durability).
+**Fix.** Ensure a relaunch recovers cleanly from persisted outbox + cache
+(depends on R3 durability), and surface "FileNodeClient restarted after a
+crash" rather than silent death. A watchdog, if wanted, is a Task Scheduler /
+startup-task concern, not more in-process code.
 
 ### 🟡 R4. Orphaned sync-root registrations not auto-cleaned
 

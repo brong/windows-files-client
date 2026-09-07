@@ -1,6 +1,5 @@
 using System.Drawing;
 using System.Runtime.InteropServices;
-using FileNodeClient.Ipc;
 
 namespace FileNodeClient.App;
 
@@ -12,7 +11,7 @@ sealed class TrayIcon : IDisposable
 
     private readonly CancellationTokenSource _cts;
     private readonly string? _iconPath;
-    private readonly ServiceClient _serviceClient;
+    private readonly SyncController _sync;
     private readonly ManualResetEventSlim _ready = new();
     private Thread? _thread;
     private NotifyIcon? _notifyIcon;
@@ -24,15 +23,14 @@ sealed class TrayIcon : IDisposable
     private Color _lastDotColor;
     private readonly System.Windows.Forms.Timer _refreshTimer = new() { Interval = 300 };
 
-    public TrayIcon(CancellationTokenSource cts, string? iconPath, ServiceClient serviceClient)
+    public TrayIcon(CancellationTokenSource cts, string? iconPath, SyncController sync)
     {
         _cts = cts;
         _iconPath = iconPath;
-        _serviceClient = serviceClient;
+        _sync = sync;
 
-        _serviceClient.AccountsChanged += OnAccountsChanged;
-        _serviceClient.StatusChanged += OnStatusChanged;
-        _serviceClient.ConnectionChanged += OnConnectionChanged;
+        _sync.AccountsChanged += ScheduleRefresh;
+        _sync.StatusChanged += ScheduleRefresh;
     }
 
     public void Start()
@@ -52,21 +50,6 @@ sealed class TrayIcon : IDisposable
         _syncContext?.Post(_ => ToggleManageAccountsForm(), null);
     }
 
-    private void OnAccountsChanged()
-    {
-        ScheduleRefresh();
-    }
-
-    private void OnStatusChanged()
-    {
-        ScheduleRefresh();
-    }
-
-    private void OnConnectionChanged(bool connected)
-    {
-        ScheduleRefresh();
-    }
-
     /// <summary>
     /// Coalesce rapid-fire status/account events into a single UI refresh.
     /// The timer runs on the STA thread so the Tick handler is safe for UI work.
@@ -84,23 +67,17 @@ sealed class TrayIcon : IDisposable
 
     private void RefreshTooltip()
     {
-        var accounts = _serviceClient.Accounts;
-        var status = _serviceClient.AggregateStatus;
-        var pendingCount = _serviceClient.AggregatePendingCount;
-        var connected = _serviceClient.IsConnected;
+        var accounts = _sync.Accounts;
+        var status = _sync.AggregateStatus;
+        var pendingCount = _sync.AggregatePendingCount;
 
         Color color;
         string tooltip;
 
-        if (!connected)
+        if (accounts.Count == 0)
         {
-            color = Color.Gray;
-            tooltip = "FileNodeClient - Service not running";
-        }
-        else if (accounts.Count == 0)
-        {
-            var connecting = _serviceClient.ConnectingLoginIds;
-            var failed = _serviceClient.FailedLogins;
+            var connecting = _sync.ConnectingLoginIds;
+            var failed = _sync.FailedLogins;
             if (connecting.Count > 0)
             {
                 color = Color.Gray;
@@ -152,9 +129,9 @@ sealed class TrayIcon : IDisposable
         }
 
         // Override to orange when active accounts exist but some logins failed
-        if (connected && accounts.Count > 0)
+        if (accounts.Count > 0)
         {
-            var failed = _serviceClient.FailedLogins;
+            var failed = _sync.FailedLogins;
             if (failed.Count > 0)
             {
                 if (color == Color.LimeGreen || color == Color.DodgerBlue)
@@ -164,9 +141,9 @@ sealed class TrayIcon : IDisposable
         }
 
         // Override to red when files have been permanently rejected
-        if (connected && accounts.Count > 0)
+        if (accounts.Count > 0)
         {
-            var rejectedCount = _serviceClient.RejectedFileCount;
+            var rejectedCount = _sync.RejectedFileCount;
             if (rejectedCount > 0)
             {
                 if (color != Color.DodgerBlue) // don't override active sync
@@ -228,18 +205,6 @@ sealed class TrayIcon : IDisposable
         var contextMenu = new ContextMenuStrip();
         var manageItem = new ToolStripMenuItem("Manage Accounts");
         manageItem.Click += (_, _) => ToggleManageAccountsForm();
-        var startServiceItem = new ToolStripMenuItem("Start Service");
-        startServiceItem.Click += (_, _) => ServiceLauncher.TryStartService();
-        var stopServiceItem = new ToolStripMenuItem("Stop Service");
-        stopServiceItem.Click += (_, _) => ServiceLauncher.StopService();
-        var restartServiceItem = new ToolStripMenuItem("Restart Service");
-        restartServiceItem.Click += async (_, _) =>
-        {
-            ServiceLauncher.StopService();
-            await ServiceLauncher.WaitForExitAsync();
-            await Task.Delay(500);
-            ServiceLauncher.TryStartService();
-        };
         var exitItem = new ToolStripMenuItem("Exit");
         exitItem.Click += (_, _) =>
         {
@@ -247,18 +212,8 @@ sealed class TrayIcon : IDisposable
             Application.ExitThread();
         };
         contextMenu.Items.Add(manageItem);
-        contextMenu.Items.Add(startServiceItem);
-        contextMenu.Items.Add(stopServiceItem);
-        contextMenu.Items.Add(restartServiceItem);
         contextMenu.Items.Add(new ToolStripSeparator());
         contextMenu.Items.Add(exitItem);
-        contextMenu.Opening += (_, _) =>
-        {
-            var connected = _serviceClient.IsConnected;
-            startServiceItem.Visible = !connected;
-            stopServiceItem.Visible = connected;
-            restartServiceItem.Visible = connected;
-        };
         _notifyIcon.ContextMenuStrip = contextMenu;
 
         _notifyIcon.MouseClick += (_, e) =>
@@ -281,8 +236,7 @@ sealed class TrayIcon : IDisposable
 
         _ready.Set();
 
-        // One-shot timer to refresh UI once the message loop is pumping
-        // and the service client has had time to connect and receive status.
+        // One-shot timer to refresh UI once the message loop is pumping.
         var initTimer = new System.Windows.Forms.Timer { Interval = 1000 };
         initTimer.Tick += (_, _) =>
         {
@@ -371,7 +325,7 @@ sealed class TrayIcon : IDisposable
         }
 
         if (_manageForm == null || _manageForm.IsDisposed)
-            _manageForm = new ManageAccountsForm(_serviceClient, _cts);
+            _manageForm = new ManageAccountsForm(_sync, _cts);
 
         _manageForm.Show();
         _manageForm.Activate();

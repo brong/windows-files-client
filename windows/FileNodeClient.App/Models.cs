@@ -1,8 +1,9 @@
-using System.Text.Json;
+using System.Reflection;
 
-namespace FileNodeClient.Ipc;
+namespace FileNodeClient.App;
 
-// ---- Shared data types ----
+// Read-only snapshots handed from the sync side (LoginManager / AccountSupervisor)
+// to the UI. Records so the UI can hold them across renders without locking.
 
 public enum AccountStatus { Idle, Syncing, Error, Disconnected, Paused }
 
@@ -58,39 +59,8 @@ public record SyncProgressInfo(
     int? ProcessedCount,
     int? TotalCount);
 
-// ---- Wire-format envelope types ----
-
-public abstract record IpcMessage;
-public record IpcRequest(string Id, string Method, JsonElement? Params) : IpcMessage;
-public record IpcResponse(string Id, JsonElement Result) : IpcMessage;
-public record IpcError(string Id, string Message) : IpcMessage;
-public record IpcPush(string Method, JsonElement? Params) : IpcMessage;
-
-// ---- Result records for methods returning structured data ----
-
-public record AddLoginResult(string LoginId);
-
-public record DiscoverAccountsResult(List<DiscoveredAccount> Accounts);
-
-public record OutboxResult(string AccountId, List<OutboxEntry> Entries,
-    List<ActiveDownloadEntry>? ActiveDownloads = null);
-
 public record LoginAccountsResult(string LoginId, List<DiscoveredAccount>? Accounts,
     HashSet<string>? ActiveAccountIds);
-
-public record StatusSnapshotResult(List<AccountInfo> Accounts, List<string> ConnectingLoginIds,
-    List<FailedLogin> FailedLogins, AccountStatus AggregateStatus, int AggregatePendingCount,
-    List<string>? ConnectedLoginIds = null);
-
-// ---- Push payload records ----
-
-public record AccountStatusPush(string AccountId, AccountStatus Status,
-    string? StatusDetail, int PendingCount,
-    long? QuotaUsed = null, long? QuotaLimit = null,
-    string? PauseReason = null);
-
-public record AccountsChangedPush(List<AccountInfo> Accounts, List<string> ConnectingLoginIds,
-    List<FailedLogin> FailedLogins, List<string>? ConnectedLoginIds = null);
 
 public record ActivitySnapshot(
     string AccountId,
@@ -105,11 +75,21 @@ public record ActivitySnapshot(
     List<CompletedEntry>? RecentlyCompleted = null,
     SyncProgressInfo? SyncProgress = null);
 
-public record VersionInfo(string Version, string BuildDate);
-
-// ---- Exception type ----
-
-public class IpcCallException : Exception
+public record VersionInfo(string Version, string BuildDate)
 {
-    public IpcCallException(string message) : base(message) { }
+    public static VersionInfo Current()
+    {
+        var asm = Assembly.GetEntryAssembly() ?? Assembly.GetExecutingAssembly();
+        var infoVersion = asm.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+
+        // InformationalVersion format: "1.0.26.0+2026-03-10T12:00:00Z"
+        if (infoVersion != null && infoVersion.Contains('+'))
+        {
+            var parts = infoVersion.Split('+', 2);
+            return new VersionInfo(parts[0], parts[1]);
+        }
+        return new VersionInfo(
+            asm.GetName().Version?.ToString() ?? "unknown",
+            File.GetLastWriteTimeUtc(asm.Location).ToString("yyyy-MM-ddTHH:mm:ssZ"));
+    }
 }

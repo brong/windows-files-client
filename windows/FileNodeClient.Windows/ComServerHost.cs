@@ -5,7 +5,7 @@ namespace FileNodeClient.Windows;
 
 /// <summary>
 /// Registers COM class factories so Explorer can activate our handlers
-/// (e.g. IStorageProviderUriSource) in-process via the running Service.exe.
+/// (e.g. IStorageProviderUriSource) in-process via the running FileNodeClient.App.exe.
 /// </summary>
 public static class ComServerHost
 {

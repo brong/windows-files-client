@@ -1,7 +1,7 @@
 using FileNodeClient.Logging;
 using Windows.Networking.Connectivity;
 
-namespace FileNodeClient.Service;
+namespace FileNodeClient.App;
 
 /// <summary>
 /// Monitors Windows network connectivity state and metered connection status.

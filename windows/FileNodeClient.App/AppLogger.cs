@@ -7,15 +7,13 @@ static class AppLogger
 {
     private static StreamWriter? _fileWriter;
     private static readonly object _fileLock = new();
-    private static TextWriter? _originalConsole;
+
+    public static string? LogFilePath { get; private set; }
 
     public static void Initialize(bool debug)
     {
         if (debug)
-        {
-            _originalConsole = Console.Out;
             Log.MinLevel = LogLevel.Debug;
-        }
 
         try
         {
@@ -23,12 +21,9 @@ static class AppLogger
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 "Fastmail", "FileNodeClient");
             Directory.CreateDirectory(logDir);
-            var logPath = Path.Combine(logDir, "app.log");
-            _fileWriter = new StreamWriter(logPath, append: false, Encoding.UTF8)
-            {
-                AutoFlush = true,
-            };
-            _fileWriter.WriteLine($"=== FileNodeClient App log started at {DateTime.Now:O} ===");
+            LogFilePath = Path.Combine(logDir, "debug.log");
+            _fileWriter = new StreamWriter(LogFilePath, append: false, Encoding.UTF8) { AutoFlush = true };
+            _fileWriter.WriteLine($"=== FileNodeClient log started at {DateTime.Now:O} ===");
         }
         catch
         {
@@ -37,7 +32,7 @@ static class AppLogger
 
         Log.Sink = (level, msg) =>
         {
-            var timestamp = DateTime.Now.ToString("HH:mm:ss.fff");
+            if (_fileWriter == null) return;
             var prefix = level switch
             {
                 LogLevel.Debug => "DBG",
@@ -46,20 +41,10 @@ static class AppLogger
                 LogLevel.Error => "ERR",
                 _ => "???",
             };
-
-            if (debug)
-                _originalConsole?.WriteLine($"{timestamp} [{prefix}] {msg}");
-
-            if (_fileWriter != null)
+            lock (_fileLock)
             {
-                lock (_fileLock)
-                {
-                    try
-                    {
-                        _fileWriter.WriteLine($"{timestamp} [{prefix}] {msg}");
-                    }
-                    catch { }
-                }
+                try { _fileWriter.WriteLine($"{DateTime.Now:HH:mm:ss.fff} [{prefix}] {msg}"); }
+                catch { }
             }
         };
     }

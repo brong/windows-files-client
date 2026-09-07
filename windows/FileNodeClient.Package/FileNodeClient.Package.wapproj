@@ -2,7 +2,7 @@
 
   <!--
     Windows Application Packaging Project (.wapproj)
-    Bundles FileNodeClient.App and FileNodeClient.Service into an MSIX package.
+    Bundles FileNodeClient.App into an MSIX package.
     Build: dotnet build FileNodeClient.Package -c Release
     Dev:   Add-AppxPackage -Register AppxManifest.xml  (loose-file registration)
   -->
@@ -23,7 +23,6 @@
 
   <ItemGroup>
     <ProjectReference Include="..\FileNodeClient.App\FileNodeClient.App.csproj" />
-    <ProjectReference Include="..\FileNodeClient.Service\FileNodeClient.Service.csproj" />
   </ItemGroup>
 
   <ItemGroup>

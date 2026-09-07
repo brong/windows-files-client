@@ -11,8 +11,8 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\FileNodeClient.Ipc\FileNodeClient.Ipc.csproj" />
     <ProjectReference Include="..\FileNodeClient.Jmap\FileNodeClient.Jmap.csproj" />
+    <ProjectReference Include="..\FileNodeClient.Windows\FileNodeClient.Windows.csproj" />
   </ItemGroup>
 
 </Project>
