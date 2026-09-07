@@ -688,24 +688,7 @@ public class SyncEngine : IDisposable
                 // Use single-attempt open (no retry) to avoid blocking populate
                 // for seconds per directory when handles are held open.
                 if (!newChildren.Contains(child))
-                {
-                    try { SetInSync(childPath); }
-                    catch (Exception syncEx)
-                    {
-                        if (ReadPlaceholderNodeId(childPath) != null)
-                        {
-                            Log.Debug($"{_logPrefix}  SetInSync failed for existing placeholder {child.Name}: {syncEx.Message}");
-                        }
-                        else
-                        {
-                            try { ConvertToPlaceholderNoRetry(childPath, child.Id, child.IsFolder); }
-                            catch (Exception ex)
-                            {
-                                Log.Debug($"{_logPrefix}  Convert skipped for {child.Name}: {ex.Message}");
-                            }
-                        }
-                    }
-                }
+                    EnsureInSync(childPath, child.Id, child.IsFolder, retryOpen: false);
             }
         }
 
@@ -717,38 +700,7 @@ public class SyncEngine : IDisposable
         {
             if (string.Equals(localParentPath, _syncRootPath, StringComparison.OrdinalIgnoreCase))
                 continue;
-            try { MarkDirectoryAlwaysFull(localParentPath); }
-            catch (Exception markEx)
-            {
-                if (ReadPlaceholderNodeId(localParentPath) != null)
-                {
-                    try { SetInSync(localParentPath); }
-                    catch (Exception syncEx)
-                    {
-                        Log.Debug($"{_logPrefix}  SetInSync failed for {localParentPath}: {syncEx.Message}");
-                    }
-                }
-                else
-                {
-                    var nodeId = _pathToNodeId.GetValueOrDefault(localParentPath);
-                    if (nodeId != null)
-                    {
-                        try
-                        {
-                            ConvertToPlaceholder(localParentPath, nodeId, isDirectory: true);
-                            MarkDirectoryAlwaysFull(localParentPath);
-                        }
-                        catch (Exception ex)
-                        {
-                            Log.Error($"{_logPrefix}  Convert+mark failed for {localParentPath}: {ex.Message}");
-                        }
-                    }
-                    else
-                    {
-                        Log.Warn($"{_logPrefix}  MarkDirectoryAlwaysFull failed for {localParentPath}: {markEx.Message}");
-                    }
-                }
-            }
+            EnsureDirectoryFull(localParentPath, _pathToNodeId.GetValueOrDefault(localParentPath));
         }
 
         ApplyWriteProtections();
@@ -858,33 +810,8 @@ public class SyncEngine : IDisposable
             throw new InvalidOperationException("Cache stale: no file placeholders on disk");
 
         // Ensure directories are placeholders and marked ALWAYS_FULL
-        foreach (var (dir, nodeId) in directories.Select(d => (d, _pathToNodeId[d])))
-        {
-            try { MarkDirectoryAlwaysFull(dir); }
-            catch (Exception markEx)
-            {
-                if (ReadPlaceholderNodeId(dir) != null)
-                {
-                    try { SetInSync(dir); }
-                    catch (Exception syncEx)
-                    {
-                        Log.Debug($"{_logPrefix}  SetInSync failed for {dir}: {syncEx.Message}");
-                    }
-                }
-                else
-                {
-                    try
-                    {
-                        ConvertToPlaceholder(dir, nodeId, isDirectory: true);
-                        Log.Info($"{_logPrefix}  Converted directory to placeholder: {dir}");
-                    }
-                    catch (Exception ex)
-                    {
-                        Log.Error($"{_logPrefix}  Convert failed for {dir} (mark: {markEx.Message}): {ex.Message}");
-                    }
-                }
-            }
-        }
+        foreach (var dir in directories)
+            EnsureDirectoryFull(dir, _pathToNodeId[dir]);
 
         // Catch up with server
         string newState;
@@ -1030,15 +957,7 @@ public class SyncEngine : IDisposable
                     if (TryMapNode(expectedPath, child.Id))
                     {
                         TrackFolderPermissions(child, expectedPath);
-                        try { SetInSync(expectedPath); }
-                        catch
-                        {
-                            if (ReadPlaceholderNodeId(expectedPath) == null)
-                            {
-                                try { ConvertToPlaceholder(expectedPath, child.Id, child.IsFolder); }
-                                catch { }
-                            }
-                        }
+                        EnsureInSync(expectedPath, child.Id, child.IsFolder);
                     }
                 }
                 else
@@ -1064,38 +983,7 @@ public class SyncEngine : IDisposable
         {
             if (string.Equals(localParentPath, _syncRootPath, StringComparison.OrdinalIgnoreCase))
                 continue;
-            try { MarkDirectoryAlwaysFull(localParentPath); }
-            catch (Exception markEx)
-            {
-                if (ReadPlaceholderNodeId(localParentPath) != null)
-                {
-                    try { SetInSync(localParentPath); }
-                    catch (Exception syncEx)
-                    {
-                        Log.Debug($"{_logPrefix}  SetInSync failed for {localParentPath}: {syncEx.Message}");
-                    }
-                }
-                else
-                {
-                    var nodeId = _pathToNodeId.GetValueOrDefault(localParentPath);
-                    if (nodeId != null)
-                    {
-                        try
-                        {
-                            ConvertToPlaceholder(localParentPath, nodeId, isDirectory: true);
-                            MarkDirectoryAlwaysFull(localParentPath);
-                        }
-                        catch (Exception ex)
-                        {
-                            Log.Error($"{_logPrefix}  Convert+mark failed for {localParentPath}: {ex.Message}");
-                        }
-                    }
-                    else
-                    {
-                        Log.Warn($"{_logPrefix}  MarkDirectoryAlwaysFull failed for {localParentPath}: {markEx.Message}");
-                    }
-                }
-            }
+            EnsureDirectoryFull(localParentPath, _pathToNodeId.GetValueOrDefault(localParentPath));
         }
 
         ApplyWriteProtections();
@@ -2447,6 +2335,75 @@ public class SyncEngine : IDisposable
                 CF_UPDATE_FLAGS.CF_UPDATE_FLAG_MARK_IN_SYNC,
                 &usn,
                 null).ThrowOnFailure();
+        }
+    }
+
+    /// <summary>
+    /// Mark a tracked item in-sync, converting it to a placeholder first if it
+    /// isn't one (e.g. a plain file/folder that pre-dated the sync root). The one
+    /// copy of the SetInSync → ReadPlaceholderNodeId → Convert fallback chain;
+    /// every sync path uses this. <paramref name="retryOpen"/>=false uses a
+    /// single-attempt open so cold-start populate doesn't stall for seconds on
+    /// each directory whose handle another process holds (DESIGN §18).
+    /// </summary>
+    private void EnsureInSync(string path, string nodeId, bool isDirectory, bool retryOpen = true)
+    {
+        try { SetInSync(path); return; }
+        catch (Exception syncEx)
+        {
+            if (ReadPlaceholderNodeId(path) != null)
+            {
+                Log.Debug($"{_logPrefix}  SetInSync failed for existing placeholder {path}: {syncEx.Message}");
+                return;
+            }
+        }
+        try
+        {
+            if (retryOpen) ConvertToPlaceholder(path, nodeId, isDirectory);
+            else ConvertToPlaceholderNoRetry(path, nodeId, isDirectory);
+        }
+        catch (Exception ex)
+        {
+            Log.Debug($"{_logPrefix}  Convert skipped for {path}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Mark a populated directory ALWAYS_FULL (so cfapi can recursively hydrate a
+    /// pinned tree), falling back to plain in-sync for an existing placeholder or
+    /// Convert+Mark for a directory that isn't a placeholder yet. The one copy of
+    /// the MarkDirectoryAlwaysFull fallback chain. Never call it on the sync root
+    /// itself (not a placeholder).
+    /// </summary>
+    private void EnsureDirectoryFull(string dirPath, string? nodeId)
+    {
+        Exception markEx;
+        try { MarkDirectoryAlwaysFull(dirPath); return; }
+        catch (Exception ex) { markEx = ex; }
+
+        if (ReadPlaceholderNodeId(dirPath) != null)
+        {
+            try { SetInSync(dirPath); }
+            catch (Exception syncEx)
+            {
+                Log.Debug($"{_logPrefix}  SetInSync failed for {dirPath}: {syncEx.Message}");
+            }
+            return;
+        }
+        if (nodeId == null)
+        {
+            Log.Warn($"{_logPrefix}  MarkDirectoryAlwaysFull failed for {dirPath}: {markEx.Message}");
+            return;
+        }
+        try
+        {
+            ConvertToPlaceholder(dirPath, nodeId, isDirectory: true);
+            MarkDirectoryAlwaysFull(dirPath);
+            Log.Info($"{_logPrefix}  Converted directory to placeholder: {dirPath}");
+        }
+        catch (Exception ex)
+        {
+            Log.Error($"{_logPrefix}  Convert+mark failed for {dirPath} (mark: {markEx.Message}): {ex.Message}");
         }
     }
 
