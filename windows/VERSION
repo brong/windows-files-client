@@ -2,6 +2,7 @@
 #   1. This file (VERSION)
 #   2. windows/FileNodeClient.Package/AppxManifest.xml  (<Identity Version="...">)
 
+1.0.79.0 2026-09-07  SyncEngine Phase 4 steps 1-3: one server→disk apply path (ApplyServerNode/RemoveNode), one BFS, one copy of the cfapi fallback chains
 1.0.78.0 2026-09-07  Fix spurious "Upload" after merely opening a file: watcher echo markers (recently hydrated/uploaded) are no longer consumed by the first Changed batch
 1.0.77.0 2026-09-07  Single-process app (Service merged into App) with the conflict-resolution/NFC/case-collision work rebased on top; 1.0.76.0 was a local pre-rebase build
 1.0.76.0 2026-06-29  Conflict resolution (onExists:newest + conflict-copy), NFC filename normalization, case-collision dedup, tray "Conflict resolution" setting
