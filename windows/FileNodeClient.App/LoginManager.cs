@@ -589,7 +589,7 @@ sealed class LoginManager : IDisposable
             client.Dispose();
             throw;
         }
-        return (client, current);
+        return (client, current, handler);
     }
 
     private async Task<string> ConnectAndStartAsync(LoginCredential credential, string? loginId,
