@@ -328,7 +328,7 @@ sealed class LoginManager : IDisposable
         }
 
         // Connect with the new credentials first, so a bad token changes nothing.
-        var (client, current) = await ConnectClientAsync(credential, loginId, ct);
+        var (client, current, handler) = await ConnectClientAsync(credential, ct);
         var newAccounts = client.GetFileNodeAccounts();
 
         var oldSupervisors = SupervisorsOf(oldSession);
@@ -348,6 +348,7 @@ sealed class LoginManager : IDisposable
         oldSession.Client.Dispose();
 
         var session = new LoginSession(loginId, client, current, newAccounts, _parentCt);
+        AttachRefreshPersistence(session, handler);
         lock (_lock) _sessions.Add(session);
 
         foreach (var account in newAccounts.Where(a => previouslyActive.Contains(a.AccountId)))
@@ -515,43 +516,61 @@ sealed class LoginManager : IDisposable
         _credentialStore.Save(session.LoginId, session.Credential, active.Count > 0 ? active : null);
     }
 
+    private static LoginCredential Refreshed(LoginCredential cred, OAuthTokenHandler h) => cred with
+    {
+        Token = h.AccessToken,
+        RefreshToken = h.RefreshToken ?? cred.RefreshToken,
+        ExpiresAtUnixSeconds = h.ExpiresAt.ToUnixTimeSeconds(),
+    };
+
+    /// <summary>
+    /// Persist every OAuth refresh for the life of a session. Refresh tokens are
+    /// single-use (the server ratchets them): a refreshed token that never
+    /// reaches the credential store means the next launch replays the old one
+    /// and the login is dead until the user re-authenticates. So this must never
+    /// be skipped and must never throw into the HTTP call that triggered it.
+    /// </summary>
+    private void AttachRefreshPersistence(LoginSession session, OAuthTokenHandler? handler)
+    {
+        if (handler == null) return;
+        handler.TokenRefreshed += h =>
+        {
+            try
+            {
+                session.Credential = Refreshed(session.Credential, h);
+                PersistSession(session);
+                Log.Info($"[OAuth] Persisted refreshed token for {session.LoginId} (expires {h.ExpiresAt:u})");
+            }
+            catch (Exception ex)
+            {
+                Log.Error($"[OAuth] Failed to persist refreshed token for {session.LoginId}: {ex}");
+            }
+        };
+    }
+
     // ---- Connecting ----
 
     /// <summary>
-    /// Build a JmapClient for a credential and connect it. For OAuth logins,
-    /// token refreshes are written back to the store as they happen. Returns
-    /// the client and the credential as it stands after connecting (a refresh
-    /// may have occurred during the session fetch).
+    /// Build a JmapClient for a credential and connect it. Returns the client,
+    /// the credential as it stands after connecting (the token may have been
+    /// refreshed during the session fetch — the caller MUST persist it), and the
+    /// OAuth handler so the session that ends up owning the client can attach
+    /// <see cref="AttachRefreshPersistence"/> for every later refresh.
     /// </summary>
-    private async Task<(JmapClient Client, LoginCredential Current)> ConnectClientAsync(
-        LoginCredential credential, string? loginId, CancellationToken ct)
+    private async Task<(JmapClient Client, LoginCredential Current, OAuthTokenHandler? Handler)> ConnectClientAsync(
+        LoginCredential credential, CancellationToken ct)
     {
         var current = credential;
         JmapClient client;
+        OAuthTokenHandler? handler = null;
         if (credential.IsOAuth)
         {
             var expiresAt = credential.ExpiresAtUnixSeconds.HasValue
                 ? DateTimeOffset.FromUnixTimeSeconds(credential.ExpiresAtUnixSeconds.Value)
                 : DateTimeOffset.UtcNow.AddSeconds(3600);
-            var handler = new OAuthTokenHandler(credential.Token, credential.RefreshToken!,
+            handler = new OAuthTokenHandler(credential.Token, credential.RefreshToken!,
                 credential.TokenEndpoint!, credential.ClientId!, expiresAt);
-            handler.TokenRefreshed += h =>
-            {
-                current = current with
-                {
-                    Token = h.AccessToken,
-                    RefreshToken = h.RefreshToken ?? current.RefreshToken,
-                    ExpiresAtUnixSeconds = h.ExpiresAt.ToUnixTimeSeconds(),
-                };
-                // Once the session exists it owns the credential; until then
-                // the caller persists `current` after connecting.
-                var session = loginId != null ? FindSession(loginId) : null;
-                if (session != null)
-                {
-                    session.Credential = current;
-                    PersistSession(session);
-                }
-            };
+            handler.TokenRefreshed += h => current = Refreshed(current, h);
             client = new JmapClient(handler, _debug);
         }
         else
@@ -576,7 +595,7 @@ sealed class LoginManager : IDisposable
     private async Task<string> ConnectAndStartAsync(LoginCredential credential, string? loginId,
         HashSet<string>? enabledAccountIds, bool persist, bool clean, CancellationToken ct)
     {
-        var (client, current) = await ConnectClientAsync(credential, loginId, ct);
+        var (client, current, handler) = await ConnectClientAsync(credential, ct);
         loginId ??= CredentialStore.DeriveLoginId(client.Session.Username, credential.SessionUrl);
 
         // Re-adding an existing login (e.g. with a new token) replaces it and starts clean.
@@ -595,6 +614,7 @@ sealed class LoginManager : IDisposable
         }
 
         var session = new LoginSession(loginId, client, current, accounts, _parentCt);
+        AttachRefreshPersistence(session, handler);
         lock (_lock) _sessions.Add(session);
 
         // Start supervisors sequentially. (Parallel start was tried and caused
@@ -608,7 +628,9 @@ sealed class LoginManager : IDisposable
         }
 
         StartPushWatcher(session);
-        if (persist)
+        // Also persist when the token was refreshed during connect: the stored
+        // refresh token is now spent and the new one exists only in memory.
+        if (persist || current != credential)
             _credentialStore.Save(loginId, current, enabledAccountIds);
         SaveAccountCache();
         NotifyAccountsChanged();
