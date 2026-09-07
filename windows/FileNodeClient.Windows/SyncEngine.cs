@@ -628,46 +628,78 @@ public class SyncEngine : IDisposable
             });
     }
 
-    private void BuildTreeAndCreatePlaceholders(FileNode[] allNodes, CancellationToken ct = default)
+    /// <summary>One folder of the server tree as it maps onto disk: the children of
+    /// <see cref="ParentId"/>, and each child's collision-disambiguated local name.</summary>
+    private readonly record struct TreeLevel(
+        string ParentId, string LocalParentPath, FileNode[] Children, Dictionary<string, string> LocalNames);
+
+    /// <summary>
+    /// The one BFS from the home node over a full server snapshot. Parents come
+    /// before their children, so callers can create placeholders level by level.
+    /// Orphans (nodes whose parent chain doesn't reach home) are excluded by
+    /// construction; a cycle in parentId is logged and not followed. Local names
+    /// are assigned once per parent here so every consumer agrees on them.
+    /// </summary>
+    private List<TreeLevel> WalkFromHome(FileNode[] allNodes)
     {
-        // Build tree client-side: group by parentId, BFS from home node
         var childrenByParent = allNodes
             .Where(n => n.ParentId != null)
             .GroupBy(n => n.ParentId!)
             .ToDictionary(g => g.Key, g => g.ToArray());
 
-        var tree = new List<(string parentId, string localParentPath, FileNode[] children)>();
-        // Local file name per node, with case/sanitization collisions disambiguated once per
-        // parent so both BFS phases (folder enqueue below and placeholder creation later) agree.
-        var localNamesByParent = new Dictionary<string, Dictionary<string, string>>();
-        var bfsQueue = new Queue<(string nodeId, string localPath)>();
-        bfsQueue.Enqueue((_homeNodeId, _syncRootPath));
+        var tree = new List<TreeLevel>();
+        var visited = new HashSet<string> { _homeNodeId };
+        var queue = new Queue<(string nodeId, string localPath)>();
+        queue.Enqueue((_homeNodeId, _syncRootPath));
 
-        while (bfsQueue.Count > 0)
+        while (queue.Count > 0)
         {
-            var (parentId, localParentPath) = bfsQueue.Dequeue();
+            var (parentId, localParentPath) = queue.Dequeue();
             if (!childrenByParent.TryGetValue(parentId, out var children))
                 children = [];
 
             var localNames = AssignLocalNames(children);
-            localNamesByParent[parentId] = localNames;
-            tree.Add((parentId, localParentPath, children));
+            tree.Add(new TreeLevel(parentId, localParentPath, children, localNames));
 
             foreach (var child in children.Where(c => c.IsFolder))
             {
-                var childPath = Path.Combine(localParentPath, localNames[child.Id]);
-                bfsQueue.Enqueue((child.Id, childPath));
+                if (!visited.Add(child.Id))
+                {
+                    Log.Warn($"{_logPrefix}  Cycle in server tree at folder {child.Id} ({child.Name}); not descending");
+                    continue;
+                }
+                queue.Enqueue((child.Id, Path.Combine(localParentPath, localNames[child.Id])));
             }
         }
+        return tree;
+    }
+
+    /// <summary>
+    /// Mark every populated directory of a walked tree ALWAYS_FULL so cfapi can
+    /// recursively hydrate pinned folders. Call only after each level's children
+    /// exist on disk. Skips the sync root itself (not a placeholder).
+    /// </summary>
+    private void EnsureTreeDirectoriesFull(IEnumerable<TreeLevel> tree)
+    {
+        foreach (var level in tree)
+        {
+            if (string.Equals(level.LocalParentPath, _syncRootPath, StringComparison.OrdinalIgnoreCase))
+                continue;
+            EnsureDirectoryFull(level.LocalParentPath, _pathToNodeId.GetValueOrDefault(level.LocalParentPath));
+        }
+    }
+
+    private void BuildTreeAndCreatePlaceholders(FileNode[] allNodes, CancellationToken ct = default)
+    {
+        var tree = WalkFromHome(allNodes);
 
         // Phase 2: Create all placeholders in one fast pass (parent before children,
         // but each directory's children are created immediately after the directory)
-        Log.Info($"{_logPrefix} Creating placeholders ({tree.Sum(t => t.children.Length)} items)...");
-        foreach (var (parentId, localParentPath, children) in tree)
+        Log.Info($"{_logPrefix} Creating placeholders ({tree.Sum(t => t.Children.Length)} items)...");
+        foreach (var (_, localParentPath, children, localNames) in tree)
         {
             ct.ThrowIfCancellationRequested();
 
-            var localNames = localNamesByParent[parentId];
             var newChildren = children
                 .Where(c => !Path.Exists(Path.Combine(localParentPath, localNames[c.Id])))
                 .ToArray();
@@ -692,20 +724,11 @@ public class SyncEngine : IDisposable
             }
         }
 
-        // Phase 3: Mark populated directories as ALWAYS_FULL so cfapi can
-        // recursively hydrate pinned folders.  Each tree entry's localParentPath
-        // has had all its children created, so it's safe to mark it now.
-        // Skip the sync root itself (not a placeholder).
-        foreach (var (_, localParentPath, _) in tree)
-        {
-            if (string.Equals(localParentPath, _syncRootPath, StringComparison.OrdinalIgnoreCase))
-                continue;
-            EnsureDirectoryFull(localParentPath, _pathToNodeId.GetValueOrDefault(localParentPath));
-        }
+        EnsureTreeDirectoriesFull(tree);
 
         ApplyWriteProtections();
 
-        DetectAndHydratePinnedDirectories(tree.Select(t => t.localParentPath));
+        DetectAndHydratePinnedDirectories(tree.Select(t => t.LocalParentPath));
     }
 
     private void DetectAndHydratePinnedDirectories(IEnumerable<string> directoryPaths)
@@ -882,38 +905,10 @@ public class SyncEngine : IDisposable
         //   - existing placeholder at wrong path → rename on disk, update mappings
         //   - missing placeholder → create it
         // Nodes with pending outbox changes are skipped to avoid overwriting local edits.
-        var childrenByParent = allNodes
-            .Where(n => n.ParentId != null)
-            .GroupBy(n => n.ParentId!)
-            .ToDictionary(g => g.Key, g => g.ToArray());
+        var tree = WalkFromHome(allNodes);
 
-        var tree = new List<(string parentId, string localParentPath, FileNode[] children)>();
-        // Local file name per node, with case/sanitization collisions disambiguated once per
-        // parent so both BFS phases (folder enqueue below and placeholder creation later) agree.
-        var localNamesByParent = new Dictionary<string, Dictionary<string, string>>();
-        var bfsQueue = new Queue<(string nodeId, string localPath)>();
-        bfsQueue.Enqueue((_homeNodeId, _syncRootPath));
-
-        while (bfsQueue.Count > 0)
+        foreach (var (_, localParentPath, children, localNames) in tree)
         {
-            var (parentId, localParentPath) = bfsQueue.Dequeue();
-            if (!childrenByParent.TryGetValue(parentId, out var children))
-                children = [];
-
-            var localNames = AssignLocalNames(children);
-            localNamesByParent[parentId] = localNames;
-            tree.Add((parentId, localParentPath, children));
-
-            foreach (var child in children.Where(c => c.IsFolder))
-            {
-                var childPath = Path.Combine(localParentPath, localNames[child.Id]);
-                bfsQueue.Enqueue((child.Id, childPath));
-            }
-        }
-
-        foreach (var (parentId, localParentPath, children) in tree)
-        {
-            var localNames = localNamesByParent[parentId];
             var newChildren = new List<FileNode>();
             foreach (var child in children)
             {
@@ -978,13 +973,7 @@ public class SyncEngine : IDisposable
             }
         }
 
-        // Mark directories as ALWAYS_FULL
-        foreach (var (_, localParentPath, _) in tree)
-        {
-            if (string.Equals(localParentPath, _syncRootPath, StringComparison.OrdinalIgnoreCase))
-                continue;
-            EnsureDirectoryFull(localParentPath, _pathToNodeId.GetValueOrDefault(localParentPath));
-        }
+        EnsureTreeDirectoriesFull(tree);
 
         ApplyWriteProtections();
 
