@@ -353,32 +353,53 @@ public class JmapClient : IJmapClient
         return result.State;
     }
 
-    public async Task<(string[] Ids, string QueryState, int Total)> QueryAllFileNodeIdsAsync(CancellationToken ct = default)
+    public async Task<(string[] Ids, string QueryState, int Total, bool Consistent)> QueryAllFileNodeIdsAsync(CancellationToken ct = default)
     {
-        var allIds = new List<string>();
-        int position = 0;
         const int limit = 4096;
+        const int maxAttempts = 3;
+        List<string> allIds = new();
         string queryState = "";
         int total = 0;
+        bool consistent = false;
 
-        while (true)
+        // Position-offset paging is only a snapshot if nothing moved between pages:
+        // a concurrent create/destroy shifts a live node across a page boundary and
+        // it silently drops out of the set. The queryState changes when that
+        // happens, so restart from the top; give up (Consistent=false) after a few.
+        for (int attempt = 1; attempt <= maxAttempts && !consistent; attempt++)
         {
-            var result = await CallAsync<QueryResponse>(
-                FileNodeUsing, "FileNode/query", new { accountId = AccountId, position, limit }, ct);
+            allIds = new List<string>();
+            queryState = "";
+            total = 0;
+            int position = 0;
+            bool restarted = false;
 
-            queryState = result.QueryState;
-            if (result.Total.HasValue)
-                total = result.Total.Value;
+            while (true)
+            {
+                var result = await CallAsync<QueryResponse>(
+                    FileNodeUsing, "FileNode/query", new { accountId = AccountId, position, limit }, ct);
 
-            allIds.AddRange(result.Ids);
+                if (queryState.Length > 0 && result.QueryState != queryState)
+                {
+                    restarted = true;
+                    break;
+                }
+                queryState = result.QueryState;
+                if (result.Total.HasValue)
+                    total = result.Total.Value;
 
-            if (result.Ids.Length < limit || (result.Total.HasValue && allIds.Count >= result.Total.Value))
-                break;
+                allIds.AddRange(result.Ids);
 
-            position = allIds.Count;
+                if (result.Ids.Length < limit || (result.Total.HasValue && allIds.Count >= result.Total.Value))
+                    break;
+
+                position = allIds.Count;
+            }
+
+            consistent = !restarted && (total == 0 || allIds.Count == total);
         }
 
-        return (allIds.ToArray(), queryState, total > 0 ? total : allIds.Count);
+        return (allIds.ToArray(), queryState, total > 0 ? total : allIds.Count, consistent);
     }
 
     public async Task<(FileNode[] Nodes, string State)> GetFileNodesByIdsPagedAsync(string[] ids, int pageSize = 0, CancellationToken ct = default)

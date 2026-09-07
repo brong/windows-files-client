@@ -64,7 +64,14 @@ public interface IJmapClient : IDisposable
         GetChangesAndNodesAsync(string sinceState, CancellationToken ct = default);
     Task<string> GetStateAsync(string homeNodeId, CancellationToken ct = default);
     Task<string> GetCurrentStateAsync(CancellationToken ct = default);
-    Task<(string[] Ids, string QueryState, int Total)> QueryAllFileNodeIdsAsync(CancellationToken ct = default);
+    /// <summary>
+    /// Every FileNode id in the account. Pages by position and restarts if the
+    /// queryState changes between pages; <c>Consistent</c> is false if it could
+    /// not obtain one stable snapshot (or the count disagrees with total) — a
+    /// caller must not prune local data on an inconsistent enumeration (DESIGN
+    /// pitfall on unstable paging; RELIABILITY D2).
+    /// </summary>
+    Task<(string[] Ids, string QueryState, int Total, bool Consistent)> QueryAllFileNodeIdsAsync(CancellationToken ct = default);
     Task<(FileNode[] Nodes, string State)> GetFileNodesByIdsPagedAsync(string[] ids, int pageSize = 0, CancellationToken ct = default);
     Task<Stream> DownloadBlobAsync(string blobId, string? type = null, string? name = null, CancellationToken ct = default);
     Task<(Stream data, bool isPartial)> DownloadBlobRangeAsync(string blobId, long offset, long length, string? type = null, string? name = null, CancellationToken ct = default);

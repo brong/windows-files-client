@@ -149,7 +149,10 @@ public class OutboxProcessor : IDisposable
         {
             var completed = await ProcessChangeAsync(change, ct);
             if (completed)
+            {
                 _outbox.MarkCompleted(change.Id);
+                _engine.OnOutboxEntryCompleted();
+            }
             else
                 _outbox.MarkRetry(change.Id);
         }
@@ -447,8 +450,22 @@ public class OutboxProcessor : IDisposable
             }
 
             // No conflict — update content in place (v10 mutable blobId; node ID is stable).
-            var newNode = await _queue.EnqueueAsync(QueuePriority.Background,
-                () => _jmapClient.ReplaceFileNodeBlobAsync(change.NodeId, parentId, fileName, blobId, contentType, localCtime, localMtime, ct: ct), ct);
+            FileNode newNode;
+            try
+            {
+                newNode = await _queue.EnqueueAsync(QueuePriority.Background,
+                    () => _jmapClient.ReplaceFileNodeBlobAsync(change.NodeId, parentId, fileName, blobId, contentType, localCtime, localMtime, ct: ct), ct);
+            }
+            catch (Exception ex) when (ex.Message.Contains("notFound"))
+            {
+                // Server delete + local edit: the local file becomes a new create (DESIGN §6).
+                // The blob is already uploaded; onExists:"rename" so we never clobber a
+                // same-named node another device created meanwhile. The engine's deferred
+                // destroy for the old node then finds its mapping gone and does nothing.
+                Log.Info($"{_logPrefix} Outbox: node {change.NodeId} gone from server under local edit; re-creating {fileName} as a new node");
+                newNode = await _queue.EnqueueAsync(QueuePriority.Background,
+                    () => _jmapClient.CreateFileNodeAsync(parentId, blobId, fileName, contentType, "rename", localCtime, localMtime, ct), ct);
+            }
 
             try
             {

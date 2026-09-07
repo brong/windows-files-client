@@ -132,7 +132,15 @@ Runtime smoke test (dev inner loop in `CLAUDE.md`, or `dotnet.exe run --project 
 
 Then commit.
 
-## Phase 4 — `SyncEngine` (not started; do it *as* the reliability port)
+## Phase 4 — `SyncEngine` (steps 1–4 done 2026-09-07; step 5 pending)
+
+**Status.** Steps 1–3 landed as 1.0.79.0 (`EnsureInSync`/`EnsureDirectoryFull`,
+`WalkFromHome`, then `ApplyServerNode`/`MoveLocalItem`/`RemoveNode`/`ApplyTreeLevel`/
+`ApplyChangedNodeAsync`); step 4 as 1.0.80.0 (I3 deferred server changes + server-delete-
+under-edit fallback, R3 page loop, D2 consistent enumeration + re-confirm, D1 warm-start
+verify). The ACL-ordering invariant is documented above the apply path in `SyncEngine.cs`.
+Remaining: step 5 (cfapi helpers → `CfApi`), then Phase 5 tests. The original plan follows.
+
 
 `FileNodeClient.Windows/SyncEngine.cs` is 2,620 lines and contains **four
 independent implementations of "make the local tree match these server

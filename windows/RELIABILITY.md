@@ -32,9 +32,9 @@ handles several of the architectural gaps**, with tests:
 
 | Gap | Windows | Apple |
 |---|---|---|
-| I3 conflict (dirty + server change) | gap | ✅ conflict-copy / `onExists:newest` (`FileProviderExtension.swift:689`) |
-| D2 server-delete pruning | gap | ✅ generation-counter BFS, tested (`NodeDatabase.swift:240`) |
-| R3 state-token crash window | gap | ✅ token-after-changes, idempotent replay (`SyncEngine.swift:65`) |
+| I3 conflict (dirty + server change) | ✅ 1.0.80.0 — upload-time conflict copy / `onExists:newest` (`OutboxProcessor.ResolveContentConflictAsync`) + deferred re-apply of the server side (`SyncEngine.ApplyDeferredServerChangesAsync`) | ✅ conflict-copy / `onExists:newest` (`FileProviderExtension.swift:689`) |
+| D2 server-delete pruning | ✅ 1.0.80.0 — queryState-stable enumeration + `FileNode/get` re-confirm before prune (`JmapClient.QueryAllFileNodeIdsAsync`, `SyncEngine.ReconcileFromServerAsync`) | ✅ generation-counter BFS, tested (`NodeDatabase.swift:240`) |
+| R3 state-token crash window | ✅ 1.0.80.0 — bounded page loop, token saved after each applied page (`SyncEngine.PollChangesAsync`) | ✅ token-after-changes, idempotent replay (`SyncEngine.swift:65`) |
 | R5 cache corruption | gap | ✅ SQLite WAL + temp-DB fallback (`NodeDatabase.swift:109`) |
 | R2 watchdog | gap | ✅ N/A — OS manages the FileProvider extension lifecycle |
 
@@ -76,6 +76,23 @@ using this same roadmap):
   now elects one push owner per login that fans out per-account signals;
   non-owners stand down (and take over if the owner dies). (BUG-026.)
 
+Windows progress (on the collapsed `SyncEngine` — one apply path, so each fix is one site):
+- **I3 ✅ done** (1.0.80.0) — content side: the outbox compares the frozen base
+  blobId against the server's at upload and makes a conflict copy (or
+  `onExists:"newest"`); structural side: a server change for a node the outbox
+  still owns is *deferred* (`_deferredNodeIds`), the outbox completion requests a
+  poll, and the node is re-fetched and applied. Server delete under a local edit
+  re-creates the file as a new node instead of failing forever.
+- **D1 ✅ done** (1.0.80.0) — warm start queues an upload for every cached file
+  whose size/mtime moved while we were down (skipping dehydrated placeholders;
+  the digest check drops identical bytes), and re-creates from the server any
+  cached item missing on disk (never deletes server data on that evidence).
+- **D2 ✅ done** (1.0.80.0) — enumeration restarts if `queryState` changes
+  between pages and reports `Consistent`; reconcile skips the prune on an
+  inconsistent pass and otherwise re-confirms each candidate with `FileNode/get`.
+- **R3 ✅ done** (1.0.80.0) — `hasMoreChanges` is a bounded loop; the state
+  token is persisted after each applied page, never before.
+
 **Apple reliability tranche complete.** All gaps that apply to the Apple client
 are resolved (I1/I2/V1/D3/D4/D5/R1/V2/V3 this pass; I3/D2/R3/R5/R2 already
 handled). Next: port these fixes to the **Windows** C# client using this
@@ -96,15 +113,15 @@ Apple `JmapClient`/`FuseMount` targets are unit-tested via `swift test`.
 |---|---|---|
 | 🔴 I1 download digest enforced | `cff4881` (`downloadBlob` + `serverBlobDigestSha`) | `SyncCallbacks.cs:737` — `VerifyDigest` currently logs-and-serves; make mismatch reject + retry |
 | 🟠 I2 upload digest re-verified | `4d32623` (`verifyUploadedBlob`) | upload path (`OutboxProcessor`/`JmapClient`) — verify single-shot/direct-PUT results |
-| 🔴 I3 conflict copy (dirty + server change) | already on Apple (`onExists:newest`/`rename`, `DECISIONS.md` #12) | `SyncEngine.cs:1247-1264` — currently drops one side silently |
-| 🟠 D1 disk↔cache↔server verify | partial on Apple | `SyncEngine.cs` warm-start (`PopulateFromCache`) |
-| 🟠 D2 stable enumeration / prune | Apple generation-counter BFS (`NodeDatabase`) | `SyncEngine.cs:875-901` — set-difference over unstable `position` paging |
+| 🔴 I3 conflict copy (dirty + server change) | already on Apple (`onExists:newest`/`rename`, `DECISIONS.md` #12) | ✅ done 1.0.80.0 |
+| 🟠 D1 disk↔cache↔server verify | partial on Apple | ✅ done 1.0.80.0 (`PopulateFromCacheAsync`) |
+| 🟠 D2 stable enumeration / prune | Apple generation-counter BFS (`NodeDatabase`) | ✅ done 1.0.80.0 |
 | 🟠 D3 SSE idle-timeout | `9618a74` (`consumeWithIdleTimeout`) | `JmapClient.cs` SSE loop — no idle timeout |
 | 🟠 D4 permanent-error classification | `c733227` (`JmapError.isRetriable`) | error tiers (`OutboxProcessor.cs`, DESIGN §12 table) |
 | 🟠 D5 push: poll-on-change + backoff | `0328b70`, `910fa20` | Windows SSE handler — parts 1&2 apply. **Part 3 (per-login lease) likely N/A**: Windows runs one Service process, not one per account |
 | 🟡 R1 Verify & Repair | `a7ed026` (`verifyAgainstServer` + force-reconcile) | add a user action: clear state token → full reconcile + retry rejected |
 | 🟡 R2 crash recovery | N/A on Apple (OS-managed) | Windows: single tray process since the Service merge — restart on crash is the MSIX startup task / user relaunch; make restart recover cleanly from persisted outbox + cache |
-| 🟡 R3 state-token crash window | already safe on Apple (token after changes) | `SyncEngine.cs:1280` — persist/apply ordering |
+| 🟡 R3 state-token crash window | already safe on Apple (token after changes) | ✅ done 1.0.80.0 |
 | 🟡 R5 cache corruption fallback | Apple SQLite WAL + temp-DB fallback | `NodeCache.cs` load — add integrity check + fallback |
 | 🟡 V1 last-synced signal | `dbbc196` | surface `lastSyncTime` in tray/status |
 | 🟠 V2/V3 surface failure reasons | `943b4f7` | per-file error + reason in Explorer/activity |
@@ -151,7 +168,7 @@ computed during upload. On mismatch, re-upload (transient); escalate after N.
 This also gives us the local↔server content-hash comparison the design notes as
 a cheap pre-upload optimisation.
 
-### 🔴 I3. Server change to a locally-dirty file is silently dropped ✓verified
+### 🔴 I3. Server change to a locally-dirty file is silently dropped ✓verified — **Windows ✅ 1.0.80.0** (see Platform status)
 
 When the outbox has a pending change for a path/node, `PollChanges` **skips**
 the server's `update`/`destroy` (`SyncEngine.cs:1247-1264`, and the update skip
@@ -173,7 +190,7 @@ the conflict gap that started the conditional-write design.
 
 ## Pillar 2 — Detection (notice drift and stalls)
 
-### 🟠 D1. No disk ↔ cache ↔ server verification on warm start
+### 🟠 D1. No disk ↔ cache ↔ server verification on warm start — **Windows ✅ 1.0.80.0** (see Platform status)
 
 Warm start checks only existence + size/mtime per cached entry, then trusts the
 cache. A file edited while the service was down — if the post-`Connect`
@@ -186,7 +203,7 @@ every node: in-sync / locally-changed / locally-missing / untracked-on-disk /
 cache-only. Feed discrepancies into the outbox or the repair queue. This is the
 foundation the scrubber (A2) reuses.
 
-### 🟠 D2. Reconciliation prunes by unstable pagination ✓verified (mechanism)
+### 🟠 D2. Reconciliation prunes by unstable pagination ✓verified (mechanism) — **Windows ✅ 1.0.80.0** (see Platform status)
 
 `ReconcileFromServerAsync` (`SyncEngine.cs:869`) deletes local nodes whose ids
 are in the cache but absent from a single `QueryAllFileNodeIdsAsync` snapshot.
@@ -244,7 +261,7 @@ re-downloads anything corrupt, re-enqueues anything unsynced, and reports "N
 items checked, M repaired" in plain language. Plus a per-file "re-download"
 context action for a single suspect file.
 
-### 🟡 R3. State token persisted only after all changes applied ✓verified
+### 🟡 R3. State token persisted only after all changes applied ✓verified — **Windows ✅ 1.0.80.0** (see Platform status)
 
 `SaveNodeCache(changes.NewState)` runs at `SyncEngine.cs:1280`, after the
 destroy/create/update loops and the `hasMoreChanges` recursion. A crash in

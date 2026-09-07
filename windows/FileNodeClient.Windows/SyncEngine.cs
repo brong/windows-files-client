@@ -64,6 +64,13 @@ public class SyncEngine : IDisposable
     // If the timestamp has changed by the time the echo arrives, a real edit
     // happened and we let it through.
     private readonly ConcurrentDictionary<string, DateTime> _recentlyUploaded = new(StringComparer.OrdinalIgnoreCase);
+    // Server changes we could not apply yet: the outbox still owns the node (I3), or
+    // the warm start found the cached item missing on disk (D1). Re-fetched and
+    // applied at the start of the next poll; an outbox completion requests one.
+    private readonly ConcurrentDictionary<string, byte> _deferredNodeIds = new();
+
+    /// <summary>The engine wants a poll soon (e.g. a deferred server change is ready).</summary>
+    public event Action? SyncRequested;
 
     public string SyncRootPath => _syncRootPath;
     public SyncOutbox Outbox => _outbox;
@@ -561,7 +568,7 @@ public class SyncEngine : IDisposable
         // Phase 1: Bulk fetch all FileNode IDs, then all nodes in pages
         Log.Info($"{_logPrefix} Fetching all FileNode IDs...");
         ReportSyncProgress("Fetching node list...");
-        var (allIds, _, total) = await _queue.EnqueueAsync(QueuePriority.Background,
+        var (allIds, _, total, _) = await _queue.EnqueueAsync(QueuePriority.Background,
             () => _jmapClient.QueryAllFileNodeIdsAsync(ct), ct);
         Log.Info($"{_logPrefix} Found {allIds.Length} FileNodes (total: {total})");
 
@@ -786,7 +793,7 @@ public class SyncEngine : IDisposable
     {
         if (_outbox.HasPendingForNodeId(nodeId))
         {
-            Log.Info($"{_logPrefix}  {reason}: keeping {nodeId} (pending in outbox)");
+            DeferServerChange(nodeId, $"{reason}: keeping {nodeId} (pending in outbox)");
             return;
         }
         _nodeIdToBlobId.TryRemove(nodeId, out _);
@@ -797,7 +804,8 @@ public class SyncEngine : IDisposable
         }
         if (_outbox.HasPendingForPath(localPath))
         {
-            Log.Info($"{_logPrefix}  {reason}: keeping {localPath} (outbox pending for path)");
+            _nodeIdToPath[nodeId] = localPath; // keep the mapping until the outbox is done with it
+            DeferServerChange(nodeId, $"{reason}: keeping {localPath} (outbox pending for path)");
             return;
         }
         if (Directory.Exists(localPath))
@@ -861,6 +869,62 @@ public class SyncEngine : IDisposable
             ApplyServerNode(node, path, wasOnDisk: !createdIds.Contains(node.Id), retryOpen);
     }
 
+    private void DeferServerChange(string nodeId, string why)
+    {
+        Log.Info($"{_logPrefix}  {why}");
+        _deferredNodeIds[nodeId] = 0;
+    }
+
+    /// <summary>Called by the outbox processor after each completed entry.</summary>
+    internal void OnOutboxEntryCompleted()
+    {
+        if (!_deferredNodeIds.IsEmpty)
+            Log.SafeInvoke(() => SyncRequested?.Invoke(), "SyncEngine.SyncRequested");
+    }
+
+    /// <summary>
+    /// Re-fetch every deferred node the outbox no longer owns and apply the server's
+    /// current version of it: still there → ApplyChangedNodeAsync (parents before
+    /// children, so a missing folder is re-created before its files); gone → RemoveNode.
+    /// Runs at the start of each poll, on the sync loop.
+    /// </summary>
+    private async Task ApplyDeferredServerChangesAsync(CancellationToken ct)
+    {
+        var ready = _deferredNodeIds.Keys
+            .Where(id => !_outbox.HasPendingForNodeId(id))
+            .ToArray();
+        if (ready.Length == 0)
+            return;
+
+        Log.Info($"{_logPrefix} Applying {ready.Length} deferred server change(s)...");
+        var (nodes, _) = await _queue.EnqueueAsync(QueuePriority.Background,
+            () => _jmapClient.GetFileNodesByIdsPagedAsync(ready, 0, ct), ct);
+        var found = nodes.ToDictionary(n => n.Id);
+
+        foreach (var id in ready)
+        {
+            _deferredNodeIds.TryRemove(id, out _);
+            if (!found.ContainsKey(id))
+                RemoveNode(id, "Deferred: gone from server");
+        }
+
+        // Topological order: a node whose parent is also in this batch waits for it.
+        var remaining = new List<FileNode>(nodes);
+        while (remaining.Count > 0)
+        {
+            var batch = remaining.Where(n => n.ParentId == null || !found.ContainsKey(n.ParentId)).ToList();
+            if (batch.Count == 0)
+                batch = remaining.ToList(); // cycle — apply anyway rather than spin
+            foreach (var node in batch)
+            {
+                ct.ThrowIfCancellationRequested();
+                await ApplyChangedNodeAsync(node, ct);
+                found.Remove(node.Id);
+                remaining.Remove(node);
+            }
+        }
+    }
+
     /// <summary>
     /// Apply one created or updated node from FileNode/changes: resolve the parent's
     /// local path (null → it left the home tree, e.g. trashed → remove), move it if
@@ -874,7 +938,10 @@ public class SyncEngine : IDisposable
             return;
         if (_outbox.HasPendingForNodeId(node.Id))
         {
-            Log.Info($"{_logPrefix}  Skipping change for {node.Id} (pending in outbox)");
+            // The upload path resolves the content side (base blobId vs server blobId →
+            // conflict copy, DESIGN §6); we re-apply the server's rename/metadata once
+            // the outbox releases the node, so neither side is dropped (I3).
+            DeferServerChange(node.Id, $"Deferring server change for {node.Id} (pending in outbox)");
             return;
         }
 
@@ -979,6 +1046,7 @@ public class SyncEngine : IDisposable
         int matchCount = 0;
         int mismatchCount = 0;
         int missingCount = 0;
+        int queuedCount = 0;
         var directories = new List<string>();
         foreach (var (nodeId, entry) in cache.Entries)
         {
@@ -988,7 +1056,10 @@ public class SyncEngine : IDisposable
             {
                 if (!Directory.Exists(fullPath))
                 {
+                    // Gone while we were down. We never delete server data on that
+                    // evidence alone — re-create it from the server (D1).
                     missingCount++;
+                    _deferredNodeIds[nodeId] = 0;
                     continue;
                 }
                 directories.Add(fullPath);
@@ -1001,14 +1072,25 @@ public class SyncEngine : IDisposable
                 if (!File.Exists(fullPath))
                 {
                     missingCount++;
+                    _deferredNodeIds[nodeId] = 0;
                     continue;
                 }
                 var info = new FileInfo(fullPath);
                 if (info.Length != entry.Size || info.LastWriteTimeUtc != entry.Modified)
                 {
-                    // File changed while app was stopped — still restore mapping
-                    // but the FileChangeWatcher will pick up the difference after Connect()
+                    // Edited while we were down: the watcher only sees live events, so
+                    // queue the upload here (D1). The outbox's digest check drops it if
+                    // the bytes turn out identical. Never for a dehydrated placeholder —
+                    // reading one would trigger our own hydration, and its content
+                    // cannot have been edited locally anyway.
                     mismatchCount++;
+                    const FileAttributes recallOnDataAccess = (FileAttributes)0x00400000;
+                    if ((info.Attributes & recallOnDataAccess) == 0)
+                    {
+                        _outbox.EnqueueContentChange(fullPath, nodeId, ResolveContentType(fullPath),
+                            isFolder: false, baseBlobId: entry.BlobId);
+                        queuedCount++;
+                    }
                 }
                 else
                     matchCount++;
@@ -1020,7 +1102,7 @@ public class SyncEngine : IDisposable
                 _nodeIdToBlobId[nodeId] = entry.BlobId;
         }
         int fileCount = cache.Entries.Values.Count(e => !e.IsFolder) - missingCount;
-        Log.Info($"{_logPrefix}  {matchCount} matched, {mismatchCount} changed, {missingCount} missing");
+        Log.Info($"{_logPrefix}  {matchCount} matched, {mismatchCount} changed ({queuedCount} queued for upload), {missingCount} missing (will re-create from server)");
 
         // If no files on disk, cache is stale — fall back to full fetch
         if (fileCount <= 0 && cache.Entries.Values.Any(e => !e.IsFolder))
@@ -1059,7 +1141,7 @@ public class SyncEngine : IDisposable
         Log.Info($"{_logPrefix} Reconciling: fetching all server node IDs...");
 
         // Step 1: Fetch all alive node IDs from server
-        var (serverIds, _, _) = await _queue.EnqueueAsync(QueuePriority.Background,
+        var (serverIds, _, _, consistent) = await _queue.EnqueueAsync(QueuePriority.Background,
             () => _jmapClient.QueryAllFileNodeIdsAsync(ct), ct);
         var serverIdSet = new HashSet<string>(serverIds);
         var cachedIdSet = new HashSet<string>(_nodeIdToPath.Keys);
@@ -1070,9 +1152,25 @@ public class SyncEngine : IDisposable
 
         Log.Info($"{_logPrefix} Reconcile: {serverIds.Length} server nodes, {cachedIdSet.Count} cached, {goneIds.Count} gone");
 
-        // Step 3: Remove gone nodes locally (RemoveNode keeps anything the outbox still owns)
-        foreach (var id in goneIds)
-            RemoveNode(id, "Reconcile: gone from server");
+        // Step 3: Remove gone nodes locally — only on a consistent enumeration, and
+        // only after a direct FileNode/get confirms each one really is gone (D2).
+        // Deleting local data on a paging artefact is the one mistake we can't undo.
+        if (!consistent)
+        {
+            Log.Warn($"{_logPrefix} Reconcile: enumeration unstable (server changing under us); skipping prune of {goneIds.Count} node(s) this pass");
+        }
+        else if (goneIds.Count > 0)
+        {
+            var (stillAlive, _) = await _queue.EnqueueAsync(QueuePriority.Background,
+                () => _jmapClient.GetFileNodesByIdsPagedAsync(goneIds.ToArray(), 0, ct), ct);
+            foreach (var node in stillAlive)
+            {
+                Log.Warn($"{_logPrefix} Reconcile: {node.Id} missing from enumeration but FileNode/get finds it — not pruning");
+                goneIds.Remove(node.Id);
+            }
+            foreach (var id in goneIds)
+                RemoveNode(id, "Reconcile: gone from server");
+        }
 
         // Step 4: Fetch all server nodes in batches to get current data
         Log.Info($"{_logPrefix} Fetching {serverIds.Length} FileNode details...");
@@ -1097,40 +1195,57 @@ public class SyncEngine : IDisposable
 
     public async Task<(string State, Quota[]? Quotas)> PollChangesAsync(string sinceState, CancellationToken ct)
     {
-        var (changes, createdNodes, updatedNodes, quotas) = await _queue.EnqueueAsync(QueuePriority.Background,
-            () => _jmapClient.GetChangesAndNodesAsync(sinceState, ct), ct);
+        const int maxPages = 1000;
+        var state = sinceState;
+        Quota[]? quotas = null;
 
-        if (changes.Created.Length == 0 && changes.Updated.Length == 0 && changes.Destroyed.Length == 0)
+        // Server changes held back behind a local upload (I3) or found missing on
+        // disk at warm start (D1) go first, so this poll's batch lands on top.
+        await ApplyDeferredServerChangesAsync(ct);
+
+        // Iterate rather than recurse over hasMoreChanges, and persist the state
+        // token after each page is applied — never before (R3). A crash mid-batch
+        // replays at most one page; every apply is idempotent.
+        for (int page = 1; ; page++)
         {
-            SaveNodeCache(changes.NewState);
-            ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_IDLE);
-            return (changes.NewState, quotas);
+            var (changes, createdNodes, updatedNodes, pageQuotas) = await _queue.EnqueueAsync(QueuePriority.Background,
+                () => _jmapClient.GetChangesAndNodesAsync(state, ct), ct);
+            quotas = pageQuotas ?? quotas;
+
+            if (changes.Created.Length > 0 || changes.Updated.Length > 0 || changes.Destroyed.Length > 0)
+            {
+                ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_SYNC_INCREMENTAL);
+                Log.Info($"{_logPrefix} Changes: +{changes.Created.Length} ~{changes.Updated.Length} -{changes.Destroyed.Length}");
+
+                // Updated first — shallowest existing path first so a parent's rename lands
+                // before its children's — then created, then destroyed.
+                var sortedUpdatedNodes = updatedNodes
+                    .OrderBy(n => _nodeIdToPath.TryGetValue(n.Id, out var p)
+                        ? p.Count(ch => ch == Path.DirectorySeparatorChar)
+                        : int.MaxValue)
+                    .ToList();
+                foreach (var node in sortedUpdatedNodes)
+                    await ApplyChangedNodeAsync(node, ct);
+                foreach (var node in createdNodes)
+                    await ApplyChangedNodeAsync(node, ct);
+                foreach (var destroyedId in changes.Destroyed)
+                    RemoveNode(destroyedId, "Destroyed");
+            }
+
+            state = changes.NewState;
+            SaveNodeCache(state);
+
+            if (!changes.HasMoreChanges)
+                break;
+            if (page >= maxPages)
+            {
+                Log.Warn($"{_logPrefix} FileNode/changes still reports hasMoreChanges after {maxPages} pages; will continue on the next poll");
+                break;
+            }
         }
 
-        ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_SYNC_INCREMENTAL);
-
-        Log.Info($"{_logPrefix} Changes: +{changes.Created.Length} ~{changes.Updated.Length} -{changes.Destroyed.Length}");
-
-        // Updated first — shallowest existing path first so a parent's rename lands
-        // before its children's — then created, then destroyed.
-        var sortedUpdatedNodes = updatedNodes
-            .OrderBy(n => _nodeIdToPath.TryGetValue(n.Id, out var p)
-                ? p.Count(ch => ch == Path.DirectorySeparatorChar)
-                : int.MaxValue)
-            .ToList();
-        foreach (var node in sortedUpdatedNodes)
-            await ApplyChangedNodeAsync(node, ct);
-        foreach (var node in createdNodes)
-            await ApplyChangedNodeAsync(node, ct);
-        foreach (var destroyedId in changes.Destroyed)
-            RemoveNode(destroyedId, "Destroyed");
-
-        if (changes.HasMoreChanges)
-            return await PollChangesAsync(changes.NewState, ct);
-
-        SaveNodeCache(changes.NewState);
         ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_IDLE);
-        return (changes.NewState, quotas);
+        return (state, quotas);
     }
 
     private void OnLocalFileChanges(FileChangeWatcher.FileChange[] changes)

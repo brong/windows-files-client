@@ -104,6 +104,8 @@ sealed class AccountSupervisor : IDisposable
         _engine.ActiveDownloadCountChanged += OnEngineActiveDownloadCountChanged;
         _engine.ActivityChanged += OnEngineActivityChanged;
         _engine.SyncProgressChanged += OnEngineSyncProgressChanged;
+        // A server change deferred behind a local upload is ready to apply (I3).
+        _engine.SyncRequested += () => PushState("");
 
         // Register sync root
         Log.Info($"[{_displayName}] Registering sync root...");
