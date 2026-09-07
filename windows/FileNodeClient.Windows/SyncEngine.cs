@@ -1363,13 +1363,19 @@ public class SyncEngine : IDisposable
                 continue;
             }
 
-            // Skip echo from our own placeholder conversion/update
-            if (!isDirectory && _recentlyUploaded.TryRemove(change.FullPath, out var uploadedWriteTime))
+            // Skip echo from our own placeholder conversion/update. Read the marker
+            // without consuming it: one upload produces several debounce windows of
+            // Changed events (content write, then attribute/in-sync flips on close),
+            // and consuming the marker on the first would let the second enqueue a
+            // spurious re-upload. Only a real edit (mtime moved) retires the marker;
+            // the cleanup timer expires the rest.
+            if (!isDirectory && _recentlyUploaded.TryGetValue(change.FullPath, out var uploadedWriteTime))
             {
                 try
                 {
                     if (File.GetLastWriteTimeUtc(change.FullPath) == uploadedWriteTime)
                         continue;
+                    _recentlyUploaded.TryRemove(change.FullPath, out _);
                 }
                 catch (Exception ex)
                 {
@@ -1391,13 +1397,18 @@ public class SyncEngine : IDisposable
                 if (_syncCallbacks.IsHydrating(existingNodeId))
                     continue;
 
-                // Also check if it was JUST hydrated and mtime hasn't changed
-                if (_syncCallbacks.RecentlyHydrated.TryRemove(existingNodeId, out var hydratedWriteTime))
+                // Also check if it was JUST hydrated and mtime hasn't changed. Same
+                // non-consuming read as above: hydration fires Changed for the data
+                // write, then again when the app closes the handle and cfapi flips
+                // attributes — the second batch must still be recognised as an echo,
+                // otherwise a file the user merely opened gets queued for upload.
+                if (_syncCallbacks.RecentlyHydrated.TryGetValue(existingNodeId, out var hydratedWriteTime))
                 {
                     try
                     {
                         if (File.GetLastWriteTimeUtc(change.FullPath) == hydratedWriteTime.Mtime)
                             continue;
+                        _syncCallbacks.RecentlyHydrated.TryRemove(existingNodeId, out _);
                     }
                     catch
                     {
