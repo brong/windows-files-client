@@ -269,9 +269,9 @@ internal class SyncRoot : IDisposable
         {
             var package = global::Windows.ApplicationModel.Package.Current;
             var familyName = package.Id.FamilyName;
-            // Use the "Service" application ID from AppxManifest.xml — that's the
-            // process that hosts the cloud files COM handlers.
-            var aumid = $"{familyName}!Service";
+            // The "App" application ID from AppxManifest.xml — since the Service
+            // merge the tray process hosts the cloud files COM handlers itself.
+            var aumid = $"{familyName}!App";
 
             var subKey = $@"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\SyncRootManager\{syncRootId}";
             using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(subKey, writable: true);
