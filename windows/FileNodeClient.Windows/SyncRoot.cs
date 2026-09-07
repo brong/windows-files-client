@@ -527,6 +527,13 @@ internal class SyncRoot : IDisposable
     {
         try
         {
+            // Read-only shared folders carry FILE_ATTRIBUTE_READONLY (TrackFolderPermissions);
+            // a DELETE-access open on one fails with ERROR_ACCESS_DENIED even after the
+            // DENY ACL is gone, which left those folders (and their pin state) behind.
+            var attrs = File.GetAttributes(path);
+            if ((attrs & FileAttributes.ReadOnly) != 0)
+                File.SetAttributes(path, attrs & ~FileAttributes.ReadOnly);
+
             var flags = FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_DELETE_ON_CLOSE;
             if (isDirectory)
                 flags |= FILE_FLAG_BACKUP_SEMANTICS;
