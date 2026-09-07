@@ -1,5 +1,6 @@
 using System.Drawing;
 using System.Runtime.InteropServices;
+using FileNodeClient.Windows;
 
 namespace FileNodeClient.App;
 
@@ -205,6 +206,26 @@ sealed class TrayIcon : IDisposable
         var contextMenu = new ContextMenuStrip();
         var manageItem = new ToolStripMenuItem("Manage Accounts");
         manageItem.Click += (_, _) => ToggleManageAccountsForm();
+        // Conflict resolution: how to handle a file edited on two devices at once.
+        var conflictMenu = new ToolStripMenuItem("Conflict resolution");
+        var keepBothItem = new ToolStripMenuItem("Keep both copies (recommended)");
+        var newestWinsItem = new ToolStripMenuItem("Newest version wins");
+        void ApplyConflictChecks(ConflictResolution value)
+        {
+            keepBothItem.Checked = value == ConflictResolution.ConflictCopy;
+            newestWinsItem.Checked = value == ConflictResolution.NewestWins;
+        }
+        void SetConflict(ConflictResolution value)
+        {
+            _sync.ConflictStrategy = value;
+            ApplyConflictChecks(value);
+        }
+        keepBothItem.Click += (_, _) => SetConflict(ConflictResolution.ConflictCopy);
+        newestWinsItem.Click += (_, _) => SetConflict(ConflictResolution.NewestWins);
+        conflictMenu.DropDownItems.Add(keepBothItem);
+        conflictMenu.DropDownItems.Add(newestWinsItem);
+        ApplyConflictChecks(_sync.ConflictStrategy);
+
         var exitItem = new ToolStripMenuItem("Exit");
         exitItem.Click += (_, _) =>
         {
@@ -213,7 +234,10 @@ sealed class TrayIcon : IDisposable
         };
         contextMenu.Items.Add(manageItem);
         contextMenu.Items.Add(new ToolStripSeparator());
+        contextMenu.Items.Add(conflictMenu);
+        contextMenu.Items.Add(new ToolStripSeparator());
         contextMenu.Items.Add(exitItem);
+        contextMenu.Opening += (_, _) => ApplyConflictChecks(_sync.ConflictStrategy);
         _notifyIcon.ContextMenuStrip = contextMenu;
 
         _notifyIcon.MouseClick += (_, e) =>

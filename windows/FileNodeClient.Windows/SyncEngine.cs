@@ -318,7 +318,8 @@ public class SyncEngine : IDisposable
 
         var contentType = ResolveContentType(fullPath);
         Log.Info($"{_logPrefix} File close detected edit: {fullPath} (node={existingNodeId})");
-        _outbox.EnqueueContentChange(fullPath, existingNodeId, contentType, isFolder: false);
+        _outbox.EnqueueContentChange(fullPath, existingNodeId, contentType, isFolder: false,
+            baseBlobId: GetBlobIdForNodeId(existingNodeId));
     }
 
     /// <summary>
@@ -376,6 +377,13 @@ public class SyncEngine : IDisposable
         _outbox.Load();
         _outboxProcessor = new OutboxProcessor(_outbox, this, jmapClient, queue, _logPrefix);
         _cleanupTimer = new Timer(CleanupStaleEntries, null, TimeSpan.FromMinutes(5), TimeSpan.FromMinutes(5));
+    }
+
+    /// <summary>Content-conflict resolution strategy used by the upload path (DESIGN §6).</summary>
+    public ConflictResolution ConflictStrategy
+    {
+        get => _outboxProcessor.ConflictStrategy;
+        set => _outboxProcessor.ConflictStrategy = value;
     }
 
     private void CleanupStaleEntries(object? state)
@@ -581,6 +589,45 @@ public class SyncEngine : IDisposable
         return state;
     }
 
+    /// <summary>
+    /// Compute the local file name for each child of one folder, disambiguating
+    /// case-insensitive (and post-sanitization) collisions deterministically — ordered by
+    /// node ID so a given node maps to the same local name across runs. Replaces the old
+    /// silent-skip, which hid a colliding file the user actually has (DESIGN §14, #41).
+    /// </summary>
+    private static Dictionary<string, string> AssignLocalNames(FileNode[] children)
+    {
+        var map = new Dictionary<string, string>(children.Length);
+        var used = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var child in children.OrderBy(c => c.Id, StringComparer.Ordinal))
+        {
+            var name = PlaceholderManager.MakeUniqueName(
+                PlaceholderManager.SanitizeName(child.Name),
+                candidate => used.Contains(candidate));
+            used.Add(name);
+            map[child.Id] = name;
+        }
+        return map;
+    }
+
+    /// <summary>
+    /// Resolve a unique local file name for a single node arriving via incremental sync,
+    /// disambiguating against paths already owned by other nodes or present on disk. A path
+    /// this node already owns is not treated as a collision.
+    /// </summary>
+    private string ResolveUniqueLocalName(string parentPath, FileNode node)
+    {
+        return PlaceholderManager.MakeUniqueName(
+            PlaceholderManager.SanitizeName(node.Name),
+            candidate =>
+            {
+                var p = Path.Combine(parentPath, candidate);
+                if (_pathToNodeId.TryGetValue(p, out var owner))
+                    return owner != node.Id;   // taken iff a different node owns it
+                return Path.Exists(p);          // unmapped but present on disk → treat as taken
+            });
+    }
+
     private void BuildTreeAndCreatePlaceholders(FileNode[] allNodes, CancellationToken ct = default)
     {
         // Build tree client-side: group by parentId, BFS from home node
@@ -590,6 +637,9 @@ public class SyncEngine : IDisposable
             .ToDictionary(g => g.Key, g => g.ToArray());
 
         var tree = new List<(string parentId, string localParentPath, FileNode[] children)>();
+        // Local file name per node, with case/sanitization collisions disambiguated once per
+        // parent so both BFS phases (folder enqueue below and placeholder creation later) agree.
+        var localNamesByParent = new Dictionary<string, Dictionary<string, string>>();
         var bfsQueue = new Queue<(string nodeId, string localPath)>();
         bfsQueue.Enqueue((_homeNodeId, _syncRootPath));
 
@@ -599,11 +649,13 @@ public class SyncEngine : IDisposable
             if (!childrenByParent.TryGetValue(parentId, out var children))
                 children = [];
 
+            var localNames = AssignLocalNames(children);
+            localNamesByParent[parentId] = localNames;
             tree.Add((parentId, localParentPath, children));
 
             foreach (var child in children.Where(c => c.IsFolder))
             {
-                var childPath = Path.Combine(localParentPath, PlaceholderManager.SanitizeName(child.Name));
+                var childPath = Path.Combine(localParentPath, localNames[child.Id]);
                 bfsQueue.Enqueue((child.Id, childPath));
             }
         }
@@ -615,26 +667,17 @@ public class SyncEngine : IDisposable
         {
             ct.ThrowIfCancellationRequested();
 
-            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var localNames = localNamesByParent[parentId];
             var newChildren = children
-                .Where(c =>
-                {
-                    var sanitized = PlaceholderManager.SanitizeName(c.Name);
-                    if (!seen.Add(sanitized))
-                    {
-                        Log.Info($"{_logPrefix}  Skipping duplicate sanitized name: {c.Name} -> {sanitized} (node {c.Id})");
-                        return false;
-                    }
-                    return !Path.Exists(Path.Combine(localParentPath, sanitized));
-                })
+                .Where(c => !Path.Exists(Path.Combine(localParentPath, localNames[c.Id])))
                 .ToArray();
 
             if (newChildren.Length > 0)
-                _placeholderManager.CreatePlaceholders(localParentPath, newChildren);
+                _placeholderManager.CreatePlaceholders(localParentPath, newChildren, localNames);
 
             foreach (var child in children)
             {
-                var childPath = Path.Combine(localParentPath, PlaceholderManager.SanitizeName(child.Name));
+                var childPath = Path.Combine(localParentPath, localNames[child.Id]);
                 if (!TryMapNode(childPath, child.Id))
                     continue;
                 if (child.BlobId != null)
@@ -918,6 +961,9 @@ public class SyncEngine : IDisposable
             .ToDictionary(g => g.Key, g => g.ToArray());
 
         var tree = new List<(string parentId, string localParentPath, FileNode[] children)>();
+        // Local file name per node, with case/sanitization collisions disambiguated once per
+        // parent so both BFS phases (folder enqueue below and placeholder creation later) agree.
+        var localNamesByParent = new Dictionary<string, Dictionary<string, string>>();
         var bfsQueue = new Queue<(string nodeId, string localPath)>();
         bfsQueue.Enqueue((_homeNodeId, _syncRootPath));
 
@@ -927,17 +973,20 @@ public class SyncEngine : IDisposable
             if (!childrenByParent.TryGetValue(parentId, out var children))
                 children = [];
 
+            var localNames = AssignLocalNames(children);
+            localNamesByParent[parentId] = localNames;
             tree.Add((parentId, localParentPath, children));
 
             foreach (var child in children.Where(c => c.IsFolder))
             {
-                var childPath = Path.Combine(localParentPath, PlaceholderManager.SanitizeName(child.Name));
+                var childPath = Path.Combine(localParentPath, localNames[child.Id]);
                 bfsQueue.Enqueue((child.Id, childPath));
             }
         }
 
         foreach (var (parentId, localParentPath, children) in tree)
         {
+            var localNames = localNamesByParent[parentId];
             var newChildren = new List<FileNode>();
             foreach (var child in children)
             {
@@ -948,7 +997,7 @@ public class SyncEngine : IDisposable
                     continue;
                 }
 
-                var expectedPath = Path.Combine(localParentPath, PlaceholderManager.SanitizeName(child.Name));
+                var expectedPath = Path.Combine(localParentPath, localNames[child.Id]);
 
                 // Check if node was at a different path (rename/move)
                 if (_nodeIdToPath.TryGetValue(child.Id, out var oldPath)
@@ -999,12 +1048,12 @@ public class SyncEngine : IDisposable
             }
 
             if (newChildren.Count > 0)
-                _placeholderManager.CreatePlaceholders(localParentPath, newChildren.ToArray());
+                _placeholderManager.CreatePlaceholders(localParentPath, newChildren.ToArray(), localNames);
 
             // Second pass: map newly created items that now exist on disk
             foreach (var child in newChildren)
             {
-                var childPath = Path.Combine(localParentPath, PlaceholderManager.SanitizeName(child.Name));
+                var childPath = Path.Combine(localParentPath, localNames[child.Id]);
                 if (TryMapNode(childPath, child.Id))
                     TrackFolderPermissions(child, childPath);
             }
@@ -1122,7 +1171,8 @@ public class SyncEngine : IDisposable
                 continue;
             }
 
-            var newPath = Path.Combine(parentPath, PlaceholderManager.SanitizeName(node.Name));
+            var newLocalName = ResolveUniqueLocalName(parentPath, node);
+            var newPath = Path.Combine(parentPath, newLocalName);
 
             if (oldPath != null && !string.Equals(oldPath, newPath, StringComparison.OrdinalIgnoreCase))
             {
@@ -1175,7 +1225,8 @@ public class SyncEngine : IDisposable
                 if (!Path.Exists(newPath))
                 {
                     using (SuspendFolderProtection(parentPath))
-                        _placeholderManager.CreatePlaceholders(parentPath, [node]);
+                        _placeholderManager.CreatePlaceholders(parentPath, [node],
+                            new Dictionary<string, string> { [node.Id] = newLocalName });
                 }
                 if (TryMapNode(newPath, node.Id))
                 {
@@ -1206,13 +1257,15 @@ public class SyncEngine : IDisposable
             if (parentPath == null)
                 continue;
 
-            var childPath = Path.Combine(parentPath, PlaceholderManager.SanitizeName(node.Name));
+            var localName = ResolveUniqueLocalName(parentPath, node);
+            var childPath = Path.Combine(parentPath, localName);
             bool existed = Path.Exists(childPath);
             if (!existed)
             {
                 Log.Info($"{_logPrefix}  Created node {node.Id}: creating placeholder at {childPath}");
                 using (SuspendFolderProtection(parentPath))
-                    _placeholderManager.CreatePlaceholders(parentPath, [node]);
+                    _placeholderManager.CreatePlaceholders(parentPath, [node],
+                        new Dictionary<string, string> { [node.Id] = localName });
             }
 
             if (!TryMapNode(childPath, node.Id))
@@ -1361,7 +1414,8 @@ public class SyncEngine : IDisposable
 
             var contentType = ResolveContentType(change.FullPath);
 
-            _outbox.EnqueueContentChange(change.FullPath, nodeId, contentType, isDirectory);
+            _outbox.EnqueueContentChange(change.FullPath, nodeId, contentType, isDirectory,
+                baseBlobId: nodeId != null ? GetBlobIdForNodeId(nodeId) : null);
         }
     }
 
@@ -2102,6 +2156,34 @@ public class SyncEngine : IDisposable
         _recentlyUploaded[localPath] = File.GetLastWriteTimeUtc(localPath);
     }
 
+    /// <summary>
+    /// Create (or adopt) a dehydrated placeholder for a server node under the given
+    /// local parent directory, then map it and mark it in-sync. Used by the conflict-copy
+    /// path to re-materialize the original file with the *server's* content after the
+    /// local edit has been moved aside to the conflict-named copy. Mirrors the
+    /// incremental "created node" handler.
+    /// </summary>
+    internal void MaterializeServerNode(string parentDir, FileNode node)
+    {
+        var localName = ResolveUniqueLocalName(parentDir, node);
+        var path = Path.Combine(parentDir, localName);
+        if (!Path.Exists(path))
+        {
+            using (SuspendFolderProtection(parentDir))
+                _placeholderManager.CreatePlaceholders(parentDir, [node],
+                    new Dictionary<string, string> { [node.Id] = localName });
+        }
+        if (TryMapNode(path, node.Id))
+        {
+            if (node.BlobId != null)
+                _nodeIdToBlobId[node.Id] = node.BlobId;
+            TrackFolderPermissions(node, path);
+            try { SetInSync(path); }
+            catch (Exception ex) { Log.Debug($"{_logPrefix} MaterializeServerNode SetInSync failed for {path}: {ex.Message}"); }
+            ApplyWriteProtection(path);
+        }
+    }
+
     internal static string ResolveContentType(string filePath)
     {
         var ext = Path.GetExtension(filePath).ToLowerInvariant();
@@ -2562,6 +2644,11 @@ public class SyncEngine : IDisposable
     {
         if (nodeId == _homeNodeId)
             return _syncRootPath;
+
+        // Prefer the authoritative mapped path — it already reflects any case-collision
+        // disambiguation suffix, which re-deriving from the server name would drop.
+        if (_nodeIdToPath.TryGetValue(nodeId, out var mappedPath))
+            return mappedPath;
 
         // Trash boundary — don't resolve paths under the trash folder
         if (_trashNodeId != null && nodeId == _trashNodeId)

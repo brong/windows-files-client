@@ -31,6 +31,16 @@ public class PendingChange
     [JsonPropertyName("nodeId")]
     public string? NodeId { get; set; }
 
+    /// <summary>
+    /// The server blobId this node had when the local edit was first detected
+    /// (the "base" version). Frozen at enqueue time so a concurrent server poll
+    /// (which advances the engine's live blobId map) cannot mask a content
+    /// conflict at upload time. Null for new files/folders or untracked nodes.
+    /// See OutboxProcessor conflict detection and DESIGN §6.
+    /// </summary>
+    [JsonPropertyName("baseBlobId")]
+    public string? BaseBlobId { get; set; }
+
     [JsonPropertyName("contentType")]
     public string? ContentType { get; set; }
 
@@ -186,7 +196,7 @@ public class SyncOutbox : IDisposable
     /// Enqueue a content change (file created or modified, or new folder).
     /// Coalesces with existing entries for the same path.
     /// </summary>
-    public void EnqueueContentChange(string localPath, string? nodeId, string? contentType, bool isFolder)
+    public void EnqueueContentChange(string localPath, string? nodeId, string? contentType, bool isFolder, string? baseBlobId = null)
     {
         lock (_lock)
         {
@@ -217,6 +227,9 @@ public class SyncOutbox : IDisposable
                 {
                     LocalPath = localPath,
                     NodeId = nodeId,
+                    // Freeze the base version at first-dirty so a later server poll
+                    // can't mask a conflict. Coalesced edits keep this original base.
+                    BaseBlobId = baseBlobId,
                     ContentType = contentType,
                     IsFolder = isFolder,
                     IsDirtyContent = !isFolder, // folders need create, not upload

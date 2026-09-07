@@ -48,6 +48,13 @@ public interface IJmapClient : IDisposable
     /// URL template for direct HTTP writes, with {id} placeholder. Null if not supported.
     /// </summary>
     string? WebWriteUrlTemplate { get; }
+    /// <summary>
+    /// Whether the server treats sibling names as case-insensitive. Defaults to true when
+    /// the capability is absent (the conservative assumption matching a case-insensitive
+    /// local filesystem). When false, case-only sibling names can coexist on the server and
+    /// must be disambiguated for a case-insensitive local filesystem (DESIGN §14).
+    /// </summary>
+    bool CaseInsensitiveNames { get; }
     Task<string> FindHomeNodeIdAsync(CancellationToken ct = default);
     Task<string?> FindTrashNodeIdAsync(CancellationToken ct = default);
     Task<FileNode[]> GetFileNodesAsync(string[] ids, CancellationToken ct = default);
@@ -75,7 +82,15 @@ public interface IJmapClient : IDisposable
         string? oldBlobId,
         Action<long>? onProgress = null, CancellationToken ct = default);
     Task<FileNode> CreateFileNodeAsync(string parentId, string? blobId, string name, string? type = null, string? onExists = null, DateTime? createdAt = null, DateTime? modifiedAt = null, CancellationToken ct = default);
-    Task<FileNode> ReplaceFileNodeBlobAsync(string nodeId, string parentId, string name, string blobId, string? type = null, DateTime? createdAt = null, DateTime? modifiedAt = null, CancellationToken ct = default);
+    /// <summary>
+    /// Update a file node's content in place (v10 mutable blobId).
+    /// Pass <paramref name="onExists"/>="newest" to make the update conditional: the
+    /// server applies it only if <paramref name="modifiedAt"/> is newer than the stored
+    /// node's modified time, otherwise returns "alreadyExists" in notUpdated (thrown as
+    /// an exception whose message contains "alreadyExists"). Used for newest-wins conflict
+    /// resolution (DESIGN §6). Leave null for an unconditional in-place update.
+    /// </summary>
+    Task<FileNode> ReplaceFileNodeBlobAsync(string nodeId, string parentId, string name, string blobId, string? type = null, DateTime? createdAt = null, DateTime? modifiedAt = null, string? onExists = null, CancellationToken ct = default);
     Task MoveFileNodeAsync(string nodeId, string parentId, string newName, string? onExists = null, DateTime? modifiedAt = null, CancellationToken ct = default);
     /// <summary>
     /// Batch-update accessed timestamps for multiple nodes in a single FileNode/set call.

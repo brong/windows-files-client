@@ -55,12 +55,31 @@ sealed class AccountSupervisor : IDisposable
     public event Action<AccountSupervisor>? QuotaChanged;
     public event Action<AccountSupervisor>? ActivityChanged;
 
-    public AccountSupervisor(IJmapClient jmapClient, string syncRootPath, string displayName, bool debug)
+    private ConflictResolution _conflictStrategy;
+
+    /// <summary>
+    /// Content-conflict resolution strategy. Forwarded to the live engine when set, and
+    /// applied to the engine on <see cref="StartAsync"/>. Global app preference (DESIGN §6).
+    /// </summary>
+    public ConflictResolution ConflictStrategy
+    {
+        get => _conflictStrategy;
+        set
+        {
+            _conflictStrategy = value;
+            if (_engine != null)
+                _engine.ConflictStrategy = value;
+        }
+    }
+
+    public AccountSupervisor(IJmapClient jmapClient, string syncRootPath, string displayName, bool debug,
+        ConflictResolution conflictStrategy = ConflictResolution.ConflictCopy)
     {
         _jmapClient = jmapClient;
         _syncRootPath = syncRootPath;
         _displayName = displayName;
         _debug = debug;
+        _conflictStrategy = conflictStrategy;
     }
 
     public async Task StartAsync(string? iconPath, bool clean, CancellationToken ct)
@@ -76,6 +95,7 @@ sealed class AccountSupervisor : IDisposable
         }
 
         _engine = new SyncEngine(_syncRootPath, _jmapClient, _queue, _jmapClient.Context.ScopeKey, _displayName);
+        _engine.ConflictStrategy = _conflictStrategy;
         if (clean)
             _engine.ClearOutbox();
         _engine.StatusChanged += OnEngineStatusChanged;

@@ -124,6 +124,16 @@ public class JmapSession
 
     public string? GetWebWriteUrlTemplate(string accountId) =>
         AccountCapabilityString(accountId, JmapClient.FileNodeCapability, "webWriteUrlTemplate");
+
+    /// <summary>
+    /// Whether the server treats sibling names as case-insensitive. Null if the
+    /// capability is absent. Exposed so the client knows whether case-only sibling
+    /// names can coexist on the server (DESIGN §14).
+    /// </summary>
+    public bool? GetCaseInsensitiveNames(string accountId) =>
+        AccountCapabilityProperty(accountId, JmapClient.FileNodeCapability, "caseInsensitiveNames")
+            is { ValueKind: JsonValueKind.True or JsonValueKind.False } v
+            ? v.GetBoolean() : null;
 }
 
 public class JmapAccount

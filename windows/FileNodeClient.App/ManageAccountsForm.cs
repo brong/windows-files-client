@@ -615,7 +615,7 @@ sealed partial class ManageAccountsForm : Form
         }
 
         // Check if tree structure changed (login count + child counts)
-        bool structureChanged = !serviceConnected || _treeView.Nodes.Count != desired.Count;
+        bool structureChanged = _treeView.Nodes.Count != desired.Count;
         if (!structureChanged)
         {
             for (int i = 0; i < desired.Count; i++)

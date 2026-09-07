@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.RegularExpressions;
 using Windows.Win32;
 using Windows.Win32.Storage.CloudFilters;
 using Windows.Win32.Storage.FileSystem;
@@ -52,6 +53,11 @@ internal class PlaceholderManager
     // and trailing dot/space round-tripping.
     private const char Marker = '\uFEFF';
 
+    // Injected case/sanitization-collision disambiguator: the invisible Marker followed by
+    // "(N)". Matched here so DesanitizeName can strip it without touching a user's literal
+    // " (2)" in a real filename (which has no Marker).
+    private static readonly Regex CollisionSuffixPattern = new(Marker + @"\(\d+\)", RegexOptions.Compiled);
+
     /// <summary>
     /// Replace characters that are invalid in Windows filenames with visually
     /// similar Unicode look-alikes (fullwidth forms). This mapping is lossless
@@ -61,7 +67,13 @@ internal class PlaceholderManager
     /// </summary>
     internal static string SanitizeName(string name)
     {
-        var result = name;
+        // JMAP requires Net-Unicode (NFC). NTFS is byte-preserving, so normalize
+        // incoming server names to NFC up front — local paths and the comparisons
+        // built on them (echo suppression, reverse lookups) must use one canonical
+        // form, or a server NFD name and an NFC name for the same file diverge.
+        var result = name.IsNormalized(NormalizationForm.FormC)
+            ? name
+            : name.Normalize(NormalizationForm.FormC);
 
         // Replace invalid chars with Unicode look-alikes
         if (result.IndexOfAny(InvalidChars) >= 0)
@@ -90,6 +102,30 @@ internal class PlaceholderManager
     }
 
     /// <summary>
+    /// Disambiguate a sanitized name that collides — case-insensitively, or after
+    /// sanitization — with a sibling on a case-insensitive local filesystem. Injects an
+    /// invisible Marker-tagged "(N)" before the extension (e.g. "report﻿(2).txt", shown as
+    /// "report(2).txt"), so the local name is unique yet reversible by <see cref="DesanitizeName"/>
+    /// — without corrupting a user's literal " (2)". <paramref name="isTaken"/> reports
+    /// whether a candidate local name is already used by a different sibling. Strictly safer
+    /// than silently skipping the collision, which would hide a file the user has (DESIGN §14, #41).
+    /// </summary>
+    internal static string MakeUniqueName(string sanitizedName, Func<string, bool> isTaken)
+    {
+        if (!isTaken(sanitizedName))
+            return sanitizedName;
+
+        var ext = Path.GetExtension(sanitizedName);
+        var stem = sanitizedName[..^ext.Length];
+        for (int n = 2; ; n++)
+        {
+            var candidate = $"{stem}{Marker}({n}){ext}";
+            if (!isTaken(candidate))
+                return candidate;
+        }
+    }
+
+    /// <summary>
     /// Reverse of <see cref="SanitizeName"/>: restore Unicode look-alikes back
     /// to their original characters for sending to the server.
     /// Call this on local filenames before using them in JMAP calls.
@@ -97,6 +133,11 @@ internal class PlaceholderManager
     internal static string DesanitizeName(string localName)
     {
         var result = localName;
+
+        // Strip any injected case-collision disambiguator(s) first, so the lone prefix/suffix
+        // Marker handling below operates on the genuine name. The pattern is Marker + "(N)".
+        if (result.IndexOf(Marker) >= 0)
+            result = CollisionSuffixPattern.Replace(result, "");
 
         // Remove marker prefix (reserved name protection)
         if (result.Length > 0 && result[0] == Marker)
@@ -119,10 +160,22 @@ internal class PlaceholderManager
             result = new string(chars);
         }
 
-        return result;
+        // JMAP requires Net-Unicode (NFC). NTFS hands back whatever bytes were
+        // written and macOS/Linux peers may have produced NFD, so normalize every
+        // name to NFC before it goes to the server — otherwise a round-tripped name
+        // is binary-distinct and the server creates a duplicate (DESIGN §14, #40).
+        return result.IsNormalized(NormalizationForm.FormC)
+            ? result
+            : result.Normalize(NormalizationForm.FormC);
     }
 
-    public unsafe void CreatePlaceholders(string parentPath, FileNode[] children)
+    /// <param name="localNameByNodeId">
+    /// Optional precomputed local file names per node ID (case-collision disambiguated by
+    /// the caller). When a node is present, its mapped name is used verbatim; otherwise the
+    /// name falls back to <see cref="SanitizeName"/> of the node's server name.
+    /// </param>
+    public unsafe void CreatePlaceholders(string parentPath, FileNode[] children,
+        IReadOnlyDictionary<string, string>? localNameByNodeId = null)
     {
         if (children.Length == 0)
             return;
@@ -138,7 +191,9 @@ internal class PlaceholderManager
                 var node = children[i];
 
                 // Pin the name string — PCWSTR needs a char*
-                var sanitized = SanitizeName(node.Name);
+                var sanitized = localNameByNodeId != null && localNameByNodeId.TryGetValue(node.Id, out var mapped)
+                    ? mapped
+                    : SanitizeName(node.Name);
                 var nameChars = new char[sanitized.Length + 1];
                 sanitized.CopyTo(nameChars);
                 nameChars[sanitized.Length] = '\0';

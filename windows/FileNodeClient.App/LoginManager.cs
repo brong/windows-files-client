@@ -76,6 +76,33 @@ sealed class LoginManager : IDisposable
     {
         _debug = debug;
         _iconPath = iconPath;
+        _conflictStrategy = SettingsStore.ParseStrategy(SettingsStore.Load().ConflictResolution);
+    }
+
+    private ConflictResolution _conflictStrategy;
+
+    /// <summary>Current global content-conflict resolution strategy (DESIGN §6).</summary>
+    public ConflictResolution ConflictStrategy
+    {
+        get { lock (_lock) return _conflictStrategy; }
+    }
+
+    /// <summary>
+    /// Update the global conflict strategy: persist it and apply to every live account so the
+    /// change takes effect without a restart. New supervisors pick it up via their constructor.
+    /// </summary>
+    public void SetConflictStrategy(ConflictResolution strategy)
+    {
+        List<AccountSupervisor> supervisors;
+        lock (_lock)
+        {
+            _conflictStrategy = strategy;
+            supervisors = _supervisors.ToList();
+        }
+        SettingsStore.Save(new SettingsStore.AppSettings(SettingsStore.FormatStrategy(strategy)));
+        foreach (var s in supervisors)
+            s.ConflictStrategy = strategy;
+        Log.Info($"[LoginManager] Conflict resolution set to {strategy}");
     }
 
     // ---- Startup ----
@@ -432,7 +459,7 @@ sealed class LoginManager : IDisposable
         string displayName, string syncRootPath, bool clean, CancellationToken ct)
     {
         IJmapClient client = account.IsPrimary ? session.Client : session.Client.ForAccount(account.AccountId);
-        var supervisor = new AccountSupervisor(client, syncRootPath, displayName, _debug);
+        var supervisor = new AccountSupervisor(client, syncRootPath, displayName, _debug, ConflictStrategy);
         // Wire status before StartAsync so the UI sees each account's
         // Discovering → Idle transition as it happens.
         supervisor.StatusChanged += _ => RaiseAggregateStatus();

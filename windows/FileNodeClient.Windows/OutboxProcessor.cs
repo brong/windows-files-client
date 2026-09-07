@@ -10,9 +10,31 @@ using Windows.Win32.Storage.CloudFilters;
 
 namespace FileNodeClient.Windows;
 
+/// <summary>
+/// How to resolve a content conflict — the server copy diverged from the version a
+/// local edit was based on. See DESIGN §6.
+/// </summary>
+public enum ConflictResolution
+{
+    /// <summary>Always keep both versions: the local edit becomes a server-renamed
+    /// copy ("doc (2).txt"); the original reverts to the server's content. Never loses data.</summary>
+    ConflictCopy,
+
+    /// <summary>Atomically overwrite the server only if the local file is newer
+    /// (onExists:"newest"); otherwise fall back to a conflict copy.</summary>
+    NewestWins,
+}
+
 public class OutboxProcessor : IDisposable
 {
     private const int MaxConcurrency = 4;
+
+    /// <summary>
+    /// Strategy used when a content conflict is detected. Defaults to the always-safe
+    /// conflict-copy; can be set to NewestWins for fewer duplicate files on single-user
+    /// multi-device setups.
+    /// </summary>
+    public ConflictResolution ConflictStrategy { get; set; } = ConflictResolution.ConflictCopy;
 
 
     private readonly SyncOutbox _outbox;
@@ -369,37 +391,64 @@ public class OutboxProcessor : IDisposable
                 return false;
             }
 
-            // Check if content actually changed by comparing local SHA1 with server blobId
+            // Fetch current server state — used both to skip no-op uploads and to detect
+            // whether the server copy diverged from the version this edit was based on.
             var existingNodes = await _queue.EnqueueAsync(QueuePriority.Background,
                 () => _jmapClient.GetFileNodesAsync([change.NodeId], ct), ct);
-            if (existingNodes.Length > 0 && existingNodes[0].BlobId != null)
+            var serverNode = existingNodes.Length > 0 ? existingNodes[0] : null;
+            var serverBlobId = serverNode?.BlobId;
+
+            // blobId is the content SHA1 (hex). Hash the local file once, for both the
+            // no-op check and conflict detection.
+            string localSha1Hex;
+            using (var sha1Stream = OpenFileForUpload(change.LocalPath))
             {
-                using var sha1Stream = OpenFileForUpload(change.LocalPath);
                 var hashBytes = await SHA1.HashDataAsync(sha1Stream, ct);
-                var localSha1Hex = Convert.ToHexString(hashBytes).ToLowerInvariant();
-                if (string.Equals(localSha1Hex, existingNodes[0].BlobId, StringComparison.OrdinalIgnoreCase))
-                {
-                    Log.Info($"{_logPrefix} Outbox: content unchanged for {fileName} (digest:sha matches), skipping upload");
-                    if (change.IsDirtyLocation)
-                    {
-                        await _queue.EnqueueAsync(QueuePriority.Background,
-                            () => _jmapClient.MoveFileNodeAsync(change.NodeId, parentId, fileName, ct: ct), ct);
-                    }
-                    // File may have been replaced with a non-placeholder copy (e.g. local
-                    // "copy over existing") — convert back to placeholder before SetInSync.
-                    SyncEngine.EnsurePlaceholder(change.LocalPath, change.NodeId);
-                    SyncEngine.SetInSync(change.LocalPath);
-                    return true;
-                }
+                localSha1Hex = Convert.ToHexString(hashBytes).ToLowerInvariant();
             }
+
+            // Content already matches the server — nothing to upload.
+            if (serverBlobId != null && string.Equals(localSha1Hex, serverBlobId, StringComparison.OrdinalIgnoreCase))
+            {
+                Log.Info($"{_logPrefix} Outbox: content unchanged for {fileName} (digest:sha matches), skipping upload");
+                if (change.IsDirtyLocation)
+                {
+                    await _queue.EnqueueAsync(QueuePriority.Background,
+                        () => _jmapClient.MoveFileNodeAsync(change.NodeId, parentId, fileName, ct: ct), ct);
+                }
+                // File may have been replaced with a non-placeholder copy (e.g. local
+                // "copy over existing") — convert back to placeholder before SetInSync.
+                SyncEngine.EnsurePlaceholder(change.LocalPath, change.NodeId);
+                SyncEngine.SetInSync(change.LocalPath);
+                return true;
+            }
+
+            // Conflict: the server's content changed (to something other than our edit)
+            // since the version this edit started from. Without this guard the in-place
+            // update below would silently clobber the other device's change (DESIGN §6, #39).
+            bool serverDiverged = serverBlobId != null
+                && change.BaseBlobId != null
+                && !string.Equals(serverBlobId, change.BaseBlobId, StringComparison.OrdinalIgnoreCase);
 
             Log.Info($"{_logPrefix} Outbox: uploading modified file {fileName}");
             var localCtime = File.GetCreationTimeUtc(change.LocalPath);
             var localMtime = File.GetLastWriteTimeUtc(change.LocalPath);
-            using var fileStream = OpenFileForUpload(change.LocalPath);
-            var blobId = await UploadFileContentAsync(change, fileStream, contentType, ct);
+            string blobId;
+            using (var fileStream = OpenFileForUpload(change.LocalPath))
+            {
+                blobId = await UploadFileContentAsync(change, fileStream, contentType, ct);
+            }
+
+            if (serverDiverged)
+            {
+                Log.Info($"{_logPrefix} Outbox: CONFLICT on {fileName} — server diverged from base (server={serverBlobId}, base={change.BaseBlobId}); strategy={ConflictStrategy}");
+                await ResolveContentConflictAsync(change, parentId, fileName, contentType, blobId, localCtime, localMtime, serverNode!, ct);
+                return true;
+            }
+
+            // No conflict — update content in place (v10 mutable blobId; node ID is stable).
             var newNode = await _queue.EnqueueAsync(QueuePriority.Background,
-                () => _jmapClient.ReplaceFileNodeBlobAsync(change.NodeId, parentId, fileName, blobId, contentType, localCtime, localMtime, ct), ct);
+                () => _jmapClient.ReplaceFileNodeBlobAsync(change.NodeId, parentId, fileName, blobId, contentType, localCtime, localMtime, ct: ct), ct);
 
             try
             {
@@ -552,6 +601,87 @@ public class OutboxProcessor : IDisposable
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// Resolve a content conflict — the server copy diverged from the version this edit was
+    /// based on. The user's edited content has already been uploaded as <paramref name="blobId"/>.
+    /// With <see cref="ConflictResolution.NewestWins"/> we first try an atomic onExists:"newest"
+    /// update; if the server copy is actually newer (alreadyExists) we fall back to a conflict
+    /// copy. The conflict copy keeps both versions: the local edit is moved to a server-chosen
+    /// non-colliding name, and the original file is re-materialized with the server's content
+    /// (DESIGN §6). Never loses either edit.
+    /// </summary>
+    private async Task ResolveContentConflictAsync(
+        PendingChange change, string parentId, string fileName, string contentType,
+        string blobId, DateTime localCtime, DateTime localMtime, FileNode serverNode,
+        CancellationToken ct)
+    {
+        var localPath = change.LocalPath!;
+        var nodeId = change.NodeId!;
+        var parentDir = Path.GetDirectoryName(localPath)!;
+
+        // Newest-wins: atomic conditional overwrite. The server applies the update only if our
+        // modified time is newer; otherwise it returns alreadyExists and we make a conflict copy.
+        if (ConflictStrategy == ConflictResolution.NewestWins)
+        {
+            try
+            {
+                var winner = await _queue.EnqueueAsync(QueuePriority.Background,
+                    () => _jmapClient.ReplaceFileNodeBlobAsync(nodeId, parentId, fileName, blobId, contentType, localCtime, localMtime, onExists: "newest", ct: ct), ct);
+                Log.Info($"{_logPrefix} Outbox: conflict resolved (newest-wins, local newer) for {fileName} → node {winner.Id}");
+                try
+                {
+                    SyncEngine.UpdatePlaceholderIdentity(localPath, winner.Id);
+                    SyncEngine.StripZoneIdentifier(localPath);
+                    SyncEngine.SetInSync(localPath);
+                }
+                catch (Exception ex) { Log.Info($"{_logPrefix} Outbox: placeholder update deferred for {fileName}: {ex.Message}"); }
+                _engine.RecordRecentUpload(localPath);
+                _engine.UpdateMappings(localPath, nodeId, winner.Id, winner.BlobId);
+                return;
+            }
+            catch (Exception ex) when (ex.Message.Contains("alreadyExists"))
+            {
+                Log.Info($"{_logPrefix} Outbox: newest-wins declined (server copy newer) for {fileName}, making conflict copy");
+            }
+        }
+
+        // Conflict copy: create a new node holding the user's content; the server assigns a
+        // non-colliding name (e.g. "doc (2).txt") and returns it.
+        var conflictNode = await _queue.EnqueueAsync(QueuePriority.Background,
+            () => _jmapClient.CreateFileNodeAsync(parentId, blobId, fileName, contentType, "rename", localCtime, localMtime, ct), ct);
+        if (string.IsNullOrEmpty(conflictNode.Name))
+        {
+            // Server didn't echo the chosen name — can't safely rename the local file.
+            // The edit is preserved on the server as conflictNode; the next sync will
+            // materialize it locally. Leave the original file untouched.
+            Log.Error($"{_logPrefix} Outbox: conflict-copy create returned no name for {fileName} (node {conflictNode.Id}); next sync will reconcile");
+            return;
+        }
+        var conflictPath = Path.Combine(parentDir, PlaceholderManager.SanitizeName(conflictNode.Name));
+        Log.Info($"{_logPrefix} Outbox: conflict copy for {fileName} → '{conflictNode.Name}' (node {conflictNode.Id})");
+
+        try
+        {
+            // Re-point the local placeholder (which holds the user's edit) at the conflict node
+            // and pre-map the target BEFORE moving, so the blocking NOTIFY_RENAME callback sees
+            // this as our own echo (mapped node → target path) and does not issue a server move.
+            SyncEngine.UpdatePlaceholderIdentity(localPath, conflictNode.Id);
+            _engine.UpdateMappings(conflictPath, null, conflictNode.Id, conflictNode.BlobId);
+            File.Move(localPath, conflictPath);
+            _engine.RecordRecentUpload(conflictPath);
+            SyncEngine.StripZoneIdentifier(conflictPath);
+            SyncEngine.SetInSync(conflictPath);
+
+            // Re-create the original name with the server's (other device's) content as a
+            // fresh dehydrated placeholder pointing at the original node.
+            _engine.MaterializeServerNode(parentDir, serverNode);
+        }
+        catch (Exception ex)
+        {
+            Log.Error($"{_logPrefix} Outbox: failed to finalise conflict copy for {fileName}: {ex.Message}. Both versions exist on the server; next sync will reconcile.");
+        }
     }
 
     private const int StallTimeoutSeconds = 30;

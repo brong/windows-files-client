@@ -70,6 +70,7 @@ public class JmapClient : IJmapClient
     public string? TrashUrl => Session.GetTrashUrl(AccountId);
     public string? WebUrlTemplate => Session.GetWebUrlTemplate(AccountId);
     public string? WebWriteUrlTemplate => Session.GetWebWriteUrlTemplate(AccountId);
+    public bool CaseInsensitiveNames => Session.GetCaseInsensitiveNames(AccountId) ?? true;
 
     public JmapClient(string token, bool debug = false)
         : this(new TokenAuth(token), debug) { }
@@ -855,7 +856,7 @@ public class JmapClient : IJmapClient
             throw new InvalidOperationException($"FileNode/set {what} failed: {setError.Type} — {setError.Description}");
     }
 
-    public async Task<FileNode> ReplaceFileNodeBlobAsync(string nodeId, string parentId, string name, string blobId, string? type = null, DateTime? createdAt = null, DateTime? modifiedAt = null, CancellationToken ct = default)
+    public async Task<FileNode> ReplaceFileNodeBlobAsync(string nodeId, string parentId, string name, string blobId, string? type = null, DateTime? createdAt = null, DateTime? modifiedAt = null, string? onExists = null, CancellationToken ct = default)
     {
         // v10: blobId is mutable — update directly via FileNode/set update.
         // Node ID stays the same (no destroy+create needed).
@@ -865,7 +866,7 @@ public class JmapClient : IJmapClient
         if (modifiedAt.HasValue)
             updateFields["modified"] = modifiedAt.Value.ToUniversalTime();
 
-        await UpdateFileNodeAsync(nodeId, updateFields, null, "update", ct);
+        await UpdateFileNodeAsync(nodeId, updateFields, onExists, "update", ct);
 
         // Return a FileNode with the known values since update response only has changed fields
         return new FileNode

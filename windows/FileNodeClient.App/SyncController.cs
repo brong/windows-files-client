@@ -138,6 +138,13 @@ sealed class SyncController : IDisposable
             _loginManager.GetActiveAccountIds(loginId));
     }
 
+    /// <summary>Global content-conflict resolution strategy (DESIGN §6); persisted on set.</summary>
+    public ConflictResolution ConflictStrategy
+    {
+        get => _loginManager.ConflictStrategy;
+        set => _loginManager.SetConflictStrategy(value);
+    }
+
     public void PauseAccount(string accountId) => _loginManager.PauseAccount(accountId);
     public void ResumeAccount(string accountId) => _loginManager.ResumeAccount(accountId);
     public void SyncNow(string accountId) => _loginManager.SyncNow(accountId);

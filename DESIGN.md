@@ -131,7 +131,12 @@ Key design points:
 
 - **`blobId` is now mutable (v10).** You can update file content by setting a new blobId via `FileNode/set update`. The node ID stays the same. The server automatically updates the `size` field. You cannot change a file into a folder or vice versa. This is a significant improvement over the old destroy+create pattern — the node ID is now stable across content updates, which simplifies local state tracking.
 
-- **`onExists: "replace"`** is still available for creating files that may already exist (e.g., new file creation where a name collision is possible). But for updating existing files where you already know the node ID, use `FileNode/set update { blobId: newBlobId }` instead.
+- **`onExists` controls name-collision behaviour on create.** Three modes:
+  - **`"replace"`** — overwrite the colliding node unconditionally (last-writer-wins). Use for new-file creation where a collision is possible but you want your content to win.
+  - **`"rename"`** — the server picks a non-colliding name atomically (e.g. `report (2).docx`) and returns it in the `created` response. Use for conflict copies (§6) and for restoring into trash, where you must not clobber an existing node.
+  - **`"newest"`** — conditional overwrite: the server replaces the existing node **only if** the incoming `modified` timestamp is newer than the stored one. If the stored node is newer (or equal), the create lands in `notCreated`/`notUpdated` with `alreadyExists`. This makes the timestamp comparison atomic with the write, eliminating the client-side TOCTOU race where two devices both read timestamps, both conclude they are newer, and the later write silently discards the earlier (§6). Fall back to `"rename"` when the condition fails so no edit is lost.
+
+  For updating existing files where you already know the node ID, use `FileNode/set update { blobId: newBlobId }` instead of any create.
 
 - **Timestamps are client-managed.** The server does NOT auto-update `modified` or `accessed`. Clients SHOULD explicitly set `modified` on content changes and metadata changes (rename, move). Setting a timestamp to `null` tells the server to use the current time.
 
@@ -366,14 +371,14 @@ Skip an entry if its parent folder is still pending creation (it'll be processed
 6. Convert local file to a platform placeholder with the new nodeId as identity
 7. Update all mappings
 
-**Modified file:**
+**Modified file (existing node, known nodeId):**
 1. Capture `creationTimeUtc` and `lastWriteTimeUtc` from the local file
-2. Upload new blob → new blobId
-3. `FileNode/set create { parentId, blobId, name, type, created, modified, onExists: "replace" }` → old node destroyed, new node created with new ID
-4. Update placeholder identity with new nodeId
-5. Update mappings
+2. Upload new blob → new blobId (or, for small files with `webWriteUrlTemplate`, PUT directly — see §2 Direct HTTP Write)
+3. `FileNode/set update { nodeId: { blobId: newBlobId, modified } }` → content replaced in place
+4. No placeholder identity change needed — the nodeId is stable
+5. Update the blobId in the mappings
 
-**Important:** Because `blobId` is immutable, updating file content always creates a new node. The `onExists: "replace"` option makes this atomic — the server handles the destroy-and-create in one operation.
+**Important:** Since v10, `blobId` is mutable — update content in place with `FileNode/set update`. The node ID stays the same, so there is no placeholder-identity churn and local state tracking is simpler. Always set `modified` explicitly in the update (timestamps are client-managed; the server does not auto-update them). The destroy+create pattern with `onExists: "replace"` is only for *new* file creation where a name collision is possible (above) — not for updating content of a node you already track. For content conflicts (the server's blobId changed since you began the edit), see §6.
 
 ### Chunked Upload (Large Files)
 
@@ -436,12 +441,17 @@ The core principle: **always compare mtime, never suppress based on key presence
 
 ### Server Conflicts
 
-We use a "server wins" model for most conflicts:
+We use a "server wins" model for structural conflicts:
 - Server rename + local rename of same file: server version applied, local change re-enqueued
 - Server delete + local edit: local file becomes a new create (reparented if needed)
-- Server edit + local edit: both changes survive as `onExists: "replace"` is last-writer-wins on the server
 
-For more sophisticated conflict resolution (three-way merge, conflict copies), the client would need to detect the situation and create a "Conflicted copy of..." file. We haven't needed this yet because the single-user case dominates.
+**Content conflicts** (server content changed under a local edit) are detected by comparing the blobId the client held when the edit began against the node's current server blobId. When they differ, the local content has diverged from a different version than the one currently on the server. There are two resolution strategies; both are server-atomic so no client-side naming or timestamp race exists:
+
+**Conflict copy (default, always safe).** Send the local edit as a `FileNode/set create` with `onExists: "rename"`. The server assigns a non-colliding name (e.g. `report (2).docx`) atomically and returns it. Both versions survive; the user reconciles them. This is the only universally safe strategy because it never discards either edit and works for binary formats where a merge is undefined. Client-side naming (`document — conflict copy (host, date).txt`) cannot be made atomic — two devices running the same logic concurrently can produce the same conflict name, creating a second conflict.
+
+**Newest-wins (opt-in).** Send the edit with `onExists: "newest"` and the local `modified` timestamp. The server overwrites only if the local file is newer; otherwise it returns `alreadyExists` in `notCreated`/`notUpdated` and the client falls back to a conflict copy. This is the right default for single-user multi-device setups where the most recently edited version is almost always the one to keep, and it avoids a TOCTOU race: a client-side "compare timestamps then overwrite" check lets two devices both read timestamps, both conclude they are newer, and both write — the later write silently discards the earlier. Making the comparison atomic with the write on the server closes that window. See pitfall #39.
+
+**Three-way merge is deliberately not attempted.** Merge is well-defined for line-oriented text but produces corrupt output for binary formats (DOCX, PSD, XLSX). Restricting it to text would surprise users; implementing per-format merge is unbounded scope. The two-copy approach is always safe regardless of file type.
 
 ---
 
@@ -695,6 +705,29 @@ Permissions inherit from parent to child. If a shared folder has `mayWrite: fals
 3. Maintain a mapping between sanitized local name and server name if they differ
 4. On upload, use the original (un-sanitized) name if the file was renamed by sanitization
 
+### Unicode Normalization (NFC)
+
+JMAP requires Net-Unicode (RFC 5198), which mandates **NFC** (canonical composition). Filesystems disagree on the form they hand you:
+
+- **APFS / HFS+ (macOS, iOS)** store and return names in a decomposed form close to **NFD** (e.g. `café` as `c a f e´`).
+- **Windows (NTFS)** preserves whatever bytes were written and does not normalize.
+- **Linux** filesystems are byte-preserving (no normalization).
+
+If a client sends NFD bytes to the server, the name looks identical in every file manager but is **binary-distinct** from the NFC name another platform sends. The result is a duplicate file the moment a second platform syncs the same name. Therefore:
+
+1. **Normalize every name to NFC before sending it to the server** (on create, rename, move). On Apple platforms use `precomposedStringWithCanonicalMapping`; on .NET use `string.Normalize(NormalizationForm.FormC)`.
+2. Normalize incoming server names to NFC before comparing them against local names, so a server NFD name and a server NFC name for the same logical filename are recognised as equal.
+3. The local filesystem may re-decompose the name it stores (APFS will); that is fine — the round-trip is anchored on the NFC form held in memory and sent to the server.
+
+This is a correctness bug, not a cosmetic one: skipping it produces silent cross-platform duplication that only appears once a second device joins.
+
+### Case-Insensitive Collisions
+
+The FileNode account capability advertises `caseInsensitiveNames`. When it is `false`, the **server is case-sensitive**: `Report.docx` and `REPORT.docx` are two distinct siblings. A case-insensitive local filesystem (Windows NTFS default, APFS default) cannot represent both in the same directory.
+
+- **On upload**, tell the server how to compare: send `compareCaseInsensitively: true` on `FileNode/set` when the local filesystem is case-insensitive, so the server's own collision detection matches local reality.
+- **On display**, when two server siblings differ only by case (group them by `nfc(name).lowercased()` — apply NFC *before* case-folding so Unicode-equivalent names land in the same group), inject a disambiguating ` (N)` suffix on all but the first so each gets a unique local name. **Never silently hide or skip the duplicate** — that loses a file the user created with no indication it exists. Strip the suffix when writing the name back to the server so the canonical name is preserved.
+
 ### Path Length
 
 Each OS has different path length limits. Files that exceed the limit simply can't be synced — log a warning and skip them.
@@ -941,3 +974,17 @@ A stalled account is indistinguishable from an up-to-date one unless you show *w
 
 **38. A push notification's *presence* is not a *change* — and never reset reconnect backoff on an unproven connection.**
 This pair caused a real incident: a client hammered the server ~1 request/second/account in a tight loop, growing a 482 MB traffic log. Two compounding bugs: (a) the client triggered a `FileNode/changes` poll whenever a push payload *contained* a FileNode state key — but the server's initial "connect"/handshake event (re-sent on every reconnect) always carries the current state, so every reconnect caused a poll even though nothing changed. Compare the pushed state *value* against the last value you acted on (persisted across reconnects) and poll only on a difference. (b) The reconnect backoff was reset to its floor on every successful connection; combined with a connection that kept flapping (opening and closing within ~1s), this produced a 1 Hz reconnect storm. Only reset backoff after a connection has stayed up past a stability threshold (we use 10s); a shorter-lived connection is a flap and must keep backing off exponentially. Also watch for multiple client instances (e.g. one extension process per account/domain) competing over a single shared push connection — that *was* the underlying cause here. When the OS runs one process per account but the push endpoint is per-session (covers all the login's accounts in one event), don't let every process open its own connection: **elect a single push owner per login with a cross-process lease** (we use a non-blocking `flock` on a shared file, the same primitive as the OAuth refresh lock; non-owners stand down and retry so one takes over if the owner dies). The owner is login-scoped — it tracks last-seen state per account and fans out a per-account signal to each changed account's local view, so the other accounts still sync without holding their own connection. (Apple: item D5; lease = `PushLease`.)
+
+### Conflict & Naming Pitfalls
+
+**39. Client-side "newest wins" is a TOCTOU race — make the comparison atomic on the server.**
+A client that compares `localModified` against `serverModified` and overwrites if local is newer has a time-of-check-to-time-of-use race: two devices can both read the timestamps, both conclude they are newer, and both write. The later write silently discards the earlier one. Use `onExists: "newest"` so the server performs the comparison atomically with the write — it overwrites only if the incoming `modified` is newer, otherwise returns `alreadyExists`. On that failure, fall back to a conflict copy (`onExists: "rename"`) so no edit is ever lost. Never resolve a content conflict by overwriting based on a timestamp the client read in a separate step.
+
+**40. Names must be NFC before they touch the server, or cross-platform sync silently duplicates files.**
+JMAP requires Net-Unicode (NFC). APFS/HFS+ return names in a decomposed (NFD-like) form; NTFS and Linux are byte-preserving. If any client sends NFD bytes, the name looks identical in every file manager but is binary-distinct from the NFC name other platforms send — so the file duplicates the instant a second platform syncs it. Normalize to NFC (`Normalize(FormC)` / `precomposedStringWithCanonicalMapping`) on every create/rename/move, and normalize incoming server names to NFC before comparing. This bug is invisible on a single platform; it only surfaces when a second device joins, which makes it easy to ship.
+
+**41. Case-collision siblings must be disambiguated, never skipped.**
+On a case-sensitive server (`caseInsensitiveNames: false`), `Report.docx` and `REPORT.docx` are distinct, but a case-insensitive local filesystem cannot hold both. The tempting fix — skip the second one during populate — silently hides a file the user created, with no indication it exists. Inject a ` (N)` suffix instead so both are visible and uniquely named, group collisions by `nfc(name).lowercased()` (NFC *before* case-fold), and strip the suffix when writing back so the server keeps the canonical name. Also send `compareCaseInsensitively: true` on `FileNode/set` when the local filesystem is case-insensitive so the server's collision detection matches local reality.
+
+**42. Concurrency guards around an `await` are TOCTOU races.**
+Any flag you check before an `await` (e.g. "is the domain being removed?", "is sync paused?") can be flipped by another task during the suspension. A guard that passes at function entry says nothing about the state when the task resumes three suspension points later. Re-check the flag immediately before any destructive or outward-facing operation, not just at entry — or snapshot the needed state before the first suspension. This bit the Apple client on a delete-during-teardown path (BUG-013): the teardown flag was set while `deleteItem` was suspended, and the delete propagated to the server anyway.
