@@ -689,43 +689,237 @@ public class SyncEngine : IDisposable
         }
     }
 
+    // ---- The one server → disk apply path (SIMPLIFICATION.md Phase 4) ----
+    //
+    // Cold start, reconcile and incremental poll all funnel through
+    // ApplyServerNode / RemoveNode so a reliability fix lands once. Invariants,
+    // all learned the hard way (DESIGN §6, §18):
+    //  - update the path↔node mappings BEFORE touching the disk on a server-driven
+    //    rename, so the watcher echo resolves to the new path and doesn't
+    //    round-trip a rename to the server;
+    //  - lift the read-only DENY ACL around any create/delete in a protected folder;
+    //  - apply that ACL only after cfapi is finished with the directory handle —
+    //    it denies WriteData/AppendData, which the GENERIC_WRITE open in
+    //    ConvertToPlaceholder / MarkDirectoryAlwaysFull needs. So ApplyServerNode
+    //    never applies it; bulk callers do after EnsureTreeDirectoriesFull, the
+    //    poll path per node.
+
+    private static bool PathEquals(string a, string b) =>
+        string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Make the item at <paramref name="path"/> represent <paramref name="node"/>:
+    /// map it, record its blobId, track folder permissions, then either bring a
+    /// pre-existing item in-sync (converting a plain file/folder to a placeholder)
+    /// or auto-hydrate a newly created file under a pinned folder. The item must
+    /// already exist on disk. Idempotent. Returns false if it is missing or the
+    /// path is owned by another node.
+    /// </summary>
+    private bool ApplyServerNode(FileNode node, string path, bool wasOnDisk, bool retryOpen = true)
+    {
+        if (!TryMapNode(path, node.Id))
+            return false;
+        if (node.BlobId != null)
+            _nodeIdToBlobId[node.Id] = node.BlobId;
+        TrackFolderPermissions(node, path);
+
+        if (wasOnDisk)
+        {
+            EnsureInSync(path, node.Id, node.IsFolder, retryOpen);
+        }
+        else if (!node.IsFolder && IsUnderPinnedDirectory(path))
+        {
+            try { HydratePlaceholder(path); }
+            catch (Exception ex)
+            {
+                Log.Error($"{_logPrefix}  Auto-hydration failed for {node.Name}: {ex.Message}");
+            }
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// The server renamed or re-parented a mapped item: move it on disk. Mappings
+    /// (a folder's descendants included) are updated first — see the invariants.
+    /// </summary>
+    private void MoveLocalItem(FileNode node, string oldPath, string newPath)
+    {
+        var isDirectory = Directory.Exists(oldPath);
+        if (isDirectory)
+            UpdateDescendantMappings(oldPath, newPath);
+        _pathToNodeId.TryRemove(oldPath, out _);
+        _pathToNodeId[newPath] = node.Id;
+        _nodeIdToPath[node.Id] = newPath;
+        _readOnlyPaths.TryRemove(oldPath, out _);
+
+        try
+        {
+            using (SuspendFolderProtection(Path.GetDirectoryName(oldPath)))
+            using (SuspendFolderProtection(Path.GetDirectoryName(newPath)))
+            {
+                if (isDirectory)
+                {
+                    Directory.Move(oldPath, newPath);
+                    Log.Info($"{_logPrefix}  Renamed folder: {oldPath} → {newPath}");
+                }
+                else if (File.Exists(oldPath))
+                {
+                    File.Move(oldPath, newPath);
+                    Log.Info($"{_logPrefix}  Renamed file: {oldPath} → {newPath}");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Error($"{_logPrefix}  Failed to rename {oldPath} → {newPath}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Forget a node and delete its local item — destroyed on the server, moved
+    /// out of the home tree (trashed), or pruned by reconcile. A folder takes its
+    /// descendants' mappings with it. Nothing is deleted while the outbox still
+    /// intends to upload the node or the path: the node id may have changed under
+    /// a pending entry (onExists:"replace"), but the user's content is still to go.
+    /// </summary>
+    private void RemoveNode(string nodeId, string reason)
+    {
+        if (_outbox.HasPendingForNodeId(nodeId))
+        {
+            Log.Info($"{_logPrefix}  {reason}: keeping {nodeId} (pending in outbox)");
+            return;
+        }
+        _nodeIdToBlobId.TryRemove(nodeId, out _);
+        if (!_nodeIdToPath.TryRemove(nodeId, out var localPath))
+        {
+            Log.Debug($"{_logPrefix}  {reason}: {nodeId} (no local path mapped)");
+            return;
+        }
+        if (_outbox.HasPendingForPath(localPath))
+        {
+            Log.Info($"{_logPrefix}  {reason}: keeping {localPath} (outbox pending for path)");
+            return;
+        }
+        if (Directory.Exists(localPath))
+        {
+            var prefix = localPath + Path.DirectorySeparatorChar;
+            foreach (var (descPath, descNodeId) in _pathToNodeId
+                .Where(kvp => kvp.Key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                .ToList())
+            {
+                _pathToNodeId.TryRemove(descPath, out _);
+                _nodeIdToPath.TryRemove(descNodeId, out _);
+                _nodeIdToBlobId.TryRemove(descNodeId, out _);
+                _readOnlyPaths.TryRemove(descPath, out _);
+            }
+        }
+        _pathToNodeId.TryRemove(localPath, out _);
+        _readOnlyPaths.TryRemove(localPath, out _);
+        Log.Info($"{_logPrefix}  {reason}: {localPath}");
+        using (SuspendFolderProtection(Path.GetDirectoryName(localPath)))
+            DeleteLocalItem(localPath);
+    }
+
+    /// <summary>
+    /// Apply one level of a walked tree (cold start, reconcile): move items the
+    /// server renamed, batch-create the missing ones, then ApplyServerNode each.
+    /// <paramref name="honourOutbox"/> leaves nodes with pending local changes
+    /// untouched (reconcile); a cold start has no local state to protect.
+    /// </summary>
+    private void ApplyTreeLevel(TreeLevel level, bool retryOpen, bool honourOutbox)
+    {
+        var (_, parentPath, children, localNames) = level;
+        var toApply = new List<(FileNode Node, string Path)>(children.Length);
+        var toCreate = new List<FileNode>();
+        var createdIds = new HashSet<string>();
+
+        foreach (var child in children)
+        {
+            if (honourOutbox && _outbox.HasPendingForNodeId(child.Id))
+            {
+                Log.Info($"{_logPrefix}  Skipping {child.Id} (pending in outbox)");
+                continue;
+            }
+            var path = Path.Combine(parentPath, localNames[child.Id]);
+            if (_nodeIdToPath.TryGetValue(child.Id, out var oldPath) && !PathEquals(oldPath, path))
+                MoveLocalItem(child, oldPath, path);
+            if (!Path.Exists(path))
+            {
+                toCreate.Add(child);
+                createdIds.Add(child.Id);
+            }
+            toApply.Add((child, path));
+        }
+
+        if (toCreate.Count > 0)
+        {
+            using (SuspendFolderProtection(parentPath))
+                _placeholderManager.CreatePlaceholders(parentPath, toCreate.ToArray(), localNames);
+        }
+
+        foreach (var (node, path) in toApply)
+            ApplyServerNode(node, path, wasOnDisk: !createdIds.Contains(node.Id), retryOpen);
+    }
+
+    /// <summary>
+    /// Apply one created or updated node from FileNode/changes: resolve the parent's
+    /// local path (null → it left the home tree, e.g. trashed → remove), move it if
+    /// the server renamed it, create it if missing, then ApplyServerNode. Nodes with
+    /// pending local changes are left alone — that is the conflict gap RELIABILITY.md
+    /// I3 closes here, in one place.
+    /// </summary>
+    private async Task ApplyChangedNodeAsync(FileNode node, CancellationToken ct)
+    {
+        if (node.ParentId == null)
+            return;
+        if (_outbox.HasPendingForNodeId(node.Id))
+        {
+            Log.Info($"{_logPrefix}  Skipping change for {node.Id} (pending in outbox)");
+            return;
+        }
+
+        var parentPath = await ResolveLocalPathAsync(node.ParentId, ct);
+        if (parentPath == null)
+        {
+            RemoveNode(node.Id, "Removed from sync tree");
+            return;
+        }
+
+        var localName = ResolveUniqueLocalName(parentPath, node);
+        var path = Path.Combine(parentPath, localName);
+        if (_nodeIdToPath.TryGetValue(node.Id, out var oldPath) && !PathEquals(oldPath, path))
+            MoveLocalItem(node, oldPath, path);
+
+        var wasOnDisk = Path.Exists(path);
+        if (!wasOnDisk)
+        {
+            Log.Info($"{_logPrefix}  Creating placeholder for {node.Id} at {path}");
+            using (SuspendFolderProtection(parentPath))
+                _placeholderManager.CreatePlaceholders(parentPath, [node],
+                    new Dictionary<string, string> { [node.Id] = localName });
+        }
+        if (ApplyServerNode(node, path, wasOnDisk))
+            ApplyWriteProtection(path);
+        else
+            Log.Info($"{_logPrefix}  {node.Id}: not on disk or path conflict, skipping");
+    }
+
     private void BuildTreeAndCreatePlaceholders(FileNode[] allNodes, CancellationToken ct = default)
     {
         var tree = WalkFromHome(allNodes);
 
-        // Phase 2: Create all placeholders in one fast pass (parent before children,
-        // but each directory's children are created immediately after the directory)
+        // Level by level, parents before children. Single-attempt opens: a directory
+        // another process holds open must not stall populate for seconds (DESIGN §18).
         Log.Info($"{_logPrefix} Creating placeholders ({tree.Sum(t => t.Children.Length)} items)...");
-        foreach (var (_, localParentPath, children, localNames) in tree)
+        foreach (var level in tree)
         {
             ct.ThrowIfCancellationRequested();
-
-            var newChildren = children
-                .Where(c => !Path.Exists(Path.Combine(localParentPath, localNames[c.Id])))
-                .ToArray();
-
-            if (newChildren.Length > 0)
-                _placeholderManager.CreatePlaceholders(localParentPath, newChildren, localNames);
-
-            foreach (var child in children)
-            {
-                var childPath = Path.Combine(localParentPath, localNames[child.Id]);
-                if (!TryMapNode(childPath, child.Id))
-                    continue;
-                if (child.BlobId != null)
-                    _nodeIdToBlobId[child.Id] = child.BlobId;
-                TrackFolderPermissions(child, childPath);
-
-                // Ensure pre-existing items are proper placeholders and in-sync.
-                // Use single-attempt open (no retry) to avoid blocking populate
-                // for seconds per directory when handles are held open.
-                if (!newChildren.Contains(child))
-                    EnsureInSync(childPath, child.Id, child.IsFolder, retryOpen: false);
-            }
+            ApplyTreeLevel(level, retryOpen: false, honourOutbox: false);
         }
 
+        // Directories become ALWAYS_FULL once their children exist; the read-only
+        // ACLs go on last (see the apply-path invariants below).
         EnsureTreeDirectoriesFull(tree);
-
         ApplyWriteProtections();
 
         DetectAndHydratePinnedDirectories(tree.Select(t => t.LocalParentPath));
@@ -876,22 +1070,9 @@ public class SyncEngine : IDisposable
 
         Log.Info($"{_logPrefix} Reconcile: {serverIds.Length} server nodes, {cachedIdSet.Count} cached, {goneIds.Count} gone");
 
-        // Step 3: Remove gone nodes locally
+        // Step 3: Remove gone nodes locally (RemoveNode keeps anything the outbox still owns)
         foreach (var id in goneIds)
-        {
-            // Skip nodes with pending local changes — outbox will handle them
-            if (_outbox.HasPendingForNodeId(id))
-            {
-                Log.Info($"{_logPrefix}  Skipping gone node {id} (pending in outbox)");
-                continue;
-            }
-
-            if (_nodeIdToPath.TryRemove(id, out var localPath))
-            {
-                _pathToNodeId.TryRemove(localPath, out _);
-                DeleteLocalItem(localPath);
-            }
-        }
+            RemoveNode(id, "Reconcile: gone from server");
 
         // Step 4: Fetch all server nodes in batches to get current data
         Log.Info($"{_logPrefix} Fetching {serverIds.Length} FileNode details...");
@@ -899,82 +1080,16 @@ public class SyncEngine : IDisposable
             () => _jmapClient.GetFileNodesByIdsPagedAsync(serverIds, 1024, ct), ct);
         Log.Info($"{_logPrefix} Fetched {allNodes.Length} FileNodes, state: {state}");
 
-        // Step 5: Build tree and reconcile — reuses the same BFS + placeholder logic
-        // The existing mappings are already populated, so:
-        //   - existing placeholder at correct path → skip (already in mappings)
-        //   - existing placeholder at wrong path → rename on disk, update mappings
-        //   - missing placeholder → create it
-        // Nodes with pending outbox changes are skipped to avoid overwriting local edits.
+        // Step 5: Apply the server tree over the existing mappings, level by level:
+        // mapped at a different path → rename on disk; missing → create; then map,
+        // permissions, in-sync. Nodes with pending local changes are left alone.
         var tree = WalkFromHome(allNodes);
-
-        foreach (var (_, localParentPath, children, localNames) in tree)
+        foreach (var level in tree)
         {
-            var newChildren = new List<FileNode>();
-            foreach (var child in children)
-            {
-                // Skip nodes with pending local changes
-                if (_outbox.HasPendingForNodeId(child.Id))
-                {
-                    Log.Info($"{_logPrefix}  Skipping reconcile for {child.Id} (pending in outbox)");
-                    continue;
-                }
-
-                var expectedPath = Path.Combine(localParentPath, localNames[child.Id]);
-
-                // Check if node was at a different path (rename/move)
-                if (_nodeIdToPath.TryGetValue(child.Id, out var oldPath)
-                    && !string.Equals(oldPath, expectedPath, StringComparison.OrdinalIgnoreCase))
-                {
-                    // Rename on disk
-                    try
-                    {
-                        _pathToNodeId.TryRemove(oldPath, out _);
-                        if (child.IsFolder && Directory.Exists(oldPath))
-                        {
-                            UpdateDescendantMappings(oldPath, expectedPath);
-                            Directory.Move(oldPath, expectedPath);
-                            Log.Info($"{_logPrefix}  Reconcile renamed folder: {oldPath} → {expectedPath}");
-                        }
-                        else if (File.Exists(oldPath))
-                        {
-                            File.Move(oldPath, expectedPath);
-                            Log.Info($"{_logPrefix}  Reconcile renamed file: {oldPath} → {expectedPath}");
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        Log.Error($"{_logPrefix}  Reconcile rename failed {oldPath} → {expectedPath}: {ex.Message}");
-                    }
-                }
-
-                if (Path.Exists(expectedPath))
-                {
-                    if (TryMapNode(expectedPath, child.Id))
-                    {
-                        TrackFolderPermissions(child, expectedPath);
-                        EnsureInSync(expectedPath, child.Id, child.IsFolder);
-                    }
-                }
-                else
-                {
-                    newChildren.Add(child);
-                }
-            }
-
-            if (newChildren.Count > 0)
-                _placeholderManager.CreatePlaceholders(localParentPath, newChildren.ToArray(), localNames);
-
-            // Second pass: map newly created items that now exist on disk
-            foreach (var child in newChildren)
-            {
-                var childPath = Path.Combine(localParentPath, localNames[child.Id]);
-                if (TryMapNode(childPath, child.Id))
-                    TrackFolderPermissions(child, childPath);
-            }
+            ct.ThrowIfCancellationRequested();
+            ApplyTreeLevel(level, retryOpen: true, honourOutbox: true);
         }
-
         EnsureTreeDirectoriesFull(tree);
-
         ApplyWriteProtections();
 
         return state;
@@ -996,213 +1111,19 @@ public class SyncEngine : IDisposable
 
         Log.Info($"{_logPrefix} Changes: +{changes.Created.Length} ~{changes.Updated.Length} -{changes.Destroyed.Length}");
 
-        // Process updated nodes first — sort shallowest-first by existing path
-        // to handle parent renames before children
+        // Updated first — shallowest existing path first so a parent's rename lands
+        // before its children's — then created, then destroyed.
         var sortedUpdatedNodes = updatedNodes
             .OrderBy(n => _nodeIdToPath.TryGetValue(n.Id, out var p)
                 ? p.Count(ch => ch == Path.DirectorySeparatorChar)
                 : int.MaxValue)
             .ToList();
-
         foreach (var node in sortedUpdatedNodes)
-        {
-            if (node.ParentId == null)
-                continue;
-
-            // Skip server changes for items with pending local changes
-            if (_outbox.HasPendingForNodeId(node.Id))
-            {
-                Log.Info($"{_logPrefix}  Skipping update for {node.Id} (pending in outbox)");
-                continue;
-            }
-
-            var oldPath = _nodeIdToPath.GetValueOrDefault(node.Id);
-            var parentPath = await ResolveLocalPathAsync(node.ParentId, ct);
-
-            // Node moved out of home tree (e.g. to trash, or ancestor moved to trash)
-            if (parentPath == null)
-            {
-                if (oldPath != null)
-                {
-                    Log.Info($"{_logPrefix}  Removed from sync tree: {oldPath}");
-                    // Clean up descendant mappings for folders
-                    if (Directory.Exists(oldPath))
-                    {
-                        var prefix = oldPath + Path.DirectorySeparatorChar;
-                        foreach (var (descPath, descNodeId) in _pathToNodeId
-                            .Where(kvp => kvp.Key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-                            .ToList())
-                        {
-                            _pathToNodeId.TryRemove(descPath, out _);
-                            _nodeIdToPath.TryRemove(descNodeId, out _);
-                            _readOnlyPaths.TryRemove(descPath, out _);
-                        }
-                    }
-                    _pathToNodeId.TryRemove(oldPath, out _);
-                    _nodeIdToPath.TryRemove(node.Id, out _);
-                    _readOnlyPaths.TryRemove(oldPath, out _);
-                    var parentDir = Path.GetDirectoryName(oldPath);
-                    using (parentDir != null ? SuspendFolderProtection(parentDir) : default)
-                        DeleteLocalItem(oldPath);
-                }
-                continue;
-            }
-
-            var newLocalName = ResolveUniqueLocalName(parentPath, node);
-            var newPath = Path.Combine(parentPath, newLocalName);
-
-            if (oldPath != null && !string.Equals(oldPath, newPath, StringComparison.OrdinalIgnoreCase))
-            {
-                // Name or parent changed — rename on disk
-                // Update mappings FIRST so the file watcher echo finds the new path
-                // and skips the redundant server call
-                var isDirectory = Directory.Exists(oldPath);
-                if (isDirectory)
-                    UpdateDescendantMappings(oldPath, newPath);
-
-                _pathToNodeId.TryRemove(oldPath, out _);
-                _pathToNodeId[newPath] = node.Id;
-                _nodeIdToPath[node.Id] = newPath;
-                if (node.BlobId != null)
-                    _nodeIdToBlobId[node.Id] = node.BlobId;
-
-                // Clean up old read-only tracking on rename
-                _readOnlyPaths.TryRemove(oldPath, out _);
-
-                try
-                {
-                    using (SuspendFolderProtection(Path.GetDirectoryName(oldPath)))
-                    using (SuspendFolderProtection(Path.GetDirectoryName(newPath)))
-                    {
-                        if (isDirectory)
-                        {
-                            Directory.Move(oldPath, newPath);
-                            Log.Info($"{_logPrefix}  Renamed folder: {oldPath} → {newPath}");
-                        }
-                        else if (File.Exists(oldPath))
-                        {
-                            File.Move(oldPath, newPath);
-                            Log.Info($"{_logPrefix}  Renamed file: {oldPath} → {newPath}");
-                        }
-                    }
-                    // Re-mark as in-sync after move (cfapi may clear in-sync on rename)
-                    SetInSync(newPath);
-                }
-                catch (Exception ex)
-                {
-                    Log.Error($"{_logPrefix}  Failed to rename {oldPath} → {newPath}: {ex.Message}");
-                }
-
-                TrackFolderPermissions(node, newPath);
-                ApplyWriteProtection(newPath);
-            }
-            else
-            {
-                // No rename — create placeholder if missing, then map
-                if (!Path.Exists(newPath))
-                {
-                    using (SuspendFolderProtection(parentPath))
-                        _placeholderManager.CreatePlaceholders(parentPath, [node],
-                            new Dictionary<string, string> { [node.Id] = newLocalName });
-                }
-                if (TryMapNode(newPath, node.Id))
-                {
-                    if (node.BlobId != null)
-                        _nodeIdToBlobId[node.Id] = node.BlobId;
-                    TrackFolderPermissions(node, newPath);
-                    try { SetInSync(newPath); }
-                    catch { /* not a placeholder or just created — ignore */ }
-                    ApplyWriteProtection(newPath);
-                }
-            }
-        }
-
-
-        // Process created nodes — create placeholders for new items
+            await ApplyChangedNodeAsync(node, ct);
         foreach (var node in createdNodes)
-        {
-            if (node.ParentId == null)
-                continue;
-
-            if (_outbox.HasPendingForNodeId(node.Id))
-            {
-                Log.Info($"{_logPrefix}  Skipping create for {node.Id} (pending in outbox)");
-                continue;
-            }
-
-            var parentPath = await ResolveLocalPathAsync(node.ParentId, ct);
-            if (parentPath == null)
-                continue;
-
-            var localName = ResolveUniqueLocalName(parentPath, node);
-            var childPath = Path.Combine(parentPath, localName);
-            bool existed = Path.Exists(childPath);
-            if (!existed)
-            {
-                Log.Info($"{_logPrefix}  Created node {node.Id}: creating placeholder at {childPath}");
-                using (SuspendFolderProtection(parentPath))
-                    _placeholderManager.CreatePlaceholders(parentPath, [node],
-                        new Dictionary<string, string> { [node.Id] = localName });
-            }
-
-            if (!TryMapNode(childPath, node.Id))
-            {
-                Log.Info($"{_logPrefix}  Created node {node.Id}: not on disk or path conflict, skipping");
-                continue;
-            }
-            if (node.BlobId != null)
-                _nodeIdToBlobId[node.Id] = node.BlobId;
-            TrackFolderPermissions(node, childPath);
-
-            if (existed)
-            {
-                Log.Info($"{_logPrefix}  Created node {node.Id}: path exists, SetInSync {childPath}");
-                try { SetInSync(childPath); }
-                catch (Exception ex) { Log.Error($"{_logPrefix}  SetInSync failed for {childPath}: {ex.Message}"); }
-            }
-            else if (!node.IsFolder && IsUnderPinnedDirectory(childPath))
-            {
-                try { HydratePlaceholder(childPath); }
-                catch (Exception ex)
-                {
-                    Log.Error($"{_logPrefix}  Auto-hydration failed for {node.Name}: {ex.Message}");
-                }
-            }
-            ApplyWriteProtection(childPath);
-        }
-
-
+            await ApplyChangedNodeAsync(node, ct);
         foreach (var destroyedId in changes.Destroyed)
-        {
-            if (_outbox.HasPendingForNodeId(destroyedId))
-            {
-                Log.Info($"{_logPrefix}  Skipping destroy for {destroyedId} (pending in outbox)");
-                continue;
-            }
-
-            _nodeIdToBlobId.TryRemove(destroyedId, out _);
-            if (_nodeIdToPath.TryRemove(destroyedId, out var localPath))
-            {
-                // Don't delete the local file if the outbox has a pending
-                // upload for this path — the nodeId may have changed (e.g.
-                // onExists:"replace" destroyed the old node) but the outbox
-                // still intends to upload the user's local content.
-                if (_outbox.HasPendingForPath(localPath))
-                {
-                    Log.Info($"{_logPrefix}  Skipping delete for {destroyedId} (outbox pending for path): {localPath}");
-                    continue;
-                }
-                _pathToNodeId.TryRemove(localPath, out _);
-                _readOnlyPaths.TryRemove(localPath, out _);
-                var destroyParentDir = Path.GetDirectoryName(localPath);
-                using (destroyParentDir != null ? SuspendFolderProtection(destroyParentDir) : default)
-                    DeleteLocalItem(localPath);
-            }
-            else
-            {
-                Log.Info($"{_logPrefix}  Destroyed: {destroyedId} (no local path mapped)");
-            }
-        }
+            RemoveNode(destroyedId, "Destroyed");
 
         if (changes.HasMoreChanges)
             return await PollChangesAsync(changes.NewState, ct);
@@ -2055,21 +1976,15 @@ public class SyncEngine : IDisposable
     {
         var localName = ResolveUniqueLocalName(parentDir, node);
         var path = Path.Combine(parentDir, localName);
-        if (!Path.Exists(path))
+        var wasOnDisk = Path.Exists(path);
+        if (!wasOnDisk)
         {
             using (SuspendFolderProtection(parentDir))
                 _placeholderManager.CreatePlaceholders(parentDir, [node],
                     new Dictionary<string, string> { [node.Id] = localName });
         }
-        if (TryMapNode(path, node.Id))
-        {
-            if (node.BlobId != null)
-                _nodeIdToBlobId[node.Id] = node.BlobId;
-            TrackFolderPermissions(node, path);
-            try { SetInSync(path); }
-            catch (Exception ex) { Log.Debug($"{_logPrefix} MaterializeServerNode SetInSync failed for {path}: {ex.Message}"); }
+        if (ApplyServerNode(node, path, wasOnDisk))
             ApplyWriteProtection(path);
-        }
     }
 
     internal static string ResolveContentType(string filePath)
