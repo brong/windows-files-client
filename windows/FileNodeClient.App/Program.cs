@@ -43,11 +43,17 @@ class Program
         using var mutex = new Mutex(true, "FileNodeClient.App.SingleInstance", out var createdNew);
         if (!createdNew)
         {
-            // A COM activation that raced our own startup: the running instance
-            // owns the class object, so just go away quietly.
-            if (!comLaunched)
-                MessageBox.Show("FileNodeClient is already running.", "FileNodeClient",
-                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+            // Already running. A COM activation that raced our own startup just goes
+            // away; a user launch hands the running instance the right to take the
+            // foreground and asks it to show its window — no dialog.
+            if (!comLaunched && EventWaitHandle.TryOpenExisting(ActivateEventName, out var activate))
+            {
+                using (activate)
+                {
+                    AllowSetForegroundWindow(-1 /* ASFW_ANY */);
+                    activate.Set();
+                }
+            }
             return 0;
         }
 
@@ -80,6 +86,13 @@ class Program
         using var trayIcon = new TrayIcon(cts, iconPath, sync);
         trayIcon.Start();
 
+        // A second launch (Start menu, taskbar, double-clicked .exe) signals this
+        // event instead of showing "already running": bring Manage Accounts forward.
+        using var activateEvent = new EventWaitHandle(false, EventResetMode.AutoReset, ActivateEventName);
+        var activateRegistration = ThreadPool.RegisterWaitForSingleObject(activateEvent,
+            (_, _) => { Log.Info("Second launch detected; showing Manage Accounts"); trayIcon.ShowManageAccounts(); },
+            null, Timeout.Infinite, executeOnlyOnce: false);
+
         // Dev: --token adds a transient (non-persisted) login
         if (token != null)
         {
@@ -104,10 +117,16 @@ class Program
         catch (OperationCanceledException) { }
 
         Log.Info("FileNodeClient stopping...");
+        activateRegistration.Unregister(null);
         try { await loginManager.StopAllAsync(); }
         catch (Exception ex) { Log.Error($"Error during shutdown: {ex.Message}"); }
         return 0;
     }
+
+    private const string ActivateEventName = "FileNodeClient.App.Activate";
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool AllowSetForegroundWindow(int dwProcessId);
 
     private static async Task<string?> DownloadIconAsync(CancellationToken ct)
     {

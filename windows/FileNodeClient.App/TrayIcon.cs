@@ -344,6 +344,8 @@ sealed class TrayIcon : IDisposable
     {
         if (_manageForm != null && !_manageForm.IsDisposed && _manageForm.Visible)
         {
+            if (_manageForm.WindowState == FormWindowState.Minimized)
+                _manageForm.WindowState = FormWindowState.Normal;
             _manageForm.Activate();
             return;
         }
