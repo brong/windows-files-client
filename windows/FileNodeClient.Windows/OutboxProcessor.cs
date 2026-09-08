@@ -469,7 +469,9 @@ public class OutboxProcessor : IDisposable
 
             try
             {
-                SyncEngine.UpdatePlaceholderIdentity(change.LocalPath, newNode.Id);
+                // Edited while we were down? The write stripped the reparse point, so the
+                // file may be a plain file now — convert it back (or just update identity).
+                SyncEngine.EnsurePlaceholder(change.LocalPath, newNode.Id);
                 SyncEngine.StripZoneIdentifier(change.LocalPath);
                 SyncEngine.SetInSync(change.LocalPath);
             }
@@ -649,7 +651,7 @@ public class OutboxProcessor : IDisposable
                 Log.Info($"{_logPrefix} Outbox: conflict resolved (newest-wins, local newer) for {fileName} → node {winner.Id}");
                 try
                 {
-                    SyncEngine.UpdatePlaceholderIdentity(localPath, winner.Id);
+                    SyncEngine.EnsurePlaceholder(localPath, winner.Id);
                     SyncEngine.StripZoneIdentifier(localPath);
                     SyncEngine.SetInSync(localPath);
                 }
@@ -684,7 +686,7 @@ public class OutboxProcessor : IDisposable
             // Re-point the local placeholder (which holds the user's edit) at the conflict node
             // and pre-map the target BEFORE moving, so the blocking NOTIFY_RENAME callback sees
             // this as our own echo (mapped node → target path) and does not issue a server move.
-            SyncEngine.UpdatePlaceholderIdentity(localPath, conflictNode.Id);
+            SyncEngine.EnsurePlaceholder(localPath, conflictNode.Id);
             _engine.UpdateMappings(conflictPath, null, conflictNode.Id, conflictNode.BlobId);
             File.Move(localPath, conflictPath);
             _engine.RecordRecentUpload(conflictPath);
@@ -807,25 +809,30 @@ public class OutboxProcessor : IDisposable
     /// is open for writing by another process, or not a placeholder).
     /// The caller must dispose the returned stream.
     /// </summary>
-    private FileStream OpenFileForUpload(string path)
+    private unsafe FileStream OpenFileForUpload(string path)
     {
         if (CfApiCapabilities.HasBlockSelfHydration)
         {
+            SafeHandle? protectedHandle = null;
             try
             {
-                PInvoke.CfOpenFileWithOplock(
-                    path,
-                    CF_OPEN_FILE_FLAGS.CF_OPEN_FILE_FLAG_NONE,
-                    out var handle).ThrowOnFailure();
+                var hr = PInvoke.CfOpenFileWithOplock(path, CF_OPEN_FILE_FLAGS.CF_OPEN_FILE_FLAG_NONE, out var opened);
+                protectedHandle = opened;
+                hr.ThrowOnFailure();
 
-                // CsWin32 returns CfCloseHandleSafeHandle — wrap in FileStream for reading.
-                // Transfer ownership: create a non-owning SafeFileHandle so FileStream
-                // disposes it, then dispose the CfCloseHandleSafeHandle separately.
-                var safeHandle = new SafeFileHandle(handle.DangerousGetHandle(), ownsHandle: false);
-                return new CfOplockFileStream(safeHandle, handle);
+                // The oplock handle is a cfapi *protected* handle, not a Win32 file handle:
+                // FileStream rejects it ("The handle is invalid"). Ask cfapi for the Win32
+                // handle it wraps (owned by the protected handle — not closed separately).
+                var win32 = PInvoke.CfGetWin32HandleFromProtectedHandle(
+                    new global::Windows.Win32.Foundation.HANDLE(protectedHandle.DangerousGetHandle()));
+                var safeHandle = new SafeFileHandle((IntPtr)win32.Value, ownsHandle: false);
+                return new CfOplockFileStream(safeHandle, protectedHandle);
             }
             catch (Exception ex)
             {
+                // Release the oplock: a leaked protected handle keeps the file open (and
+                // undeletable) until the process exits — one per upload.
+                protectedHandle?.Dispose();
                 Log.Info($"{_logPrefix} CfOpenFileWithOplock failed for {Path.GetFileName(path)}, using FileStream: {ex.Message}");
             }
         }

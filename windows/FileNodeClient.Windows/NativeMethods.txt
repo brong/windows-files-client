@@ -54,3 +54,4 @@ CreateFile
 FILE_FLAGS_AND_ATTRIBUTES
 SetFileInformationByHandle
 FILE_INFO_BY_HANDLE_CLASS
+CfGetWin32HandleFromProtectedHandle

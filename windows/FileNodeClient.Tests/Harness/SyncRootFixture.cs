@@ -123,11 +123,13 @@ public sealed class SyncRootFixture : IAsyncDisposable
         try { SyncEngine.Clean(SyncRootPath, AccountId); } catch { }
         // Clean deletes the contents; the root itself can survive if a handle is still
         // closing (watcher, filter driver). Retry briefly so nothing is left behind.
-        for (int attempt = 0; attempt < 10 && Directory.Exists(SyncRootPath); attempt++)
+        for (int attempt = 0; attempt < 40 && Directory.Exists(SyncRootPath); attempt++)
         {
             try { Directory.Delete(SyncRootPath, recursive: true); }
-            catch { await Task.Delay(200); }
+            catch { await Task.Delay(250); }
         }
+        if (Directory.Exists(SyncRootPath))
+            throw new IOException($"Test sync root not cleaned up: {SyncRootPath}\n{Log.Tail(80)}");
         try
         {
             var scopeDir = Path.Combine(

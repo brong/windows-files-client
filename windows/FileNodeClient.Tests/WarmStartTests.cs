@@ -83,6 +83,11 @@ public class WarmStartTests
         await f.WaitForOutboxIdleAsync();
         Assert.Equal("v2 edited offline", f.Server.ContentText(id));
         Assert.Equal(1, f.Server.ReplaceCount);
+
+        // The offline write turned the placeholder into a plain file; the upload path
+        // must convert it back so it stays a tracked cloud file.
+        Assert.True((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0,
+            "file should be a placeholder again after upload\n" + f.Log.Tail());
     }
 
     [Fact]
