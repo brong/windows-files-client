@@ -1115,18 +1115,11 @@ public class SyncEngine : IDisposable
         foreach (var dir in directories)
             EnsureDirectoryFull(dir, _pathToNodeId[dir]);
 
-        // Catch up with server
-        string newState;
-        Log.Info($"{_logPrefix} Catching up from state {cache.State}...");
-        try
-        {
-            (newState, _) = await PollChangesAsync(cache.State, ct);
-        }
-        catch (InvalidOperationException ex) when (ex.Message.Contains("cannotCalculateChanges"))
-        {
-            Log.Info($"{_logPrefix} State too old, reconciling from server...");
-            newState = await ReconcileFromServerAsync(ct);
-        }
+        // Catch up with server. A transient failure here must not throw the cache
+        // away — that turned a network blip into a full re-populate of every
+        // placeholder. Retry briefly; if the server is still unreachable, keep the
+        // cached state and let the sync loop catch up when it can.
+        var newState = await CatchUpFromCacheAsync(cache.State, ct);
 
         ApplyWriteProtections();
 
@@ -1136,6 +1129,46 @@ public class SyncEngine : IDisposable
         SaveNodeCache(newState);
         ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_IDLE);
         return newState;
+    }
+
+    /// <summary>Base delay between catch-up retries at warm start (doubles each attempt). Tests shorten it.</summary>
+    internal static TimeSpan CatchUpRetryDelay { get; set; } = TimeSpan.FromSeconds(1);
+    private const int CatchUpAttempts = 3;
+
+    private async Task<string> CatchUpFromCacheAsync(string cachedState, CancellationToken ct)
+    {
+        Log.Info($"{_logPrefix} Catching up from state {cachedState}...");
+        for (int attempt = 1; ; attempt++)
+        {
+            try
+            {
+                try
+                {
+                    var (newState, _) = await PollChangesAsync(cachedState, ct);
+                    return newState;
+                }
+                catch (JmapErrorException ex) when (ex.Type == "cannotCalculateChanges")
+                {
+                    Log.Info($"{_logPrefix} State too old, reconciling from server...");
+                    return await ReconcileFromServerAsync(ct);
+                }
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (JmapErrorException ex) when (ex.IsPermanent) { throw; }   // not going to get better
+            catch (Exception ex) when (attempt < CatchUpAttempts)
+            {
+                var delay = CatchUpRetryDelay * (1 << (attempt - 1));
+                Log.Warn($"{_logPrefix} Catch-up poll attempt {attempt} failed: {ex.Message}; retrying in {delay.TotalSeconds:F1}s");
+                await Task.Delay(delay, ct);
+            }
+            catch (Exception ex)
+            {
+                Log.Warn($"{_logPrefix} Catch-up poll failed after {CatchUpAttempts} attempts ({ex.Message}); keeping cached state {cachedState} — the sync loop will catch up");
+                ReportConnectivityLost();
+                Log.SafeInvoke(() => SyncRequested?.Invoke(), "SyncEngine.SyncRequested");   // first thing the loop does
+                return cachedState;
+            }
+        }
     }
 
     private async Task<string> ReconcileFromServerAsync(CancellationToken ct)

@@ -47,6 +47,8 @@ public sealed class FakeJmapClient : IJmapClient
     public HashSet<string> CorruptDigests { get; } = new();
     /// <summary>If set, DownloadBlobAsync streams are cut off after this many bytes.</summary>
     public int? TruncateDownloadsTo { get; set; }
+    /// <summary>Make the next N FileNode/changes calls fail with a network error (server unreachable).</summary>
+    public int FailNextChangesCalls { get; set; }
 
     // ---- Observability ----
 
@@ -230,6 +232,11 @@ public sealed class FakeJmapClient : IJmapClient
     {
         lock (_lock)
         {
+            if (FailNextChangesCalls > 0)
+            {
+                FailNextChangesCalls--;
+                throw new HttpRequestException("An error occurred while sending the request.");
+            }
             var since = int.Parse(sinceState);
             if (since < OldestCalculableState)
                 throw new JmapErrorException("FileNode/changes", "cannotCalculateChanges", null);

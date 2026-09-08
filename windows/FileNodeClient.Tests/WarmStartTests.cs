@@ -91,6 +91,61 @@ public class WarmStartTests
     }
 
     [Fact]
+    public async Task WarmStart_TransientCatchUpFailure_RetriesInsteadOfRefetchingEverything()
+    {
+        var previous = SyncEngine.CatchUpRetryDelay;
+        SyncEngine.CatchUpRetryDelay = TimeSpan.FromMilliseconds(50);
+        try
+        {
+            await using var f = await SyncRootFixture.StartAsync(s => s.AddFile(HomeId, "a.txt", "v1"));
+            var id = f.Server.FindByName(HomeId, "a.txt")!.Id;
+            await f.PollAsync();
+
+            await f.RestartAsync(whileDown: () => f.Server.FailNextChangesCalls = 2);
+
+            Assert.True(f.Log.Contains("Catch-up poll attempt 1 failed"), f.Log.Tail());
+            Assert.True(f.Log.Contains("Catch-up poll attempt 2 failed"), f.Log.Tail());
+            Assert.False(f.Log.Contains("falling back to full fetch"), f.Log.Tail());
+            Assert.Equal(1, f.Log.Count("Creating placeholders"));   // only the fixture's initial cold start
+            Assert.Equal(f.Server.State, f.State);
+            Assert.NotNull(f.Engine.GetBlobIdForNodeId(id));
+        }
+        finally { SyncEngine.CatchUpRetryDelay = previous; }
+    }
+
+    [Fact]
+    public async Task WarmStart_ServerUnreachable_KeepsCacheAndCatchesUpLater()
+    {
+        var previous = SyncEngine.CatchUpRetryDelay;
+        SyncEngine.CatchUpRetryDelay = TimeSpan.FromMilliseconds(50);
+        try
+        {
+            await using var f = await SyncRootFixture.StartAsync(s => s.AddFile(HomeId, "a.txt", "v1"));
+            await f.PollAsync();
+            var cachedState = f.State;
+
+            await f.RestartAsync(whileDown: () =>
+            {
+                f.Server.FailNextChangesCalls = 100;          // still down when we come back
+                f.Server.AddFile(HomeId, "meanwhile.txt", "x"); // a change we will only see later
+            });
+
+            Assert.True(f.Log.Contains("keeping cached state"), f.Log.Tail());
+            Assert.False(f.Log.Contains("falling back to full fetch"), f.Log.Tail());
+            Assert.Equal(cachedState, f.State);
+            Assert.True(File.Exists(f.LocalPath("a.txt")));
+            Assert.False(File.Exists(f.LocalPath("meanwhile.txt")));
+
+            // Network returns: the normal poll catches up from the cached state.
+            f.Server.FailNextChangesCalls = 0;
+            await f.PollAsync();
+            Assert.True(File.Exists(f.LocalPath("meanwhile.txt")));
+            Assert.Equal(f.Server.State, f.State);
+        }
+        finally { SyncEngine.CatchUpRetryDelay = previous; }
+    }
+
+    [Fact]
     public async Task WarmStart_DehydratedPlaceholderWithOddMtime_IsNotUploaded()
     {
         await using var f = await SyncRootFixture.StartAsync(s => s.AddFile(HomeId, "a.txt", "v1"));
