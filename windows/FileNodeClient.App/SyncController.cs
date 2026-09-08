@@ -14,6 +14,7 @@ sealed class SyncController : IDisposable
     private readonly object _lock = new();
     private readonly HashSet<AccountSupervisor> _subscribed = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<string, int> _rejectedByAccount = new();
+    private readonly Dictionary<string, int> _stuckByAccount = new();
 
     // Activity throttle: coalesce per-account activity events into one
     // snapshot rebuild every 100ms (thousands of outbox additions arrive when
@@ -84,6 +85,19 @@ sealed class SyncController : IDisposable
     {
         lock (_lock) return _rejectedByAccount.GetValueOrDefault(accountId);
     }
+
+    /// <summary>Files that keep failing (still retrying) plus rejected ones: what the user should look at.</summary>
+    public int GetAttentionCount(string accountId)
+    {
+        lock (_lock) return _rejectedByAccount.GetValueOrDefault(accountId) + _stuckByAccount.GetValueOrDefault(accountId);
+    }
+
+    public int AttentionFileCount
+    {
+        get { lock (_lock) return _rejectedByAccount.Values.Sum() + _stuckByAccount.Values.Sum(); }
+    }
+
+    public void VerifyAndRepair(string accountId) => _loginManager.VerifyAndRepair(accountId);
 
     public ActivitySnapshot GetActivity(string accountId)
     {
@@ -210,7 +224,10 @@ sealed class SyncController : IDisposable
                 var snapshot = BuildActivitySnapshot(supervisor);
                 if (snapshot == null) continue;
                 lock (_lock)
+                {
                     _rejectedByAccount[accountId] = snapshot.RejectedEntries.Count;
+                    _stuckByAccount[accountId] = snapshot.ErrorEntries.Count(e => e.AttemptCount >= SyncOutbox.StuckAfterAttempts);
+                }
                 Log.SafeInvoke(() => ActivityChanged?.Invoke(snapshot), "SyncController.ActivityChanged");
                 Log.SafeInvoke(() => StatusChanged?.Invoke(), "SyncController.ActivityChanged.Status");
             }

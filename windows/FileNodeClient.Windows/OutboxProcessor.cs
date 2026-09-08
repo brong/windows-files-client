@@ -204,6 +204,10 @@ public class OutboxProcessor : IDisposable
                 _outbox.MarkFailed(change.Id, $"HTTP {code}: {ex.InnerException?.Message ?? ex.Message}");
             }
         }
+        catch (UploadIntegrityException ex)
+        {
+            _outbox.MarkFailed(change.Id, ex.Message);   // transient: the next attempt re-uploads
+        }
         catch (IOException ex) when (change.IsDirtyContent)
         {
             // File locked or still being copied — always retry (backoff caps at 60s)
@@ -786,8 +790,42 @@ public class OutboxProcessor : IDisposable
         }
 
         using var stream = new ProgressStream(fileStream, fileLength, OnProgress, ResetStall);
-        return await _queue.EnqueueAsync(QueuePriority.Background,
+        var uploadedBlobId = await _queue.EnqueueAsync(QueuePriority.Background,
             () => _jmapClient.UploadBlobAsync(stream, contentType, uploadCts.Token), ct);
+        // The chunked path above is validated by the server per chunk (digest:sha);
+        // a raw single-shot POST is not, so check what the server stored (I2).
+        await VerifyUploadedBlobAsync(uploadedBlobId, fileStream, Path.GetFileName(change.LocalPath), ct);
+        return uploadedBlobId;
+    }
+
+    /// <summary>The server's stored blob does not match the bytes we uploaded; re-uploading is the fix.</summary>
+    public sealed class UploadIntegrityException(string message) : IOException(message);
+
+    /// <summary>
+    /// Compare the server's digest of the blob it stored against the local file
+    /// (RELIABILITY I2). Skipped only when the server advertises no digest algorithm.
+    /// </summary>
+    private async Task VerifyUploadedBlobAsync(string blobId, FileStream file, string? fileName, CancellationToken ct)
+    {
+        var algo = _jmapClient.PreferredDigestAlgorithm;
+        if (algo == null) return;
+
+        file.Position = 0;
+        var local = Convert.ToBase64String(algo == "sha" ? await SHA1.HashDataAsync(file, ct) : await SHA256.HashDataAsync(file, ct));
+        var item = await _queue.EnqueueAsync(QueuePriority.Background,
+            () => _jmapClient.GetBlobAsync(blobId, [$"digest:{algo}"], ct: ct), ct);
+        var server = algo == "sha" ? item.DigestSha : item.DigestSha256;
+        if (server == null)
+        {
+            Log.Warn($"{_logPrefix} Outbox: server returned no {algo} digest for uploaded blob {blobId}; cannot verify {fileName}");
+            return;
+        }
+        if (server != local)
+        {
+            Log.Error($"{_logPrefix} Outbox: uploaded blob {blobId} for {fileName} failed verification (server {server}, local {local}) — will re-upload");
+            throw new UploadIntegrityException($"Uploaded content for {fileName} did not match after transfer — retrying");
+        }
+        Log.Debug($"{_logPrefix} Outbox: upload verified for {fileName} ({algo}={local})");
     }
 
     private async Task<bool> ProcessMoveAsync(PendingChange change, CancellationToken ct)

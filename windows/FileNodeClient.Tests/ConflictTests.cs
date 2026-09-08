@@ -116,7 +116,16 @@ public class ConflictTests
 
         SyncEngine.HydratePlaceholder(path);
         File.WriteAllText(path, "local edit");
-        await f.WaitUntilAsync(() => f.Engine.Outbox.HasPendingForNodeId(id) || f.Server.ReplaceCount > 0, "edit queued");
+        try
+        {
+            await f.WaitUntilAsync(() => f.Engine.Outbox.HasPendingForNodeId(id) || f.Server.ReplaceCount > 0, "edit queued");
+        }
+        catch (TimeoutException ex)
+        {
+            var (entries, processing) = f.Engine.Outbox.GetSnapshot();
+            var dump = string.Join(" | ", entries.Select(e => $"path={e.LocalPath} node={e.NodeId} content={e.IsDirtyContent} attempts={e.AttemptCount} err={e.LastError} rejected={e.IsRejected}"));
+            throw new TimeoutException($"{ex.Message}\nOUTBOX[{entries.Length}, processing {processing.Count}]: {dump}\nserver uploads={f.Server.UploadCount} creates={f.Server.CreateCount} replaces={f.Server.ReplaceCount}\nfile mtime={File.GetLastWriteTimeUtc(path):O} attrs={File.GetAttributes(path)}");
+        }
         await f.WaitForOutboxIdleAsync();
 
         Assert.Equal("local edit", f.Server.ContentText(id));

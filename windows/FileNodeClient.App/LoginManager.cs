@@ -425,6 +425,7 @@ sealed class LoginManager : IDisposable
     }
 
     public void SyncNow(string accountId) => FindSupervisor(accountId)?.SyncNow();
+    public void VerifyAndRepair(string accountId) => FindSupervisor(accountId)?.VerifyAndRepair();
 
     public SyncStatus GetAggregateStatus()
     {
@@ -795,12 +796,19 @@ sealed class LoginManager : IDisposable
         var username = session.Client.Session.Username;
         Log.Info($"[Push:{username}] Starting shared push watcher");
 
-        int backoffMs = 30000;
+        // Reconnect backoff (RELIABILITY D5 / DESIGN pitfall #38): the floor is only
+        // restored after a connection has stayed up for StableMs. A connection that
+        // opens and drops within seconds is a flap and must keep backing off, or a
+        // misbehaving link turns into a 1 Hz reconnect storm against the server.
+        const int floorBackoffMs = 5000;
         const int maxBackoffMs = 60000;
+        const int stableMs = 10000;
+        int backoffMs = floorBackoffMs;
         bool wasDisconnected = false;
 
         while (!ct.IsCancellationRequested)
         {
+            var connectedAt = DateTime.UtcNow;
             try
             {
                 await foreach (var (accountId, state) in session.Client.WatchAllAccountChangesAsync(ct))
@@ -811,13 +819,11 @@ sealed class LoginManager : IDisposable
                         NotifyConnectivity(session, restored: true);
                         wasDisconnected = false;
                     }
-                    backoffMs = 30000; // Reset after receiving a successful event
+                    // The supervisor polls only if this state differs from the one it
+                    // last acted on, so a reconnect's replayed state costs nothing.
                     FindSupervisor(accountId)?.PushState(state);
                 }
-
-                // Stream ended normally — reconnect after a short delay
-                Log.Info($"[Push:{username}] SSE stream ended, reconnecting in 5s...");
-                await Task.Delay(5000, ct);
+                Log.Info($"[Push:{username}] SSE stream ended");
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -831,10 +837,13 @@ sealed class LoginManager : IDisposable
                 // offline; poll instead so they stay current.
                 foreach (var s in SupervisorsOf(session))
                     s.PushState("");
-                try { await Task.Delay(backoffMs, ct); }
-                catch (OperationCanceledException) { break; }
-                backoffMs = Math.Min(backoffMs * 2, maxBackoffMs);
             }
+
+            var uptime = DateTime.UtcNow - connectedAt;
+            backoffMs = uptime.TotalMilliseconds >= stableMs ? floorBackoffMs : Math.Min(backoffMs * 2, maxBackoffMs);
+            Log.Info($"[Push:{username}] Reconnecting in {backoffMs / 1000}s (connection lasted {uptime.TotalSeconds:F0}s)");
+            try { await Task.Delay(backoffMs, ct); }
+            catch (OperationCanceledException) { break; }
         }
 
         Log.Info($"[Push:{username}] Push watcher stopped");

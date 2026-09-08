@@ -129,6 +129,24 @@ public class SyncOutbox : IDisposable
         get { lock (_lock) return _entries.Values.Count(e => e.IsRejected); }
     }
 
+    /// <summary>
+    /// After this many consecutive failures (≈10+ minutes at the 60 s backoff cap) a
+    /// transient error stops being "it'll sort itself out" and is shown as needing
+    /// attention, while still retrying (RELIABILITY D4).
+    /// </summary>
+    public const int StuckAfterAttempts = 15;
+
+    public static bool IsStuck(PendingChange e) => !e.IsRejected && e.AttemptCount >= StuckAfterAttempts;
+
+    /// <summary>Re-queue every rejected entry (Verify &amp; Repair). Returns how many.</summary>
+    public int RetryAllRejected()
+    {
+        Guid[] ids;
+        lock (_lock) ids = _entries.Values.Where(e => e.IsRejected).Select(e => e.Id).ToArray();
+        foreach (var id in ids) RetryRejected(id);
+        return ids.Length;
+    }
+
     /// <summary>Delete all persisted state and clear in-memory entries.</summary>
     public void Clear()
     {

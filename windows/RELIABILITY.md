@@ -77,6 +77,22 @@ using this same roadmap):
   non-owners stand down (and take over if the owner dies). (BUG-026.)
 
 Windows progress (on the collapsed `SyncEngine` — one apply path, so each fix is one site):
+- **I2 ✅ done** (1.0.89.0) — after a raw single-shot upload the outbox fetches the
+  server's `digest:sha` for the stored blob and compares it with the local file;
+  a mismatch is a transient failure that re-uploads. Chunked uploads were
+  already server-validated per chunk.
+- **D5 ✅ done** (1.0.89.0) — part 1 was already true (the supervisor polls only on
+  a changed state value); part 2: the push watcher's reconnect backoff returns
+  to its 5 s floor only after a connection has stayed up 10 s, otherwise doubles
+  to 60 s. Part 3 (per-login lease) does not apply to a single process.
+- **R1 ✅ done** (1.0.89.0) — `SyncEngine.VerifyAndRepairAsync` on the sync loop:
+  D2-safe reconcile (re-create missing, prune gone), untracked-file scan, retry
+  every rejected upload; summary shown in the account status.
+- **R5 ✅ done** (1.0.89.0) — the node cache records its entry count; a cache that
+  parses but lost entries is ignored rather than trusted.
+- **D4, time-based half ✅** (1.0.89.0) — an entry still failing after 15 attempts
+  counts toward "N files need attention" (tray, account row) and its Activity row
+  reads "Still failing (n): reason", while continuing to retry.
 - **V1 ✅ done** (1.0.88.0) — the engine records `LastServerSyncUtc` after every
   clean populate/reconcile/poll (never after a failed catch-up). Tray tooltip
   and account rows say "Up to date, synced 5 min ago"; past an hour idle they
@@ -143,17 +159,17 @@ Apple `JmapClient`/`FuseMount` targets are unit-tested via `swift test`.
 | Item | Apple reference (commit) | Windows target / note |
 |---|---|---|
 | 🔴 I1 download digest enforced | `cff4881` (`downloadBlob` + `serverBlobDigestSha`) | ✅ done 1.0.85.0 — buffered paths reject before transfer; streaming holds back the last chunk, fails the read on mismatch and dehydrates on close; digest-unavailable is a failure |
-| 🟠 I2 upload digest re-verified | `4d32623` (`verifyUploadedBlob`) | upload path (`OutboxProcessor`/`JmapClient`) — verify single-shot/direct-PUT results |
+| 🟠 I2 upload digest re-verified | `4d32623` (`verifyUploadedBlob`) | ✅ done 1.0.89.0 — single-shot uploads compare the server's digest to the local file; mismatch re-uploads |
 | 🔴 I3 conflict copy (dirty + server change) | already on Apple (`onExists:newest`/`rename`, `DECISIONS.md` #12) | ✅ done 1.0.80.0 |
 | 🟠 D1 disk↔cache↔server verify | partial on Apple | ✅ done 1.0.80.0 (`PopulateFromCacheAsync`) |
 | 🟠 D2 stable enumeration / prune | Apple generation-counter BFS (`NodeDatabase`) | ✅ done 1.0.80.0 |
 | 🟠 D3 SSE idle-timeout | `9618a74` (`consumeWithIdleTimeout`) | ✅ done 1.0.86.0 — 150 s idle timeout on the SSE read (2.5× ping) + 15-minute safety poll per account |
 | 🟠 D4 permanent-error classification | `c733227` (`JmapError.isRetriable`) | ✅ done 1.0.86.0 — `JmapErrorException.IsPermanent`; outbox rejects with a plain-language reason |
-| 🟠 D5 push: poll-on-change + backoff | `0328b70`, `910fa20` | Windows SSE handler — parts 1&2 apply. **Part 3 (per-login lease) likely N/A**: Windows runs one Service process, not one per account |
-| 🟡 R1 Verify & Repair | `a7ed026` (`verifyAgainstServer` + force-reconcile) | add a user action: clear state token → full reconcile + retry rejected |
+| 🟠 D5 push: poll-on-change + backoff | `0328b70`, `910fa20` | ✅ done 1.0.89.0 — supervisor already polled only on a changed state; reconnect backoff now resets only after a 10 s stable connection (5 s → 60 s). Part 3 N/A (one process) |
+| 🟡 R1 Verify & Repair | `a7ed026` (`verifyAgainstServer` + force-reconcile) | ✅ done 1.0.89.0 — "Verify & Repair" button: consistent reconcile + untracked scan + retry rejected, reports "Verified N, repaired M, retried R" |
 | 🟡 R2 crash recovery | N/A on Apple (OS-managed) | Windows: single tray process since the Service merge — restart on crash is the MSIX startup task / user relaunch; make restart recover cleanly from persisted outbox + cache |
 | 🟡 R3 state-token crash window | already safe on Apple (token after changes) | ✅ done 1.0.80.0 |
-| 🟡 R5 cache corruption fallback | Apple SQLite WAL + temp-DB fallback | `NodeCache.cs` load — add integrity check + fallback |
+| 🟡 R5 cache corruption fallback | Apple SQLite WAL + temp-DB fallback | ✅ done 1.0.89.0 — entryCount header checked on load; a damaged cache is ignored (full fetch) |
 | 🟡 V1 last-synced signal | `dbbc196` | ✅ done 1.0.88.0 — `SyncEngine.LastServerSyncUtc` → tray tooltip, account row, details; stale after 1 h |
 | 🟠 V2/V3 surface failure reasons | `943b4f7` | ✅ done 1.0.88.0 — rejected rows show the reason, retrying rows show attempt + error, tray/account row count files needing attention |
 | ⚡ Bulk + hybrid first-paint populate | `ecd030f` (`reachableFromHome`) + DESIGN §Initial Populate | Windows already bulk-loads (`PopulateFullAsync`); add hybrid first-paint |
@@ -187,7 +203,7 @@ transient), and after N consecutive failures surface it as a per-file error
 (see V2). Applies to all paths that call `VerifyDigest` (Blob/get, Range, full,
 streaming — `SyncCallbacks.cs:779/819/840/877/962`).
 
-### 🔴 I2. Upload content is never verified after combine *(reported)*
+### 🔴 I2. Upload content is never verified after combine *(reported)* — **Windows ✅ 1.0.89.0**
 
 The client sends `digest:sha` with `Blob/set` but does not confirm the stored
 blob's digest matches the local file after the node is updated. A blob
@@ -281,7 +297,7 @@ reach the UI (see V2).
 
 ## Pillar 3 — Recovery (an understandable way back)
 
-### 🟡 R1. No verify-and-repair / re-download action
+### 🟡 R1. No verify-and-repair / re-download action — **Windows ✅ 1.0.89.0**
 
 There is no user-facing "something looks wrong — fix it." The only blunt tools
 are "Clean" (wipes the cache, full re-sync) and "Restart Service."
@@ -324,7 +340,7 @@ reinstall (DESIGN pitfall #16), causing confusing startup failures.
 orphans (or offer the user a one-click cleanup). Already partially detected in
 `LoginManager`; complete the cleanup path.
 
-### 🟡 R5. Cache corruption is undetected on load
+### 🟡 R5. Cache corruption is undetected on load — **Windows ✅ 1.0.89.0**
 
 Cache writes are atomic (temp+rename ✓), but load only checks a version int. A
 truncated-but-parseable cache is trusted, silently dropping entries.

@@ -72,6 +72,11 @@ public class SyncEngine : IDisposable
     /// <summary>The engine wants a poll soon (e.g. a deferred server change is ready).</summary>
     public event Action? SyncRequested;
 
+    // Directories to scan for the "Always keep on this device" pin once the sync root
+    // is connected. Populate collects them; hydrating before Connect() fails every
+    // file with "cloud file provider is not running" and only the retry pass works.
+    private IReadOnlyList<string>? _pinScanDirectories;
+
     /// <summary>
     /// When we last completed a clean round-trip with the server (populate, reconcile
     /// or poll). Null until the first one. Not touched by a failed catch-up, so a
@@ -426,6 +431,41 @@ public class SyncEngine : IDisposable
         }
     }
 
+    /// <summary>
+    /// Verify &amp; Repair (RELIABILITY R1): a consistent full reconcile against the
+    /// server (create what's missing, prune what's gone, only on a stable enumeration),
+    /// pick up anything untracked on disk, and re-queue every rejected upload. Runs
+    /// on the sync loop like a poll. Returns the new state token and what it did.
+    /// </summary>
+    public async Task<(string State, int Checked, int Repaired, int Retried)> VerifyAndRepairAsync(CancellationToken ct)
+    {
+        Log.Info($"{_logPrefix} Verify & Repair requested");
+        ReportSyncProgress("Verifying...");
+        try
+        {
+            _repairs = 0;
+            var state = await ReconcileFromServerAsync(ct);
+            var checkedCount = _nodeIdToPath.Count;
+            ReconcileLocalChanges();
+            var retried = _outbox.RetryAllRejected();
+            SaveNodeCache(state);
+            LastServerSyncUtc = DateTime.UtcNow;
+            LastRepairSummary = $"Verified {checkedCount:N0} items, repaired {_repairs}, retried {retried}";
+            Log.Info($"{_logPrefix} Verify & Repair: {LastRepairSummary}");
+            Log.SafeInvoke(() => StatusDetailChanged?.Invoke(LastRepairSummary), "SyncEngine.VerifyAndRepair");
+            return (state, checkedCount, _repairs, retried);
+        }
+        finally
+        {
+            ClearSyncProgress();
+            ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_IDLE);
+        }
+    }
+
+    /// <summary>Plain-language result of the last Verify &amp; Repair, for the UI.</summary>
+    public string? LastRepairSummary { get; private set; }
+    private int _repairs;
+
     /// <summary>Clear persisted outbox state (e.g. after --clean). Call before PopulateAsync.</summary>
     public void ClearOutbox() => _outbox.Clear();
 
@@ -511,6 +551,12 @@ public class SyncEngine : IDisposable
         _fileChangeWatcher.Start();
         _outboxProcessor.Start();
         ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_IDLE);
+
+        if (_pinScanDirectories is { } dirs)
+        {
+            _pinScanDirectories = null;
+            DetectAndHydratePinnedDirectories(dirs);
+        }
     }
 
     public async Task<string> PopulateAsync(CancellationToken ct)
@@ -835,6 +881,7 @@ public class SyncEngine : IDisposable
         _pathToNodeId.TryRemove(localPath, out _);
         _readOnlyPaths.TryRemove(localPath, out _);
         Log.Info($"{_logPrefix}  {reason}: {localPath}");
+        Interlocked.Increment(ref _repairs);
         using (SuspendFolderProtection(Path.GetDirectoryName(localPath)))
             DeleteLocalItem(localPath);
     }
@@ -874,6 +921,7 @@ public class SyncEngine : IDisposable
         {
             using (SuspendFolderProtection(parentPath))
                 _placeholderManager.CreatePlaceholders(parentPath, toCreate.ToArray(), localNames);
+            Interlocked.Add(ref _repairs, toCreate.Count);
         }
 
         foreach (var (node, path) in toApply)
@@ -1000,7 +1048,7 @@ public class SyncEngine : IDisposable
         EnsureTreeDirectoriesFull(tree);
         ApplyWriteProtections();
 
-        DetectAndHydratePinnedDirectories(tree.Select(t => t.LocalParentPath));
+        _pinScanDirectories = tree.Select(t => t.LocalParentPath).ToList();
     }
 
     private void DetectAndHydratePinnedDirectories(IEnumerable<string> directoryPaths)
@@ -1131,8 +1179,8 @@ public class SyncEngine : IDisposable
 
         ApplyWriteProtections();
 
-        // Detect and hydrate pinned directories
-        DetectAndHydratePinnedDirectories(directories);
+        // Pinned directories are hydrated after Connect() (see _pinScanDirectories)
+        _pinScanDirectories = directories;
 
         SaveNodeCache(newState);
         ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_IDLE);

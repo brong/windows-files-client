@@ -49,6 +49,8 @@ public sealed class FakeJmapClient : IJmapClient
     public int? TruncateDownloadsTo { get; set; }
     /// <summary>Make the next N FileNode/changes calls fail with a network error (server unreachable).</summary>
     public int FailNextChangesCalls { get; set; }
+    /// <summary>Corrupt the next upload in transit: the server stores (and digests) different bytes than were sent.</summary>
+    public bool CorruptNextUpload { get; set; }
 
     // ---- Observability ----
 
@@ -310,7 +312,12 @@ public sealed class FakeJmapClient : IJmapClient
         using var ms = new MemoryStream();
         await data.CopyToAsync(ms, ct);
         await WaitIfHeldAsync(ct);
-        lock (_lock) { var id = StoreBlob(ms.ToArray()); UploadedBlobIds.Add(id); return id; }
+        lock (_lock)
+        {
+            var bytes = ms.ToArray();
+            if (CorruptNextUpload && bytes.Length > 0) { CorruptNextUpload = false; bytes[0] ^= 0xFF; }
+            var id = StoreBlob(bytes); UploadedBlobIds.Add(id); return id;
+        }
     }
 
     public Task<BlobDataItem> GetBlobAsync(string blobId, string[] properties, long? offset = null, long? length = null, CancellationToken ct = default)

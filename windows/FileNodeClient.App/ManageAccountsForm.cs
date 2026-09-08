@@ -40,6 +40,7 @@ sealed partial class ManageAccountsForm : Form
     private readonly Button _pauseButton;
     private readonly Button _resumeButton;
     private readonly Button _syncNowButton;
+    private Button _verifyButton = null!;
     private readonly ListView _activityListView;
 
     // Detail panel controls — non-synced account selected
@@ -314,8 +315,14 @@ sealed partial class ManageAccountsForm : Form
 
         _syncNowButton = new Button { Text = "Sync Now", AutoSize = true, Height = 30, Margin = new Padding(0, 0, 0, 6), Visible = false };
         _syncNowButton.Click += OnSyncNowClicked;
+        _verifyButton = new Button { Text = "Verify && Repair", AutoSize = true, Height = 30, Margin = new Padding(0, 0, 0, 6), Visible = false };
+        _verifyButton.Click += (_, _) =>
+        {
+            if (!_operationInProgress && _treeView.SelectedNode?.Tag is AccountNode { IsSynced: true } an)
+                _sync.VerifyAndRepair(an.AccountId);
+        };
 
-        syncedButtonFlow.Controls.AddRange([_openFolderButton, _pauseButton, _resumeButton, _syncNowButton, _detachButton, _removeButton, _refreshButton, _cleanButton]);
+        syncedButtonFlow.Controls.AddRange([_openFolderButton, _pauseButton, _resumeButton, _syncNowButton, _verifyButton, _detachButton, _removeButton, _refreshButton, _cleanButton]);
         syncedTopLayout.Controls.Add(syncedButtonFlow);
 
         _syncedAccountPanel.Controls.Add(syncedTopLayout);
@@ -572,7 +579,7 @@ sealed partial class ManageAccountsForm : Form
                         var isMissing = loginRefreshed && discoveredIds != null
                             && !discoveredIds.Contains(account.AccountId);
 
-                        var rejCount = _sync.GetRejectedCount(account.AccountId);
+                        var rejCount = _sync.GetAttentionCount(account.AccountId);
                         var statusText = isMissing ? "Missing on server" : account.Status switch
                         {
                             AccountStatus.Paused when account.PauseReason?.Contains("DiskFull") == true => "Disk full",
@@ -933,9 +940,10 @@ sealed partial class ManageAccountsForm : Form
                 var tooltip = entry.LocalPath ?? entry.NodeId ?? "";
                 if (entry.LastError != null) tooltip += $"\nError: {entry.LastError}";
 
+                var verb = entry.AttemptCount >= SyncOutbox.StuckAfterAttempts ? "Still failing" : "Retrying";
                 var retrying = entry.LastError != null
-                    ? $"Retrying ({entry.AttemptCount}): {SyncAge.Shorten(entry.LastError, 50)}"
-                    : $"Retrying ({entry.AttemptCount})";
+                    ? $"{verb} ({entry.AttemptCount}): {SyncAge.Shorten(entry.LastError, 50)}"
+                    : $"{verb} ({entry.AttemptCount})";
                 desired.Add(($"outbox:{entry.Id}",
                     PrefixName(displayName, fileName), action, retrying,
                     Color.FromArgb(200, 120, 0), tooltip, null, 10, false, null));
@@ -1328,6 +1336,7 @@ sealed partial class ManageAccountsForm : Form
             _refreshButton.Visible = false;
             _cleanButton.Visible = false;
             _openFolderButton.Visible = false;
+            _verifyButton.Visible = false;
         }
         else
         {
@@ -1335,10 +1344,12 @@ sealed partial class ManageAccountsForm : Form
             var isUserPaused = info.PauseReason?.Contains("UserRequested") == true;
             var isMetered = info.PauseReason?.Contains("MeteredConnection") == true;
             var isPaused = info.Status == AccountStatus.Paused;
-            var rejectedCount = _sync.GetRejectedCount(accountNode.AccountId);
+            var rejectedCount = _sync.GetAttentionCount(accountNode.AccountId);
 
             _accountStatusLabel.Text = info.Status switch
             {
+                AccountStatus.Idle when info.StatusDetail?.StartsWith("Verified ") == true && rejectedCount == 0 =>
+                    $"Status: {info.StatusDetail}",
                 AccountStatus.Paused when isDiskFull =>
                     "Status: Paused \u2014 disk space is low. Free up space to resume.",
                 AccountStatus.Paused when isUserPaused && isMetered =>
@@ -1371,6 +1382,7 @@ sealed partial class ManageAccountsForm : Form
             _resumeButton.Visible = isUserPaused;
             // Sync Now available when paused (metered or user), but disabled when disk full
             _syncNowButton.Visible = isPaused && !isDiskFull;
+            _verifyButton.Visible = !isDiskFull;
         }
         _syncFolderLabel.Text = $"Folder: {info.SyncRootPath}";
 

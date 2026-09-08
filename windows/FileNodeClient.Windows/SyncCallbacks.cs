@@ -359,6 +359,12 @@ internal class SyncCallbacks
 
             Log.Info($"{_logPrefix} FETCH_DATA: buffered {data.Length} bytes for node={nodeId}, dataStartOffset={dataStartOffset}, totalSize={totalSize}");
 
+            // Capture the mtime BEFORE transferring. Hydration does not change it, and
+            // this code runs on a background thread after the reader's CfHydratePlaceholder
+            // has already returned: reading it afterwards can pick up an edit the reader
+            // made in the meantime, and the watcher would then discard that edit as our
+            // own echo (mtime equal) — an unsynced local change.
+            var mtimeBeforeTransfer = GetLastWriteTimeSafe(fullPath);
             int sourceOffset = (int)(requiredOffset - dataStartOffset);
             TransferData(cbInfo, data, sourceOffset, requiredOffset, requiredLength, totalSize, cts.Token);
 
@@ -366,7 +372,7 @@ internal class SyncCallbacks
 
             // Record that we just hydrated this file so SyncEngine doesn't
             // re-upload it when FileSystemWatcher fires a Changed event.
-            RecentlyHydrated[nodeId] = (GetLastWriteTimeSafe(fullPath), DateTime.UtcNow);
+            RecentlyHydrated[nodeId] = (mtimeBeforeTransfer, DateTime.UtcNow);
         }
         catch (OperationCanceledException)
         {
@@ -978,6 +984,7 @@ internal class SyncCallbacks
 
                 var stream = await _queue.EnqueueAsync(QueuePriority.Interactive,
                     () => _jmapClient.DownloadBlobAsync(blobId, node.Type, node.Name, ct), ct);
+                var mtimeBeforeTransfer = GetLastWriteTimeSafe(fullPath);   // see the buffered path
 
                 using (stream)
                 {
@@ -1075,7 +1082,7 @@ internal class SyncCallbacks
 
                 if (nodeId != null)
                 {
-                    RecentlyHydrated[nodeId] = (GetLastWriteTimeSafe(fullPath), DateTime.UtcNow);
+                    RecentlyHydrated[nodeId] = (mtimeBeforeTransfer, DateTime.UtcNow);
                 }
             }
             catch (OperationCanceledException)

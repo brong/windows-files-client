@@ -101,7 +101,7 @@ sealed class TrayIcon : IDisposable
         {
             var a = accounts[0];
             (color, tooltip) = FormatSingleAccountTooltip(a.Username, a.Status, a.PendingCount, a.StatusDetail, a.PauseReason,
-                a.LastSyncedUtc, _sync.GetRejectedCount(a.AccountId));
+                a.LastSyncedUtc, _sync.GetAttentionCount(a.AccountId));
         }
         else
         {
@@ -116,7 +116,7 @@ sealed class TrayIcon : IDisposable
                 _ => Color.Gray,
             };
 
-            var rejected = _sync.RejectedFileCount;
+            var rejected = _sync.AttentionFileCount;
             var now = DateTime.UtcNow;
             DateTime? oldestSync = accounts.Any(a => a.LastSyncedUtc == null) ? null : accounts.Min(a => a.LastSyncedUtc);
             if (status == AccountStatus.Idle && rejected > 0) color = Color.Red;

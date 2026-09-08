@@ -43,6 +43,10 @@ public record CacheSnapshot
     [JsonPropertyName("state")]
     public string State { get; init; } = "";
 
+    /// <summary>Number of entries written; a mismatch on load means a damaged cache (RELIABILITY R5).</summary>
+    [JsonPropertyName("entryCount")]
+    public int EntryCount { get; init; }
+
     [JsonPropertyName("entries")]
     public Dictionary<string, CacheEntry> Entries { get; init; } = new();
 }
@@ -72,6 +76,15 @@ public static class NodeCache
                 || string.IsNullOrEmpty(snapshot.HomeNodeId)
                 || string.IsNullOrEmpty(snapshot.State))
                 return null;
+
+            // A cache that parses but lost entries (partial write, disk fault) must not
+            // be trusted: missing entries would look like deletions to reconcile.
+            // Caches written before entryCount existed carry 0 and are accepted.
+            if (snapshot.EntryCount > 0 && snapshot.EntryCount != snapshot.Entries.Count)
+            {
+                Log.Error($"Node cache damaged: header says {snapshot.EntryCount} entries, found {snapshot.Entries.Count} — ignoring it");
+                return null;
+            }
 
             return snapshot;
         }
@@ -144,6 +157,7 @@ public static class NodeCache
             HomeNodeId = homeNodeId,
             TrashNodeId = trashNodeId,
             State = state,
+            EntryCount = entries.Count,
             Entries = entries,
         };
 

@@ -164,6 +164,11 @@ sealed class AccountSupervisor : IDisposable
     /// </summary>
     internal void SyncNow() => _stateChannel.Writer.TryWrite(SyncNowSentinel);
 
+    private const string VerifyRepairSentinel = "\x01VERIFY_REPAIR";
+    /// <summary>User-requested Verify &amp; Repair; runs on the sync loop like a poll.</summary>
+    internal void VerifyAndRepair() => _stateChannel.Writer.TryWrite(VerifyRepairSentinel);
+    public string? LastRepairSummary => _engine?.LastRepairSummary;
+
     internal void NotifyConnectivityLost() => _engine?.ReportConnectivityLost();
     internal void NotifyConnectivityRestored() => _engine?.ReportConnectivityRestored();
 
@@ -248,6 +253,21 @@ sealed class AccountSupervisor : IDisposable
                         Log.Debug($"[{_displayName}] No push for {SafetyPollInterval.TotalMinutes:F0} min — safety poll");
                         newState = "";   // forced poll
                     }
+                }
+                var isVerifyRepair = newState == VerifyRepairSentinel;
+                if (isVerifyRepair)
+                {
+                    try
+                    {
+                        var (state, _, _, _) = await _engine!.VerifyAndRepairAsync(ct);
+                        currentState = state;
+                        pollBackoffMs = 0;
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        Log.Error($"[{_displayName}] Verify & Repair failed: {ex.Message}");
+                    }
+                    continue;
                 }
                 var isSyncNow = newState == SyncNowSentinel;
 
