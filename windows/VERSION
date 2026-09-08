@@ -2,6 +2,7 @@
 #   1. This file (VERSION)
 #   2. windows/FileNodeClient.Package/AppxManifest.xml  (<Identity Version="...">)
 
+1.0.89.0 2026-09-08  Verify & Repair button; uploads verified against the server digest; push reconnect backoff; cache integrity check; files still failing after 15 attempts flagged for attention; pinned hydration after connect; fix edits made right after hydration being dropped as echoes
 1.0.88.0 2026-09-08  "Synced N min ago" in tray and account rows with a stall warning after 1 h; rejected files show their reason inline; tray counts files needing attention
 1.0.87.0 2026-09-08  Warm start retries a transient catch-up failure and keeps the cache instead of re-populating every placeholder
 1.0.86.0 2026-09-08  Permanent server errors are rejected with a reason instead of retried forever; SSE idle timeout (150 s) and 15-minute safety poll
