@@ -1,5 +1,6 @@
 using System.Drawing;
 using FileNodeClient.Logging;
+using FileNodeClient.Windows;
 using FileNodeClient.Jmap.Auth;
 
 namespace FileNodeClient.App;
@@ -578,7 +579,9 @@ sealed partial class ManageAccountsForm : Form
                             AccountStatus.Paused when account.PauseReason?.Contains("UserRequested") == true => "Paused",
                             AccountStatus.Paused when account.PauseReason?.Contains("MeteredConnection") == true => "Metered",
                             AccountStatus.Idle when account.PendingCount > 0 => $"{account.PendingCount} pending",
-                            AccountStatus.Idle when rejCount > 0 => rejCount == 1 ? "1 file rejected" : $"{rejCount} files rejected",
+                            AccountStatus.Idle when rejCount > 0 => rejCount == 1 ? "1 file needs attention" : $"{rejCount} files need attention",
+                            AccountStatus.Idle when SyncAge.IsStale(account.LastSyncedUtc, DateTime.UtcNow) =>
+                                $"Last {SyncAge.Describe(account.LastSyncedUtc, DateTime.UtcNow)} \u2014 may be stalled",
                             AccountStatus.Idle => "Up to date",
                             AccountStatus.Syncing => "Syncing",
                             AccountStatus.Error => "Error",
@@ -930,8 +933,11 @@ sealed partial class ManageAccountsForm : Form
                 var tooltip = entry.LocalPath ?? entry.NodeId ?? "";
                 if (entry.LastError != null) tooltip += $"\nError: {entry.LastError}";
 
+                var retrying = entry.LastError != null
+                    ? $"Retrying ({entry.AttemptCount}): {SyncAge.Shorten(entry.LastError, 50)}"
+                    : $"Retrying ({entry.AttemptCount})";
                 desired.Add(($"outbox:{entry.Id}",
-                    PrefixName(displayName, fileName), action, $"Error ({entry.AttemptCount})",
+                    PrefixName(displayName, fileName), action, retrying,
                     Color.FromArgb(200, 120, 0), tooltip, null, 10, false, null));
             }
 
@@ -944,7 +950,8 @@ sealed partial class ManageAccountsForm : Form
                 if (entry.RejectionReason != null) tooltip += $"\nRejected: {entry.RejectionReason}";
 
                 desired.Add(($"outbox:{entry.Id}",
-                    PrefixName(displayName, fileName), action, "Rejected",
+                    PrefixName(displayName, fileName), action,
+                    entry.RejectionReason != null ? SyncAge.Shorten(entry.RejectionReason, 60) : "Couldn't sync",
                     Color.Red, tooltip, null, 5, true,
                     new ActivityItemTag(accountId, entry.Id, entry.LocalPath)));
             }
@@ -1342,9 +1349,11 @@ sealed partial class ManageAccountsForm : Form
                     "Status: Metered connection \u2014 uploads paused",
                 AccountStatus.Idle when info.PendingCount > 0 => $"Status: {info.PendingCount} pending",
                 AccountStatus.Idle when rejectedCount > 0 => rejectedCount == 1
-                    ? "Status: 1 file rejected"
-                    : $"Status: {rejectedCount} files rejected",
-                AccountStatus.Idle => "Status: Up to date",
+                    ? $"Status: 1 file couldn't sync \u2014 see Activity for the reason ({SyncAge.Describe(info.LastSyncedUtc, DateTime.UtcNow)})"
+                    : $"Status: {rejectedCount} files couldn't sync \u2014 see Activity for the reasons ({SyncAge.Describe(info.LastSyncedUtc, DateTime.UtcNow)})",
+                AccountStatus.Idle when SyncAge.IsStale(info.LastSyncedUtc, DateTime.UtcNow) =>
+                    $"Status: Last {SyncAge.Describe(info.LastSyncedUtc, DateTime.UtcNow)} \u2014 no word from the server since; try Sync Now",
+                AccountStatus.Idle => $"Status: Up to date ({SyncAge.Describe(info.LastSyncedUtc, DateTime.UtcNow)})",
                 AccountStatus.Syncing => "Status: Syncing",
                 AccountStatus.Error => $"Status: Error \u2014 {info.StatusDetail}",
                 AccountStatus.Disconnected => "Status: Offline",

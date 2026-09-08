@@ -241,7 +241,8 @@ sealed class SyncController : IDisposable
             s.PendingCount,
             s.QuotaUsed,
             s.QuotaLimit,
-            s.PauseReason != SyncPauseReason.None ? s.PauseReason.ToString() : null);
+            s.PauseReason != SyncPauseReason.None ? s.PauseReason.ToString() : null,
+            s.LastSyncedUtc);
     }
 
     private static AccountStatus MapStatus(SyncStatus status) => status switch

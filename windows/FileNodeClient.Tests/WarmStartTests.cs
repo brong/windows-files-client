@@ -133,6 +133,7 @@ public class WarmStartTests
             Assert.True(f.Log.Contains("keeping cached state"), f.Log.Tail());
             Assert.False(f.Log.Contains("falling back to full fetch"), f.Log.Tail());
             Assert.Equal(cachedState, f.State);
+            Assert.Null(f.Engine.LastServerSyncUtc);   // honesty: we have not actually heard from the server
             Assert.True(File.Exists(f.LocalPath("a.txt")));
             Assert.False(File.Exists(f.LocalPath("meanwhile.txt")));
 
@@ -141,6 +142,7 @@ public class WarmStartTests
             await f.PollAsync();
             Assert.True(File.Exists(f.LocalPath("meanwhile.txt")));
             Assert.Equal(f.Server.State, f.State);
+            Assert.NotNull(f.Engine.LastServerSyncUtc);
         }
         finally { SyncEngine.CatchUpRetryDelay = previous; }
     }

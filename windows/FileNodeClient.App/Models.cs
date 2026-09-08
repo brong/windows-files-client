@@ -18,7 +18,8 @@ public record AccountInfo(
     int PendingCount,
     long? QuotaUsed = null,
     long? QuotaLimit = null,
-    string? PauseReason = null);
+    string? PauseReason = null,
+    DateTime? LastSyncedUtc = null);
 
 public record OutboxEntry(
     Guid Id,

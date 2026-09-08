@@ -44,6 +44,7 @@ sealed class AccountSupervisor : IDisposable
 
     public SyncStatus Status { get; private set; }
     public string? StatusDetail { get; private set; }
+    public DateTime? LastSyncedUtc => _engine?.LastServerSyncUtc;
     public int PendingCount { get; private set; }
     public SyncOutbox? Outbox => _engine?.Outbox;
     public long? QuotaUsed { get; private set; }

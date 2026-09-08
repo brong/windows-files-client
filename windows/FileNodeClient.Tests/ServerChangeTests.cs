@@ -25,6 +25,8 @@ public class ServerChangeTests
         Assert.Equal(12, new FileInfo(f.LocalPath("Docs", "report.txt")).Length);
         Assert.Equal(1, new FileInfo(f.LocalPath("top.txt")).Length);
         Assert.Empty(f.Log.Errors);
+        Assert.NotNull(f.Engine.LastServerSyncUtc);
+        Assert.InRange(DateTime.UtcNow - f.Engine.LastServerSyncUtc!.Value, TimeSpan.Zero, TimeSpan.FromMinutes(1));
     }
 
     [Fact]

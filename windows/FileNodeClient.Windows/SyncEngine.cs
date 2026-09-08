@@ -72,6 +72,13 @@ public class SyncEngine : IDisposable
     /// <summary>The engine wants a poll soon (e.g. a deferred server change is ready).</summary>
     public event Action? SyncRequested;
 
+    /// <summary>
+    /// When we last completed a clean round-trip with the server (populate, reconcile
+    /// or poll). Null until the first one. Not touched by a failed catch-up, so a
+    /// stalled account stops looking up to date (RELIABILITY V1).
+    /// </summary>
+    public DateTime? LastServerSyncUtc { get; private set; }
+
     public string SyncRootPath => _syncRootPath;
     public SyncOutbox Outbox => _outbox;
 
@@ -590,6 +597,7 @@ public class SyncEngine : IDisposable
         }
 
 
+        LastServerSyncUtc = DateTime.UtcNow;
         SaveNodeCache(state);
         ClearSyncProgress();
         ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_IDLE);
@@ -1226,6 +1234,7 @@ public class SyncEngine : IDisposable
         EnsureTreeDirectoriesFull(tree);
         ApplyWriteProtections();
 
+        LastServerSyncUtc = DateTime.UtcNow;
         return state;
     }
 
@@ -1280,6 +1289,7 @@ public class SyncEngine : IDisposable
             }
         }
 
+        LastServerSyncUtc = DateTime.UtcNow;
         ReportStatus(CF_SYNC_PROVIDER_STATUS.CF_PROVIDER_STATUS_IDLE);
         return (state, quotas);
     }

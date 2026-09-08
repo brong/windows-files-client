@@ -100,7 +100,8 @@ sealed class TrayIcon : IDisposable
         else if (accounts.Count == 1)
         {
             var a = accounts[0];
-            (color, tooltip) = FormatSingleAccountTooltip(a.Username, a.Status, a.PendingCount, a.StatusDetail, a.PauseReason);
+            (color, tooltip) = FormatSingleAccountTooltip(a.Username, a.Status, a.PendingCount, a.StatusDetail, a.PauseReason,
+                a.LastSyncedUtc, _sync.GetRejectedCount(a.AccountId));
         }
         else
         {
@@ -115,11 +116,18 @@ sealed class TrayIcon : IDisposable
                 _ => Color.Gray,
             };
 
+            var rejected = _sync.RejectedFileCount;
+            var now = DateTime.UtcNow;
+            DateTime? oldestSync = accounts.Any(a => a.LastSyncedUtc == null) ? null : accounts.Min(a => a.LastSyncedUtc);
+            if (status == AccountStatus.Idle && rejected > 0) color = Color.Red;
+            else if (status == AccountStatus.Idle && pendingCount == 0 && SyncAge.IsStale(oldestSync, now)) color = Color.FromArgb(200, 120, 0);
             var statusText = status switch
             {
                 AccountStatus.Paused => "Paused",
+                AccountStatus.Idle when rejected > 0 => $"{rejected} {(rejected == 1 ? "file needs" : "files need")} attention",
                 AccountStatus.Idle when pendingCount > 0 => $"{pendingCount} pending",
-                AccountStatus.Idle => "Up to date",
+                AccountStatus.Idle when SyncAge.IsStale(oldestSync, now) => $"Last {SyncAge.Describe(oldestSync, now)} (may be stalled)",
+                AccountStatus.Idle => $"Up to date, {SyncAge.Describe(oldestSync, now)}",
                 AccountStatus.Syncing => "Syncing...",
                 AccountStatus.Error => "Error",
                 AccountStatus.Disconnected => "Offline",
@@ -162,10 +170,12 @@ sealed class TrayIcon : IDisposable
         SetIconWithDot(color);
     }
 
-    private static (Color color, string tooltip) FormatSingleAccountTooltip(
-        string username, AccountStatus status, int pendingCount, string? detail, string? pauseReason)
+    internal static (Color color, string tooltip) FormatSingleAccountTooltip(
+        string username, AccountStatus status, int pendingCount, string? detail, string? pauseReason,
+        DateTime? lastSyncedUtc = null, int rejectedCount = 0)
     {
         var pendingSuffix = pendingCount > 0 ? $" ({pendingCount} pending)" : "";
+        var now = DateTime.UtcNow;
 
         var (color, defaultTooltip) = status switch
         {
@@ -175,9 +185,13 @@ sealed class TrayIcon : IDisposable
                 (Color.FromArgb(200, 120, 0), $"{username} - Metered connection"),
             AccountStatus.Paused =>
                 (Color.FromArgb(200, 120, 0), $"{username} - Paused"),
+            AccountStatus.Idle when rejectedCount > 0 =>
+                (Color.Red, $"{username} - {rejectedCount} {(rejectedCount == 1 ? "file needs" : "files need")} attention"),
             AccountStatus.Idle when pendingCount > 0 =>
                 (Color.DodgerBlue, $"{username} - {pendingCount} pending changes"),
-            AccountStatus.Idle => (Color.LimeGreen, $"{username} - Up to date"),
+            AccountStatus.Idle when SyncAge.IsStale(lastSyncedUtc, now) =>
+                (Color.FromArgb(200, 120, 0), $"{username} - Last {SyncAge.Describe(lastSyncedUtc, now)} (may be stalled)"),
+            AccountStatus.Idle => (Color.LimeGreen, $"{username} - Up to date, {SyncAge.Describe(lastSyncedUtc, now)}"),
             AccountStatus.Syncing => (Color.DodgerBlue, $"{username} - Syncing..."),
             AccountStatus.Error => (Color.Red, $"{username} - Error"),
             AccountStatus.Disconnected when pendingCount > 0 =>

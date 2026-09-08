@@ -77,6 +77,16 @@ using this same roadmap):
   non-owners stand down (and take over if the owner dies). (BUG-026.)
 
 Windows progress (on the collapsed `SyncEngine` — one apply path, so each fix is one site):
+- **V1 ✅ done** (1.0.88.0) — the engine records `LastServerSyncUtc` after every
+  clean populate/reconcile/poll (never after a failed catch-up). Tray tooltip
+  and account rows say "Up to date, synced 5 min ago"; past an hour idle they
+  turn orange with "Last synced 3 h ago (may be stalled)".
+- **V2/V3 ✅ done** (1.0.88.0) — the Activity list's rejected rows carry the D4
+  reason inline ("The destination folder no longer exists on the server"),
+  retrying rows show "Retrying (n): <error>", the tray and account row say
+  "N files need attention", and the account details point at Activity for the
+  reasons. Still open: promoting a long-retrying transient error to "needs
+  attention" (D4's time-based half).
 - **D3 ✅ done** (1.0.86.0) — `WatchAllAccountChangesAsync` fails the stream if
   nothing (not even a ping) arrives within 2.5× the ping interval; the push
   watcher's existing reconnect path then forces a catch-up poll on every
@@ -144,8 +154,8 @@ Apple `JmapClient`/`FuseMount` targets are unit-tested via `swift test`.
 | 🟡 R2 crash recovery | N/A on Apple (OS-managed) | Windows: single tray process since the Service merge — restart on crash is the MSIX startup task / user relaunch; make restart recover cleanly from persisted outbox + cache |
 | 🟡 R3 state-token crash window | already safe on Apple (token after changes) | ✅ done 1.0.80.0 |
 | 🟡 R5 cache corruption fallback | Apple SQLite WAL + temp-DB fallback | `NodeCache.cs` load — add integrity check + fallback |
-| 🟡 V1 last-synced signal | `dbbc196` | surface `lastSyncTime` in tray/status |
-| 🟠 V2/V3 surface failure reasons | `943b4f7` | per-file error + reason in Explorer/activity |
+| 🟡 V1 last-synced signal | `dbbc196` | ✅ done 1.0.88.0 — `SyncEngine.LastServerSyncUtc` → tray tooltip, account row, details; stale after 1 h |
+| 🟠 V2/V3 surface failure reasons | `943b4f7` | ✅ done 1.0.88.0 — rejected rows show the reason, retrying rows show attempt + error, tray/account row count files needing attention |
 | ⚡ Bulk + hybrid first-paint populate | `ecd030f` (`reachableFromHome`) + DESIGN §Initial Populate | Windows already bulk-loads (`PopulateFullAsync`); add hybrid first-paint |
 
 Cross-platform lessons are also distilled as **`DESIGN.md` pitfalls #34–39**.
@@ -326,7 +336,7 @@ failure, fall back to full reconciliation rather than trusting a partial cache.
 
 ## Pillar 4 — Visibility (the user can always tell)
 
-### 🟠 V1. No "last successful sync" signal
+### 🟠 V1. No "last successful sync" signal — **Windows ✅ 1.0.88.0**
 
 A stalled account is indistinguishable from an up-to-date one — both show Idle.
 
@@ -335,7 +345,7 @@ poll/push round-trip) and surface it ("Up to date · just now" / "Last synced 3
 days ago"). If it exceeds a threshold while the client believes it's connected,
 show a warning state. This is the single most important honesty signal.
 
-### 🟠 V2. Failures are log-only
+### 🟠 V2. Failures are log-only — **Windows ✅ 1.0.88.0** (reasons inline in Activity; tray shows "N files need attention")
 
 Digest failures (I1), poll failures, quota-exceeded, push death (D3), and stuck
 entries (D4) live only in the log file.
@@ -344,7 +354,7 @@ entries (D4) live only in the log file.
 files couldn't sync", each with a reason and an action). Tie into the existing
 activity/rejected UI. Expose `attemptCount`/`lastError` over IPC.
 
-### 🟡 V3. Error states don't say why or what to do
+### 🟡 V3. Error states don't say why or what to do — **Windows ✅ 1.0.88.0** (one vocabulary: "needs attention" / "couldn't sync — reason" / "last synced N ago — may be stalled")
 
 Improved recently for account-row errors (commit `275e9be`), but most states
 still lack an actionable message.
