@@ -1752,7 +1752,7 @@ public class SyncEngine : IDisposable
         ).ThrowOnFailure();
     }
 
-    private static unsafe void DehydratePlaceholder(string filePath)
+    internal static unsafe void DehydratePlaceholder(string filePath)
     {
         using var safeHandle = OpenWithRetry(filePath);
         var handle = new global::Windows.Win32.Foundation.HANDLE(safeHandle.DangerousGetHandle());
@@ -1779,7 +1779,7 @@ public class SyncEngine : IDisposable
     /// Dehydrate a single file, retrying up to 5 times with 1-second delays
     /// for transient failures (e.g. 0x80070187 "cloud files in use").
     /// </summary>
-    private static void DehydratePlaceholderWithRetry(string filePath)
+    internal static void DehydratePlaceholderWithRetry(string filePath)
     {
         const int maxRetries = 5;
         for (int attempt = 0; ; attempt++)

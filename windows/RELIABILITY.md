@@ -77,6 +77,14 @@ using this same roadmap):
   non-owners stand down (and take over if the owner dies). (BUG-026.)
 
 Windows progress (on the collapsed `SyncEngine` — one apply path, so each fix is one site):
+- **I1 ✅ done** (1.0.85.0) — `VerifyDigest` throws `DownloadIntegrityException`;
+  the buffered paths (Blob/get, range, full) never hand cfapi unverified bytes,
+  and a range failure is no longer mistaken for "ranges unsupported". Streaming
+  fetches the digest concurrently, holds back the final chunk, and on mismatch
+  (or a short stream, or no digest) fails the read with STATUS_DATA_ERROR and
+  dehydrates the placeholder when its last handle closes, so the next open
+  refetches. Skipped only when the server advertises no digest algorithm.
+  Tests: DigestTests (small/large, corrupt, truncated, unsupported).
 - **I3 ✅ done** (1.0.80.0) — content side: the outbox compares the frozen base
   blobId against the server's at upload and makes a conflict copy (or
   `onExists:"newest"`); structural side: a server change for a node the outbox
@@ -111,7 +119,7 @@ Apple `JmapClient`/`FuseMount` targets are unit-tested via `swift test`.
 
 | Item | Apple reference (commit) | Windows target / note |
 |---|---|---|
-| 🔴 I1 download digest enforced | `cff4881` (`downloadBlob` + `serverBlobDigestSha`) | `SyncCallbacks.cs:737` — `VerifyDigest` currently logs-and-serves; make mismatch reject + retry |
+| 🔴 I1 download digest enforced | `cff4881` (`downloadBlob` + `serverBlobDigestSha`) | ✅ done 1.0.85.0 — buffered paths reject before transfer; streaming holds back the last chunk, fails the read on mismatch and dehydrates on close; digest-unavailable is a failure |
 | 🟠 I2 upload digest re-verified | `4d32623` (`verifyUploadedBlob`) | upload path (`OutboxProcessor`/`JmapClient`) — verify single-shot/direct-PUT results |
 | 🔴 I3 conflict copy (dirty + server change) | already on Apple (`onExists:newest`/`rename`, `DECISIONS.md` #12) | ✅ done 1.0.80.0 |
 | 🟠 D1 disk↔cache↔server verify | partial on Apple | ✅ done 1.0.80.0 (`PopulateFromCacheAsync`) |
@@ -143,7 +151,7 @@ deferred until the draft + Fastmail server support land.
 
 ## Pillar 1 — Integrity (no silent loss or corruption)
 
-### 🔴 I1. Download digest mismatch is logged, not enforced ✓verified
+### 🔴 I1. Download digest mismatch is logged, not enforced ✓verified — **Windows ✅ 1.0.85.0**
 
 `VerifyDigest` (`SyncCallbacks.cs:737`) logs `Log.Error` on a hash mismatch and
 **returns the bytes anyway**; the placeholder is then marked in-sync. A

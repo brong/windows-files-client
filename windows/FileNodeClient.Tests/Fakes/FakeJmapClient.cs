@@ -41,6 +41,12 @@ public sealed class FakeJmapClient : IJmapClient
     public HashSet<string> OmitFromEnumeration { get; } = new();
     /// <summary>While set, UploadBlobAsync / MoveFileNodeAsync wait on it before completing.</summary>
     public TaskCompletionSource? Hold { get; set; }
+    /// <summary>Advertise a digest algorithm (Blob/get digest:sha) so downloads are verified.</summary>
+    public bool SupportsDigests { get; set; } = true;
+    /// <summary>Blob ids whose Blob/get digest is deliberately wrong (simulated corruption).</summary>
+    public HashSet<string> CorruptDigests { get; } = new();
+    /// <summary>If set, DownloadBlobAsync streams are cut off after this many bytes.</summary>
+    public int? TruncateDownloadsTo { get; set; }
 
     // ---- Observability ----
 
@@ -189,7 +195,7 @@ public sealed class FakeJmapClient : IJmapClient
     public JmapContext Context { get; }
     public string AccountId { get; }
     public string Username => "tests";
-    public string? PreferredDigestAlgorithm => null;   // digest verification degrades to "skip"
+    public string? PreferredDigestAlgorithm => SupportsDigests ? "sha" : null;
     public long? ChunkSize => null;
     public int? MaxDataSources => null;
     public long? MaxSizeBlobSet => null;
@@ -273,7 +279,12 @@ public sealed class FakeJmapClient : IJmapClient
 
     public Task<Stream> DownloadBlobAsync(string blobId, string? type = null, string? name = null, CancellationToken ct = default)
     {
-        lock (_lock) return Task.FromResult<Stream>(new MemoryStream(_blobs[blobId], writable: false));
+        lock (_lock)
+        {
+            var bytes = _blobs[blobId];
+            if (TruncateDownloadsTo is { } n && n < bytes.Length) bytes = bytes[..n];
+            return Task.FromResult<Stream>(new MemoryStream(bytes, writable: false));
+        }
     }
 
     public Task<(Stream data, bool isPartial)> DownloadBlobRangeAsync(string blobId, long offset, long length, string? type = null, string? name = null, CancellationToken ct = default)
@@ -300,9 +311,12 @@ public sealed class FakeJmapClient : IJmapClient
         lock (_lock)
         {
             var blob = _blobs[blobId];
+            var digestOf = CorruptDigests.Contains(blobId) ? "not the real content"u8.ToArray() : blob;
             return Task.FromResult(new BlobDataItem
             {
-                Id = blobId, Size = blob.Length, DigestSha = Convert.ToBase64String(SHA1.HashData(blob)),
+                Id = blobId, Size = blob.Length,
+                DigestSha = Convert.ToBase64String(SHA1.HashData(digestOf)),
+                DataAsBase64 = properties.Contains("data:asBase64") ? Convert.ToBase64String(blob) : null,
             });
         }
     }

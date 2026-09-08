@@ -42,6 +42,18 @@ internal class SyncCallbacks
     private bool _digestAlgorithmResolved;
 
     /// <summary>
+    /// The downloaded bytes could not be proven to match the server's blob: the
+    /// digest differed, or the server supports digests but we could not fetch one.
+    /// Never served to the caller (RELIABILITY I1, DESIGN pitfall #34).
+    /// </summary>
+    public sealed class DownloadIntegrityException(string message) : IOException(message);
+
+    // Streaming hands cfapi each chunk as it arrives, so a mismatch found at the end
+    // leaves unverified bytes in the placeholder. We fail the read, remember the node,
+    // and dehydrate it when the last handle closes so the next open fetches afresh.
+    private readonly ConcurrentDictionary<string, string> _rejectedHydrations = new();
+
+    /// <summary>
     /// Called before a delete completes. Return true to allow, false to veto.
     /// Parameters: (nodeId, fullPath)
     /// </summary>
@@ -261,7 +273,7 @@ internal class SyncCallbacks
         _inFlightFetches[transferKey] = (cts, null, DateTime.UtcNow);
 
         // Materialize cfapi-owned data synchronously — pointers invalidate after callback returns.
-        var fullPath = callbackInfo->NormalizedPath.ToString();
+        var fullPath = ExtractFullPath(callbackInfo);   // with the drive; NormalizedPath alone is volume-relative
         var fileName = Path.GetFileName(fullPath);
         var cbInfo = *callbackInfo;
         var fetchParams = callbackParameters->Anonymous.FetchData;
@@ -274,7 +286,7 @@ internal class SyncCallbacks
             Log.Error($"{_logPrefix} FETCH_DATA: No identity for {fileName}");
             _inFlightFetches.TryRemove(transferKey, out _);
             cts.Dispose();
-            TransferError(cbInfo, new NTSTATUS(unchecked((int)0xC000000D)), "File not recognized by sync engine"); // STATUS_INVALID_PARAMETER
+            TransferError(cbInfo, new NTSTATUS(unchecked((int)0xC000000D)), requiredOffset, requiredLength, "File not recognized by sync engine"); // STATUS_INVALID_PARAMETER
             return;
         }
 
@@ -285,7 +297,7 @@ internal class SyncCallbacks
             Log.Info($"{_logPrefix} FETCH_DATA: blocked for {fileName}: {blockedReason}");
             _inFlightFetches.TryRemove(transferKey, out _);
             cts.Dispose();
-            TransferError(cbInfo, new NTSTATUS(unchecked((int)0xC00000CF)), blockedReason); // STATUS_DEVICE_NOT_READY
+            TransferError(cbInfo, new NTSTATUS(unchecked((int)0xC00000CF)), requiredOffset, requiredLength, blockedReason); // STATUS_DEVICE_NOT_READY
             return;
         }
 
@@ -360,10 +372,16 @@ internal class SyncCallbacks
         {
             Log.Info($"{_logPrefix} FETCH_DATA cancelled: transferKey={transferKey}");
         }
+        catch (DownloadIntegrityException ex)
+        {
+            // Nothing was transferred: the placeholder stays dehydrated and the next open retries.
+            Log.Error($"{_logPrefix} FETCH_DATA integrity failure for {fileName}: {ex.Message}");
+            TransferError(cbInfo, new NTSTATUS(unchecked((int)0xC000003E)), requiredOffset, requiredLength, "File failed integrity check — will retry"); // STATUS_DATA_ERROR
+        }
         catch (Exception ex)
         {
             Log.Error($"{_logPrefix} FETCH_DATA error: {ex.Message}");
-            TransferError(cbInfo, new NTSTATUS(unchecked((int)0xC0000001)), $"Download failed: {ex.Message}"); // STATUS_UNSUCCESSFUL
+            TransferError(cbInfo, new NTSTATUS(unchecked((int)0xC0000001)), requiredOffset, requiredLength, $"Download failed: {ex.Message}"); // STATUS_UNSUCCESSFUL
         }
         finally
         {
@@ -595,6 +613,12 @@ internal class SyncCallbacks
 
             Log.Info($"{_logPrefix} NOTIFY_FILE_CLOSE_COMPLETION: node={nodeId}, path={fullPath}, openCount={newCount}, modified={wasModified}");
 
+            if (newCount == 0 && nodeId != null && _rejectedHydrations.ContainsKey(nodeId))
+            {
+                Log.FireAndForget(Task.Run(() => TryDiscardNow(nodeId, fullPath)), $"{_logPrefix}.DiscardUnverifiedOnClose");
+                return;
+            }
+
             if (wasModified)
                 Log.SafeInvoke(() => OnFileCloseCompleted?.Invoke(nodeId, fullPath), "SyncCallbacks.OnFileCloseCompleted");
         }
@@ -728,16 +752,19 @@ internal class SyncCallbacks
             () => _jmapClient.GetBlobAsync(blobId, [$"digest:{algo}"], offset, length, ct), ct);
     }
 
+    /// <summary>Throws <see cref="DownloadIntegrityException"/> if the data does not match the server's digest.</summary>
     private static void VerifyDigest(string algorithm, byte[] data, BlobDataItem item, string context)
     {
         var expected = GetDigestFromItem(item, algorithm);
         if (expected == null)
-            return;
+            throw new DownloadIntegrityException($"Server returned no {algorithm} digest ({context})");
         var actual = ComputeDigest(algorithm, data);
         if (actual != expected)
-            Log.Error($"Digest mismatch ({context}): expected {expected}, got {actual}");
-        else
-            Log.Debug($"Digest OK ({context}): {algorithm}={actual}");
+        {
+            Log.Error($"Digest mismatch ({context}): expected {expected}, got {actual} — rejecting download");
+            throw new DownloadIntegrityException($"Digest mismatch ({context})");
+        }
+        Log.Debug($"Digest OK ({context}): {algorithm}={actual}");
     }
 
     /// <summary>
@@ -812,16 +839,8 @@ internal class SyncCallbacks
                     {
                         if (algo != null)
                         {
-                            try
-                            {
-                                var digestItem = await digestTask;
-                                if (digestItem != null)
-                                    VerifyDigest(algo, rangeBytes, digestItem, $"range {node.BlobId} @{requiredOffset}+{requiredLength}");
-                            }
-                            catch (Exception ex) when (ex is not OperationCanceledException)
-                            {
-                                Log.Error($"{_logPrefix} Digest fetch failed for range request: {ex.Message}");
-                            }
+                            var digestItem = await AwaitDigestAsync(digestTask, $"range {node.BlobId}");
+                            VerifyDigest(algo, rangeBytes, digestItem, $"range {node.BlobId} @{requiredOffset}+{requiredLength}");
                         }
                         return (rangeBytes, requiredOffset, nodeSize);
                     }
@@ -832,22 +851,16 @@ internal class SyncCallbacks
 
                     if (algo != null)
                     {
-                        try
-                        {
-                            // Re-fetch digest for full file since range digest doesn't apply
-                            var fullDigestItem = await _queue.EnqueueAsync(QueuePriority.Interactive,
-                                () => _jmapClient.GetBlobAsync(node.BlobId!, [$"digest:{algo}"], ct: ct), ct);
-                            VerifyDigest(algo, rangeBytes, fullDigestItem, $"full fallback {node.BlobId}");
-                        }
-                        catch (Exception ex) when (ex is not OperationCanceledException)
-                        {
-                            Log.Error($"{_logPrefix} Digest fetch failed for full fallback: {ex.Message}");
-                        }
+                        // Re-fetch digest for full file since range digest doesn't apply
+                        var fullDigestItem = await AwaitDigestAsync(
+                            GetBlobDigestAsync(node.BlobId!, algo, null, null, ct), $"full fallback {node.BlobId}");
+                        VerifyDigest(algo, rangeBytes, fullDigestItem, $"full fallback {node.BlobId}");
                     }
                     return (rangeBytes, 0, nodeSize);
                 }
             }
             catch (OperationCanceledException) { throw; }
+            catch (DownloadIntegrityException) { throw; }   // not a range-support problem
             catch (Exception ex)
             {
                 _rangeRequestsSupported = false;
@@ -870,19 +883,67 @@ internal class SyncCallbacks
 
             if (algo != null)
             {
-                try
-                {
-                    var digestItem = await digestTask;
-                    if (digestItem != null)
-                        VerifyDigest(algo, fullBytes, digestItem, $"full download {node.BlobId}");
-                }
-                catch (Exception ex) when (ex is not OperationCanceledException)
-                {
-                    Log.Error($"{_logPrefix} Digest fetch failed for full download: {ex.Message}");
-                }
+                var digestItem = await AwaitDigestAsync(digestTask, $"full download {node.BlobId}");
+                VerifyDigest(algo, fullBytes, digestItem, $"full download {node.BlobId}");
             }
 
             return (fullBytes, 0, nodeSize);
+        }
+    }
+
+    /// <summary>
+    /// The server advertises digests, so failing to obtain one is a failed download,
+    /// not a reason to serve unverified bytes. Cancellation passes through.
+    /// </summary>
+    private async Task<BlobDataItem> AwaitDigestAsync(Task<BlobDataItem?> digestTask, string context)
+    {
+        try
+        {
+            return await digestTask ?? throw new DownloadIntegrityException($"No digest returned ({context})");
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (DownloadIntegrityException) { throw; }
+        catch (Exception ex)
+        {
+            Log.Error($"{_logPrefix} Digest fetch failed ({context}): {ex.Message}");
+            throw new DownloadIntegrityException($"Digest unavailable ({context}): {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// A hydration whose bytes were already handed to cfapi failed verification:
+    /// throw the content away (dehydrate) so the next open fetches it again. The
+    /// reader that triggered the fetch may still hold the file open, so retry in
+    /// the background for a while; the close notification (for handles cfapi tells
+    /// us about) is a second trigger via <see cref="_rejectedHydrations"/>.
+    /// </summary>
+    private void DiscardUnverifiedContent(string nodeId, string fullPath)
+    {
+        _rejectedHydrations[nodeId] = fullPath;
+        Log.Warn($"{_logPrefix} Unverified content in {Path.GetFileName(fullPath)} will be discarded");
+        Log.FireAndForget(Task.Run(async () =>
+        {
+            for (int attempt = 0; attempt < 120 && _rejectedHydrations.ContainsKey(nodeId); attempt++)
+            {
+                if (attempt > 0) await Task.Delay(1000);
+                if (TryDiscardNow(nodeId, fullPath)) return;
+            }
+        }), $"{_logPrefix}.DiscardUnverified");
+    }
+
+    private bool TryDiscardNow(string nodeId, string fullPath)
+    {
+        try
+        {
+            SyncEngine.DehydratePlaceholder(fullPath);
+            _rejectedHydrations.TryRemove(nodeId, out _);
+            Log.Warn($"{_logPrefix} Discarded unverified content of {Path.GetFileName(fullPath)} (dehydrated); it will be fetched again on next open");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Log.Debug($"{_logPrefix} Discard of unverified content deferred for {Path.GetFileName(fullPath)}: {ex.Message}");
+            return false;   // typically still open by the reader — try again later
         }
     }
 
@@ -899,15 +960,21 @@ internal class SyncCallbacks
     {
         Task.Run(async () =>
         {
+            var totalSize = node.Size ?? 0;
+            long totalTransferred = 0;   // bytes handed to cfapi (the catch fails the rest)
             try
             {
                 var blobId = node.BlobId!;
-                var totalSize = node.Size ?? 0;
                 const int chunkSize = 128 * 1024; // 128KB — small enough for responsive progressive playback
                 var algo = GetDigestAlgorithm();
                 var ct = cts.Token;
 
                 Log.Info($"{_logPrefix} FETCH_DATA: streaming {totalSize} bytes in {chunkSize} byte chunks for blob {blobId}");
+
+                // Digest in flight alongside the download; awaited before the last chunk is released.
+                Task<BlobDataItem?> digestTask = algo != null
+                    ? GetBlobDigestAsync(blobId, algo, null, null, ct)
+                    : Task.FromResult<BlobDataItem?>(null);
 
                 var stream = await _queue.EnqueueAsync(QueuePriority.Interactive,
                     () => _jmapClient.DownloadBlobAsync(blobId, node.Type, node.Name, ct), ct);
@@ -915,21 +982,42 @@ internal class SyncCallbacks
                 using (stream)
                 {
                     var buffer = new byte[chunkSize];
-                    long totalTransferred = 0;
+                    long totalRead = 0;          // bytes read from the server
+                    int heldBack = 0;            // the final chunk, kept until the digest checks out
                     using var hash = algo != null
                         ? IncrementalHash.CreateHash(algo == "sha" ? HashAlgorithmName.SHA1 : HashAlgorithmName.SHA256)
                         : null;
 
-                    while (totalTransferred < totalSize)
+                    while (totalRead < totalSize)
                     {
                         ct.ThrowIfCancellationRequested();
 
-                        var toRead = (int)Math.Min(chunkSize, totalSize - totalTransferred);
+                        var toRead = (int)Math.Min(chunkSize, totalSize - totalRead);
                         var bytesRead = await ReadFullAsync(stream, buffer, toRead, ct);
                         if (bytesRead == 0)
                             break;
 
                         hash?.AppendData(buffer, 0, bytesRead);
+                        totalRead += bytesRead;
+                        var isFinal = totalRead >= totalSize;
+
+                        if (!isFinal && bytesRead < toRead)
+                        {
+                            // The stream ended early. A partial mid-file chunk cannot be
+                            // transferred (cfapi wants 4 KB alignment except at EOF) and the
+                            // size check below fails the download.
+                            Log.Warn($"{_logPrefix} FETCH_DATA: short read from server for {blobId}: {totalRead}/{totalSize} bytes");
+                            break;
+                        }
+
+                        if (isFinal && hash != null)
+                        {
+                            // Last chunk: the reader cannot complete until we release it, and we
+                            // only release it once the whole stream has been verified.
+                            heldBack = bytesRead;
+                            break;
+                        }
+
                         TransferChunk(callbackInfo, buffer, 0, totalTransferred, bytesRead);
                         totalTransferred += bytesRead;
 
@@ -955,30 +1043,32 @@ internal class SyncCallbacks
                         }
                     }
 
-                    Log.Info($"{_logPrefix} FETCH_DATA: streamed {totalTransferred} bytes total for blob {blobId}");
+                    Log.Info($"{_logPrefix} FETCH_DATA: streamed {totalRead} bytes total for blob {blobId}");
 
-                    // Verify digest against server
+                    if (totalRead != totalSize)
+                        throw new DownloadIntegrityException($"Short download: {totalRead}/{totalSize} bytes (stream {blobId})");
+
+                    // Verify the whole stream against the server's digest, then release the
+                    // held-back final chunk.
                     if (hash != null && algo != null)
                     {
                         var actual = Convert.ToBase64String(hash.GetHashAndReset());
-                        try
+                        var digestItem = await AwaitDigestAsync(digestTask, $"stream {blobId}");
+                        var expected = GetDigestFromItem(digestItem, algo)
+                            ?? throw new DownloadIntegrityException($"Server returned no {algo} digest (stream {blobId})");
+                        if (actual != expected)
                         {
-                            var digestItem = await GetBlobDigestAsync(blobId, algo, null, null, ct);
-                            if (digestItem != null)
-                            {
-                                var expected = GetDigestFromItem(digestItem, algo);
-                                if (expected != null)
-                                {
-                                    if (actual != expected)
-                                        Log.Error($"{_logPrefix} Digest mismatch (stream {blobId}): expected {expected}, got {actual}");
-                                    else
-                                        Log.Info($"{_logPrefix} Digest OK (stream {blobId}): {algo}={actual}");
-                                }
-                            }
+                            Log.Error($"{_logPrefix} Digest mismatch (stream {blobId}): expected {expected}, got {actual} — rejecting download");
+                            throw new DownloadIntegrityException($"Digest mismatch (stream {blobId})");
                         }
-                        catch (Exception ex) when (ex is not OperationCanceledException)
+                        Log.Info($"{_logPrefix} Digest OK (stream {blobId}): {algo}={actual}");
+
+                        if (heldBack > 0)
                         {
-                            Log.Error($"{_logPrefix} Digest fetch failed for streaming download: {ex.Message}");
+                            TransferChunk(callbackInfo, buffer, 0, totalTransferred, heldBack);
+                            totalTransferred += heldBack;
+                            try { PInvoke.CfReportProviderProgress(callbackInfo.ConnectionKey, callbackInfo.TransferKey, totalSize, totalTransferred); }
+                            catch { /* progress is best-effort */ }
                         }
                     }
                 }
@@ -992,10 +1082,19 @@ internal class SyncCallbacks
             {
                 Log.Info($"{_logPrefix} FETCH_DATA cancelled: transferKey={transferKey}");
             }
+            catch (DownloadIntegrityException ex)
+            {
+                Log.Error($"{_logPrefix} FETCH_DATA integrity failure (stream) for {Path.GetFileName(fullPath)}: {ex.Message}");
+                TransferError(callbackInfo, new NTSTATUS(unchecked((int)0xC000003E)), totalTransferred, totalSize - totalTransferred, "File failed integrity check — will retry"); // STATUS_DATA_ERROR
+                if (nodeId != null && totalTransferred > 0)
+                    DiscardUnverifiedContent(nodeId, fullPath);
+            }
             catch (Exception ex)
             {
                 Log.Error($"{_logPrefix} FETCH_DATA streaming error: {ex.Message}");
-                TransferError(callbackInfo, new NTSTATUS(unchecked((int)0xC0000001)), $"Download failed: {ex.Message}"); // STATUS_UNSUCCESSFUL
+                TransferError(callbackInfo, new NTSTATUS(unchecked((int)0xC0000001)), totalTransferred, totalSize - totalTransferred, $"Download failed: {ex.Message}"); // STATUS_UNSUCCESSFUL
+                if (nodeId != null && totalTransferred > 0)
+                    DiscardUnverifiedContent(nodeId, fullPath);
             }
             finally
             {
@@ -1085,9 +1184,14 @@ internal class SyncCallbacks
         }
     }
 
-    private unsafe void TransferError(CF_CALLBACK_INFO callbackInfo, NTSTATUS status, string? message = null)
+    /// <summary>
+    /// Fail the outstanding part of a FETCH_DATA request. cfapi needs the failed
+    /// range: a zero-length failure is ignored and the request only ends when the
+    /// driver times it out (~60 s), during which the reader sits blocked.
+    /// </summary>
+    private unsafe void TransferError(CF_CALLBACK_INFO callbackInfo, NTSTATUS status, long offset, long length, string? message = null)
     {
-        Log.Error($"{_logPrefix} TransferError: status=0x{(uint)status.Value:X8}, transferKey={callbackInfo.TransferKey} (marks placeholder NOT in-sync)");
+        Log.Error($"{_logPrefix} TransferError: status=0x{(uint)status.Value:X8}, range={offset}+{length}, transferKey={callbackInfo.TransferKey} (marks placeholder NOT in-sync)");
         var opInfo = new CF_OPERATION_INFO
         {
             StructSize = (uint)sizeof(CF_OPERATION_INFO),
@@ -1101,8 +1205,8 @@ internal class SyncCallbacks
         opParams.ParamSize = (uint)sizeof(CF_OPERATION_PARAMETERS);
         opParams.Anonymous.TransferData.CompletionStatus = status;
         opParams.Anonymous.TransferData.Buffer = null;
-        opParams.Anonymous.TransferData.Offset = 0;
-        opParams.Anonymous.TransferData.Length = 0;
+        opParams.Anonymous.TransferData.Offset = offset;
+        opParams.Anonymous.TransferData.Length = length;
 
         if (message != null && CfApiCapabilities.HasSyncStatus)
         {
