@@ -793,7 +793,7 @@ public class SyncEngine : IDisposable
         }
         else if (!node.IsFolder && IsUnderPinnedDirectory(path))
         {
-            try { HydratePlaceholder(path); }
+            try { CfApi.HydratePlaceholder(path); }
             catch (Exception ex)
             {
                 Log.Error($"{_logPrefix}  Auto-hydration failed for {node.Name}: {ex.Message}");
@@ -1662,7 +1662,7 @@ public class SyncEngine : IDisposable
                     return; // Already hydrated
 
                 Log.Info($"{_logPrefix} Hydrating pinned file: {Path.GetFileName(filePath)}");
-                HydratePlaceholder(filePath);
+                CfApi.HydratePlaceholder(filePath);
             }
             catch (Exception ex)
             {
@@ -1739,7 +1739,7 @@ public class SyncEngine : IDisposable
                     if ((attrs & dehydratedFlag) != 0)
                         return; // Already dehydrated (e.g. by OS via NOTIFY_DEHYDRATE)
 
-                    DehydratePlaceholderWithRetry(path);
+                    CfApi.DehydratePlaceholderWithRetry(path);
                     Log.Info($"{_logPrefix} Dehydrated: {Path.GetFileName(path)}");
                 }
                 catch (Exception ex)
@@ -1771,8 +1771,8 @@ public class SyncEngine : IDisposable
                 // Clear the PINNED attribute before dehydrating. When the user
                 // unpins a directory, Windows propagates UNPINNED to children
                 // asynchronously — we may get here before that finishes.
-                ClearPinState(filePath);
-                DehydratePlaceholder(filePath);
+                CfApi.ClearPinState(filePath);
+                CfApi.DehydratePlaceholder(filePath);
                 Log.Info($"Dehydrated: {Path.GetFileName(filePath)}");
                 count++;
             }
@@ -1796,7 +1796,7 @@ public class SyncEngine : IDisposable
                     if ((attrs & dehydratedFlag) != 0)
                         continue; // Dehydrated by another path
 
-                    DehydratePlaceholder(filePath);
+                    CfApi.DehydratePlaceholder(filePath);
                     Log.Info($"Dehydrated (retry {retry}): {Path.GetFileName(filePath)}");
                     count++;
                 }
@@ -1828,64 +1828,6 @@ public class SyncEngine : IDisposable
         {
             CancelPinnedDirectory(subDir);
             CollectFilesForDehydration(subDir, result);
-        }
-    }
-
-    private static unsafe void ClearPinState(string filePath)
-    {
-        using var safeHandle = OpenWithRetry(filePath);
-        var handle = new global::Windows.Win32.Foundation.HANDLE(safeHandle.DangerousGetHandle());
-        PInvoke.CfSetPinState(
-            handle,
-            CF_PIN_STATE.CF_PIN_STATE_UNSPECIFIED,
-            CF_SET_PIN_FLAGS.CF_SET_PIN_FLAG_NONE,
-            null    // synchronous
-        ).ThrowOnFailure();
-    }
-
-    internal static unsafe void DehydratePlaceholder(string filePath)
-    {
-        using var safeHandle = OpenWithRetry(filePath);
-        var handle = new global::Windows.Win32.Foundation.HANDLE(safeHandle.DangerousGetHandle());
-        // Use CfUpdatePlaceholder with DEHYDRATE + MARK_IN_SYNC so the file
-        // is atomically dehydrated and marked in-sync in one call. This avoids
-        // the window where a dehydrated-but-not-in-sync file triggers Explorer
-        // to send FETCH_DATA, and avoids TransferError marking it not-in-sync.
-        long usn = 0;
-        PInvoke.CfUpdatePlaceholder(
-            handle,
-            null,   // no metadata update
-            null,   // keep existing identity
-            0,
-            null,   // no dehydrate range (dehydrate whole file)
-            0,
-            CF_UPDATE_FLAGS.CF_UPDATE_FLAG_DEHYDRATE
-                | CF_UPDATE_FLAGS.CF_UPDATE_FLAG_MARK_IN_SYNC,
-            &usn,
-            null    // synchronous
-        ).ThrowOnFailure();
-    }
-
-    /// <summary>
-    /// Dehydrate a single file, retrying up to 5 times with 1-second delays
-    /// for transient failures (e.g. 0x80070187 "cloud files in use").
-    /// </summary>
-    internal static void DehydratePlaceholderWithRetry(string filePath)
-    {
-        const int maxRetries = 5;
-        for (int attempt = 0; ; attempt++)
-        {
-            try
-            {
-                DehydratePlaceholder(filePath);
-                if (attempt > 0)
-                    Log.Info($"  Dehydration retry {attempt} succeeded for {Path.GetFileName(filePath)}");
-                return;
-            }
-            catch when (attempt < maxRetries - 1)
-            {
-                Thread.Sleep(1000);
-            }
         }
     }
 
@@ -2004,7 +1946,7 @@ public class SyncEngine : IDisposable
                         }
 
                         Log.Info($"{_logPrefix} Hydrating pinned file: {Path.GetFileName(filePath)}");
-                        HydratePlaceholder(filePath);
+                        CfApi.HydratePlaceholder(filePath);
                         Interlocked.Increment(ref count);
                     }
                     catch (Exception ex) when (ex is not OperationCanceledException)
@@ -2039,7 +1981,7 @@ public class SyncEngine : IDisposable
 
                         Log.Info($"{_logPrefix} Hydrating pinned file (retry {retry}): {Path.GetFileName(filePath)}");
                         await _hydrationGate.WaitAsync(ct);
-                        try { HydratePlaceholder(filePath); }
+                        try { CfApi.HydratePlaceholder(filePath); }
                         finally { _hydrationGate.Release(); }
                         count++;
                     }
@@ -2073,7 +2015,7 @@ public class SyncEngine : IDisposable
                         allHydrated = false;
                         continue; // Still dehydrated — don't mark in-sync
                     }
-                    SetInSync(filePath);
+                    CfApi.SetInSync(filePath);
                     if (++inSyncCount % 50 == 0)
                         await Task.Delay(50, ct);
                 }
@@ -2098,7 +2040,7 @@ public class SyncEngine : IDisposable
             // are fully hydrated — prevents premature green checkmark on parent folders.
             if (allHydrated)
             {
-                try { SetInSync(directoryPath); }
+                try { CfApi.SetInSync(directoryPath); }
                 catch { /* directory might not be a placeholder */ }
             }
 
@@ -2118,20 +2060,6 @@ public class SyncEngine : IDisposable
         {
             _hydratingDirectories.TryRemove(directoryPath, out _);
         }
-    }
-
-    internal static unsafe void HydratePlaceholder(string filePath)
-    {
-        using var safeHandle = File.OpenHandle(filePath, FileMode.Open, FileAccess.Read,
-            FileShare.ReadWrite | FileShare.Delete);
-        var handle = new global::Windows.Win32.Foundation.HANDLE(safeHandle.DangerousGetHandle());
-        PInvoke.CfHydratePlaceholder(
-            handle,
-            0,      // start offset
-            -1,     // entire file
-            CF_HYDRATE_FLAGS.CF_HYDRATE_FLAG_NONE,
-            null    // synchronous
-        ).ThrowOnFailure();
     }
 
     internal string? ResolveParentNodeId(string localPath)
@@ -2330,7 +2258,7 @@ public class SyncEngine : IDisposable
             () => _jmapClient.CreateFileNodeAsync(parentNodeId, null, folderName));
 
         // Convert to placeholder and update mappings
-        ConvertToPlaceholder(localDir, node.Id, isDirectory: true);
+        CfApi.ConvertToPlaceholder(localDir, node.Id, isDirectory: true);
         _pathToNodeId[localDir] = node.Id;
         _nodeIdToPath[node.Id] = localDir;
         Log.Info($"{_logPrefix} Auto-created folder: {folderName} → node {node.Id}");
@@ -2364,94 +2292,6 @@ public class SyncEngine : IDisposable
     }
 
     /// <summary>
-    /// Like ConvertToPlaceholder but with a single open attempt (no retry).
-    /// Used during initial populate where blocking on locked directories is unacceptable.
-    /// </summary>
-    internal static unsafe void ConvertToPlaceholderNoRetry(string filePath, string nodeId, bool isDirectory = false)
-    {
-        var identityBytes = Encoding.UTF8.GetBytes(nodeId);
-        using var safeHandle = OpenNoRetry(filePath, isDirectory);
-        var handle = new global::Windows.Win32.Foundation.HANDLE(safeHandle.DangerousGetHandle());
-        fixed (byte* pIdentity = identityBytes)
-        {
-            var flags = CF_CONVERT_FLAGS.CF_CONVERT_FLAG_MARK_IN_SYNC;
-            if (isDirectory)
-                flags |= CF_CONVERT_FLAGS.CF_CONVERT_FLAG_ALWAYS_FULL;
-
-            long usn = 0;
-            PInvoke.CfConvertToPlaceholder(
-                handle,
-                pIdentity,
-                (uint)identityBytes.Length,
-                flags,
-                &usn,
-                null).ThrowOnFailure();
-        }
-    }
-
-    internal static unsafe void ConvertToPlaceholder(string filePath, string nodeId, bool isDirectory = false)
-    {
-        var identityBytes = Encoding.UTF8.GetBytes(nodeId);
-        using var safeHandle = OpenWithRetry(filePath, isDirectory);
-        var handle = new global::Windows.Win32.Foundation.HANDLE(safeHandle.DangerousGetHandle());
-        fixed (byte* pIdentity = identityBytes)
-        {
-            var flags = CF_CONVERT_FLAGS.CF_CONVERT_FLAG_MARK_IN_SYNC;
-            if (isDirectory)
-                flags |= CF_CONVERT_FLAGS.CF_CONVERT_FLAG_ALWAYS_FULL;
-
-            long usn = 0;
-            PInvoke.CfConvertToPlaceholder(
-                handle,
-                pIdentity,
-                (uint)identityBytes.Length,
-                flags,
-                &usn,
-                null).ThrowOnFailure();
-        }
-    }
-
-    /// <summary>
-    /// Ensures a file/directory is a placeholder with the given identity.
-    /// Tries ConvertToPlaceholder first; if it fails because the file is
-    /// already a placeholder (0x8007017C), falls back to UpdatePlaceholderIdentity.
-    /// </summary>
-    internal static void EnsurePlaceholder(string filePath, string nodeId, bool isDirectory = false)
-    {
-        try
-        {
-            ConvertToPlaceholder(filePath, nodeId, isDirectory);
-        }
-        catch (COMException ex) when (ex.HResult == unchecked((int)0x8007017C))
-        {
-            // ERROR_CLOUD_OPERATION_INVALID — file is already a placeholder
-            Log.Info($"SyncEngine: file already a placeholder, updating identity: {Path.GetFileName(filePath)}");
-            UpdatePlaceholderIdentity(filePath, nodeId, isDirectory);
-        }
-    }
-
-    internal static unsafe void UpdatePlaceholderIdentity(string filePath, string newNodeId, bool isDirectory = false)
-    {
-        var identityBytes = Encoding.UTF8.GetBytes(newNodeId);
-        using var safeHandle = OpenWithRetry(filePath, isDirectory);
-        var handle = new global::Windows.Win32.Foundation.HANDLE(safeHandle.DangerousGetHandle());
-        fixed (byte* pIdentity = identityBytes)
-        {
-            long usn = 0;
-            PInvoke.CfUpdatePlaceholder(
-                handle,
-                null,   // no metadata update
-                pIdentity,
-                (uint)identityBytes.Length,
-                null,   // no dehydrate range
-                0,
-                CF_UPDATE_FLAGS.CF_UPDATE_FLAG_MARK_IN_SYNC,
-                &usn,
-                null).ThrowOnFailure();
-        }
-    }
-
-    /// <summary>
     /// Mark a tracked item in-sync, converting it to a placeholder first if it
     /// isn't one (e.g. a plain file/folder that pre-dated the sync root). The one
     /// copy of the SetInSync → ReadPlaceholderNodeId → Convert fallback chain;
@@ -2461,10 +2301,10 @@ public class SyncEngine : IDisposable
     /// </summary>
     private void EnsureInSync(string path, string nodeId, bool isDirectory, bool retryOpen = true)
     {
-        try { SetInSync(path); return; }
+        try { CfApi.SetInSync(path); return; }
         catch (Exception syncEx)
         {
-            if (ReadPlaceholderNodeId(path) != null)
+            if (CfApi.ReadPlaceholderNodeId(path) != null)
             {
                 Log.Debug($"{_logPrefix}  SetInSync failed for existing placeholder {path}: {syncEx.Message}");
                 return;
@@ -2472,8 +2312,8 @@ public class SyncEngine : IDisposable
         }
         try
         {
-            if (retryOpen) ConvertToPlaceholder(path, nodeId, isDirectory);
-            else ConvertToPlaceholderNoRetry(path, nodeId, isDirectory);
+            if (retryOpen) CfApi.ConvertToPlaceholder(path, nodeId, isDirectory);
+            else CfApi.ConvertToPlaceholderNoRetry(path, nodeId, isDirectory);
         }
         catch (Exception ex)
         {
@@ -2491,12 +2331,12 @@ public class SyncEngine : IDisposable
     private void EnsureDirectoryFull(string dirPath, string? nodeId)
     {
         Exception markEx;
-        try { MarkDirectoryAlwaysFull(dirPath); return; }
+        try { CfApi.MarkDirectoryAlwaysFull(dirPath); return; }
         catch (Exception ex) { markEx = ex; }
 
-        if (ReadPlaceholderNodeId(dirPath) != null)
+        if (CfApi.ReadPlaceholderNodeId(dirPath) != null)
         {
-            try { SetInSync(dirPath); }
+            try { CfApi.SetInSync(dirPath); }
             catch (Exception syncEx)
             {
                 Log.Debug($"{_logPrefix}  SetInSync failed for {dirPath}: {syncEx.Message}");
@@ -2510,8 +2350,8 @@ public class SyncEngine : IDisposable
         }
         try
         {
-            ConvertToPlaceholder(dirPath, nodeId, isDirectory: true);
-            MarkDirectoryAlwaysFull(dirPath);
+            CfApi.ConvertToPlaceholder(dirPath, nodeId, isDirectory: true);
+            CfApi.MarkDirectoryAlwaysFull(dirPath);
             Log.Info($"{_logPrefix}  Converted directory to placeholder: {dirPath}");
         }
         catch (Exception ex)
@@ -2520,112 +2360,6 @@ public class SyncEngine : IDisposable
         }
     }
 
-    private static unsafe void MarkDirectoryAlwaysFull(string dirPath)
-    {
-        using var safeHandle = OpenWithRetry(dirPath, isDirectory: true);
-        var handle = new global::Windows.Win32.Foundation.HANDLE(safeHandle.DangerousGetHandle());
-        long usn = 0;
-        PInvoke.CfUpdatePlaceholder(
-            handle,
-            null,   // no metadata update
-            null,   // keep existing identity
-            0,
-            null,   // no dehydrate range
-            0,
-            CF_UPDATE_FLAGS.CF_UPDATE_FLAG_MARK_IN_SYNC
-                | CF_UPDATE_FLAGS.CF_UPDATE_FLAG_ENABLE_ON_DEMAND_POPULATION
-                | CF_UPDATE_FLAGS.CF_UPDATE_FLAG_ALWAYS_FULL,
-            &usn,
-            null).ThrowOnFailure();
-    }
-
-    private const uint FILE_WRITE_ATTRIBUTES = 0x100;
-    private const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
-
-    internal static unsafe void SetInSync(string path)
-    {
-        SetSyncState(path, CF_IN_SYNC_STATE.CF_IN_SYNC_STATE_IN_SYNC);
-    }
-
-    internal static unsafe void SetNotInSync(string path)
-    {
-        SetSyncState(path, CF_IN_SYNC_STATE.CF_IN_SYNC_STATE_NOT_IN_SYNC);
-    }
-
-    private static unsafe void SetSyncState(string path, CF_IN_SYNC_STATE state)
-    {
-        // Use FILE_WRITE_ATTRIBUTES to avoid triggering hydration on dehydrated
-        // files. GENERIC_READ/GENERIC_WRITE would cause cfapi to send FETCH_DATA.
-        var isDirectory = Directory.Exists(path);
-        var flags = isDirectory ? FILE_FLAG_BACKUP_SEMANTICS : 0u;
-
-        using var handle = PInvoke.CreateFile(
-            path,
-            FILE_WRITE_ATTRIBUTES,
-            global::Windows.Win32.Storage.FileSystem.FILE_SHARE_MODE.FILE_SHARE_READ
-                | global::Windows.Win32.Storage.FileSystem.FILE_SHARE_MODE.FILE_SHARE_WRITE
-                | global::Windows.Win32.Storage.FileSystem.FILE_SHARE_MODE.FILE_SHARE_DELETE,
-            null,
-            global::Windows.Win32.Storage.FileSystem.FILE_CREATION_DISPOSITION.OPEN_EXISTING,
-            (global::Windows.Win32.Storage.FileSystem.FILE_FLAGS_AND_ATTRIBUTES)flags,
-            null);
-
-        var cfHandle = new global::Windows.Win32.Foundation.HANDLE(handle.DangerousGetHandle());
-        PInvoke.CfSetInSyncState(
-            cfHandle,
-            state,
-            CF_SET_IN_SYNC_FLAGS.CF_SET_IN_SYNC_FLAG_NONE,
-            null).ThrowOnFailure();
-    }
-
-    private static unsafe string? ReadPlaceholderNodeId(string path)
-    {
-        try
-        {
-            var options = Directory.Exists(path) ? (FileOptions)0x02000000 : FileOptions.None;
-            using var safeHandle = File.OpenHandle(path, FileMode.Open, FileAccess.Read,
-                FileShare.ReadWrite | FileShare.Delete, options);
-            var handle = new global::Windows.Win32.Foundation.HANDLE(safeHandle.DangerousGetHandle());
-
-            var buffer = new byte[256];
-            fixed (byte* pBuffer = buffer)
-            {
-                uint returnedLen;
-                var hr = PInvoke.CfGetPlaceholderInfo(
-                    handle,
-                    CF_PLACEHOLDER_INFO_CLASS.CF_PLACEHOLDER_INFO_BASIC,
-                    pBuffer,
-                    (uint)buffer.Length,
-                    &returnedLen);
-
-                if (hr.Failed)
-                    return null;
-
-                // CF_PLACEHOLDER_BASIC_INFO layout:
-                //   PinState (int, offset 0)
-                //   InSyncState (int, offset 4)
-                //   FileId (long, offset 8)
-                //   SyncRootFileId (long, offset 16)
-                //   FileIdentityLength (uint, offset 24)
-                //   FileIdentity (byte[], offset 28)
-                const int fileIdentityLengthOffset = 24;
-                const int fileIdentityOffset = 28;
-
-                if (returnedLen < (uint)fileIdentityOffset)
-                    return null;
-
-                var identityLength = *(uint*)(pBuffer + fileIdentityLengthOffset);
-                if (identityLength == 0 || returnedLen < (uint)fileIdentityOffset + identityLength)
-                    return null;
-
-                return Encoding.UTF8.GetString(pBuffer + fileIdentityOffset, (int)identityLength);
-            }
-        }
-        catch
-        {
-            return null;
-        }
-    }
 
     private void UpdateDescendantMappings(string oldDirPath, string newDirPath)
     {
@@ -2655,71 +2389,6 @@ public class SyncEngine : IDisposable
         }
     }
 
-    internal static void StripZoneIdentifier(string filePath)
-    {
-        try { File.Delete(filePath + ":Zone.Identifier"); } catch { }
-    }
-
-    private const uint GENERIC_WRITE = 0x40000000;
-
-    /// <summary>
-    /// Open a file handle suitable for cfapi operations (CfUpdatePlaceholder,
-    /// CfConvertToPlaceholder, etc.) WITHOUT triggering hydration on dehydrated
-    /// placeholders.  Uses GENERIC_WRITE (not GENERIC_READ | GENERIC_WRITE)
-    /// because GENERIC_READ on a dehydrated placeholder triggers FETCH_DATA.
-    /// </summary>
-    private static unsafe Microsoft.Win32.SafeHandles.SafeFileHandle OpenNoRetry(string filePath, bool isDirectory = false)
-    {
-        var flags = isDirectory ? FILE_FLAG_BACKUP_SEMANTICS : 0u;
-        var handle = PInvoke.CreateFile(
-            filePath,
-            GENERIC_WRITE,
-            global::Windows.Win32.Storage.FileSystem.FILE_SHARE_MODE.FILE_SHARE_READ
-                | global::Windows.Win32.Storage.FileSystem.FILE_SHARE_MODE.FILE_SHARE_WRITE
-                | global::Windows.Win32.Storage.FileSystem.FILE_SHARE_MODE.FILE_SHARE_DELETE,
-            null,
-            global::Windows.Win32.Storage.FileSystem.FILE_CREATION_DISPOSITION.OPEN_EXISTING,
-            (global::Windows.Win32.Storage.FileSystem.FILE_FLAGS_AND_ATTRIBUTES)flags,
-            null);
-
-        if (handle.IsInvalid)
-            throw new IOException($"CreateFile failed for {filePath}");
-
-        return new Microsoft.Win32.SafeHandles.SafeFileHandle(handle.DangerousGetHandle(), ownsHandle: true);
-    }
-
-    private static unsafe Microsoft.Win32.SafeHandles.SafeFileHandle OpenWithRetry(string filePath, bool isDirectory = false)
-    {
-        const int maxRetries = 5;
-        var flags = isDirectory ? FILE_FLAG_BACKUP_SEMANTICS : 0u;
-
-        for (int attempt = 0; ; attempt++)
-        {
-            try
-            {
-                var handle = PInvoke.CreateFile(
-                    filePath,
-                    GENERIC_WRITE,
-                    global::Windows.Win32.Storage.FileSystem.FILE_SHARE_MODE.FILE_SHARE_READ
-                        | global::Windows.Win32.Storage.FileSystem.FILE_SHARE_MODE.FILE_SHARE_WRITE
-                        | global::Windows.Win32.Storage.FileSystem.FILE_SHARE_MODE.FILE_SHARE_DELETE,
-                    null,
-                    global::Windows.Win32.Storage.FileSystem.FILE_CREATION_DISPOSITION.OPEN_EXISTING,
-                    (global::Windows.Win32.Storage.FileSystem.FILE_FLAGS_AND_ATTRIBUTES)flags,
-                    null);
-
-                if (handle.IsInvalid)
-                    throw new IOException($"CreateFile failed for {filePath}");
-
-                // Wrap in SafeFileHandle for automatic disposal
-                return new Microsoft.Win32.SafeHandles.SafeFileHandle(handle.DangerousGetHandle(), ownsHandle: true);
-            }
-            catch (IOException) when (attempt < maxRetries - 1)
-            {
-                Thread.Sleep(200 * (attempt + 1));
-            }
-        }
-    }
 
     private async Task<string?> ResolveLocalPathAsync(string nodeId, CancellationToken ct)
     {

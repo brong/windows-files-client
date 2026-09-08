@@ -941,7 +941,7 @@ internal class SyncCallbacks
     {
         try
         {
-            SyncEngine.DehydratePlaceholder(fullPath);
+            CfApi.DehydratePlaceholder(fullPath);
             _rejectedHydrations.TryRemove(nodeId, out _);
             Log.Warn($"{_logPrefix} Discarded unverified content of {Path.GetFileName(fullPath)} (dehydrated); it will be fetched again on next open");
             return true;

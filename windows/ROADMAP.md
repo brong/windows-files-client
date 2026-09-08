@@ -149,11 +149,11 @@ Sharing is already modeled in StorageNode (`ShareWith`, `SharedLinkUrl`, `IsShar
 
 ### Windows Event Viewer integration
 
-Currently logging to files at `%LOCALAPPDATA%\Fastmail\FileNodeClient\` (debug.log for Service, app.log for App). We investigated registering ETW providers via `desktop8:EventTracing` in the MSIX manifest to get logs into Event Viewer's "Applications and Services Logs", but this requires `desktop7:Scope="machine"` which in turn requires the restricted `Microsoft.classicAppCompat*` custom capabilities. Those capabilities need either Microsoft Store approval or a signed SCCD file — neither available for sideloaded MSIX packages.
+Currently logging to files at `%LOCALAPPDATA%\Fastmail\FileNodeClient\` (one `debug.log` per run; the previous run is kept as `debug.prev.log`). We investigated registering ETW providers via `desktop8:EventTracing` in the MSIX manifest to get logs into Event Viewer's "Applications and Services Logs", but this requires `desktop7:Scope="machine"` which in turn requires the restricted `Microsoft.classicAppCompat*` custom capabilities. Those capabilities need either Microsoft Store approval or a signed SCCD file — neither available for sideloaded MSIX packages.
 
 **Options for the future:**
 - **Store distribution**: if we publish to the Microsoft Store, we can request the restricted capabilities and use `desktop8:EventTracing` directly in the manifest
-- **Self-registration on first run**: the Service could call `wevtutil im` with the .man file on first run (requires one-time admin elevation via UAC prompt)
+- **Self-registration on first run**: the app could call `wevtutil im` with the .man file on first run (requires one-time admin elevation via UAC prompt)
 - **Companion installer**: ship a lightweight .exe installer alongside the MSIX that registers the ETW manifest with admin privileges
 
 The ETW instrumentation manifest (FileNodeClient.man) and EventSource code were developed and tested — they just can't be deployed via MSIX without the restricted capabilities.

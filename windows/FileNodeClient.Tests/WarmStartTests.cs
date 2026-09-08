@@ -69,7 +69,7 @@ public class WarmStartTests
         var path = f.LocalPath("a.txt");
 
         // Hydrate through cfapi (FETCH_DATA served by the engine from the fake server).
-        SyncEngine.HydratePlaceholder(path);
+        CfApi.HydratePlaceholder(path);
         Assert.Equal("v1", File.ReadAllText(path));
         await f.PollAsync(); // cache now holds the hydrated file's size/mtime
 

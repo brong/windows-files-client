@@ -34,7 +34,7 @@ public class CleanTests
     public async Task Clean_RemovesHydratedFiles()
     {
         await using var f = await SyncRootFixture.StartAsync(s => s.AddFile(HomeId, "a.txt", "content"));
-        SyncEngine.HydratePlaceholder(f.LocalPath("a.txt"));
+        CfApi.HydratePlaceholder(f.LocalPath("a.txt"));
         Assert.Equal("content", File.ReadAllText(f.LocalPath("a.txt")));
 
         f.Engine.Dispose();

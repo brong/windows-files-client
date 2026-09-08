@@ -26,7 +26,7 @@ public class ConflictTests
         var path = f.LocalPath("a.txt");
         f.Engine.ConflictStrategy = strategy;
 
-        SyncEngine.HydratePlaceholder(path);
+        CfApi.HydratePlaceholder(path);
         f.Engine.Pause(SyncPauseReason.UserRequested);
 
         File.WriteAllText(path, "local edit");
@@ -114,7 +114,7 @@ public class ConflictTests
         var id = f.Server.FindByName(HomeId, "a.txt")!.Id;
         var path = f.LocalPath("a.txt");
 
-        SyncEngine.HydratePlaceholder(path);
+        CfApi.HydratePlaceholder(path);
         File.WriteAllText(path, "local edit");
         try
         {

@@ -58,7 +58,7 @@ public class JmapClient : IJmapClient
         ?? throw new InvalidOperationException("Account not initialised — call ConnectAsync first");
 
     public string Username => Session.Username;
-    public JmapContext Context => new(Username, AccountId);
+    public string ScopeKey => $"{Username}/{AccountId}";
 
     public string? PreferredDigestAlgorithm =>
         Session.GetSupportedDigestAlgorithms(AccountId).FirstOrDefault(SupportedDigests.Contains);
@@ -337,13 +337,6 @@ public class JmapClient : IJmapClient
         }
 
         return (changes, created.List, updated.List, quotas);
-    }
-
-    public async Task<string> GetStateAsync(string homeNodeId, CancellationToken ct = default)
-    {
-        var result = await CallAsync<GetResponse<FileNode>>(
-            FileNodeUsing, "FileNode/get", new { accountId = AccountId, ids = new[] { homeNodeId } }, ct);
-        return result.State;
     }
 
     public async Task<string> GetCurrentStateAsync(CancellationToken ct = default)

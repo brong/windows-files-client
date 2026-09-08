@@ -23,7 +23,7 @@ public class DigestTests
         await using var f = await SyncRootFixture.StartAsync(s => s.AddFile(HomeId, "s.bin", Bytes(1000)));
         var path = f.LocalPath("s.bin");
 
-        SyncEngine.HydratePlaceholder(path);
+        CfApi.HydratePlaceholder(path);
 
         Assert.Equal(Bytes(1000), File.ReadAllBytes(path));
         Assert.True(f.Log.Contains("Digest OK"), f.Log.Tail());
@@ -37,14 +37,14 @@ public class DigestTests
         var path = f.LocalPath("s.bin");
         f.Server.CorruptDigests.Add(f.Server.Get(id).BlobId!);
 
-        Assert.ThrowsAny<Exception>(() => SyncEngine.HydratePlaceholder(path));
+        Assert.ThrowsAny<Exception>(() => CfApi.HydratePlaceholder(path));
 
         Assert.True(IsDehydrated(path), "nothing may be written on a digest mismatch");
         Assert.True(f.Log.Contains("Digest mismatch"), f.Log.Tail());
         Assert.False(f.Log.Contains("Digest OK"));
 
         f.Server.CorruptDigests.Clear();
-        SyncEngine.HydratePlaceholder(path);
+        CfApi.HydratePlaceholder(path);
         Assert.Equal(Bytes(1000), File.ReadAllBytes(path));
     }
 
@@ -54,7 +54,7 @@ public class DigestTests
         await using var f = await SyncRootFixture.StartAsync(s => s.AddFile(HomeId, "big.bin", Bytes(300_000)));
         var path = f.LocalPath("big.bin");
 
-        SyncEngine.HydratePlaceholder(path);
+        CfApi.HydratePlaceholder(path);
 
         Assert.Equal(Bytes(300_000), File.ReadAllBytes(path));
         Assert.True(f.Log.Contains("Digest OK (stream"), f.Log.Tail());
@@ -68,7 +68,7 @@ public class DigestTests
         var path = f.LocalPath("big.bin");
         f.Server.CorruptDigests.Add(f.Server.Get(id).BlobId!);
 
-        Assert.ThrowsAny<Exception>(() => SyncEngine.HydratePlaceholder(path));
+        Assert.ThrowsAny<Exception>(() => CfApi.HydratePlaceholder(path));
 
         Assert.True(f.Log.Contains("Digest mismatch (stream"), f.Log.Tail());
         // The streamed chunks were already handed to cfapi; once the reader's handle is
@@ -77,7 +77,7 @@ public class DigestTests
         Assert.True(IsDehydrated(path));
 
         f.Server.CorruptDigests.Clear();
-        SyncEngine.HydratePlaceholder(path);
+        CfApi.HydratePlaceholder(path);
         Assert.Equal(Bytes(300_000), File.ReadAllBytes(path));
     }
 
@@ -88,14 +88,14 @@ public class DigestTests
         var path = f.LocalPath("big.bin");
         f.Server.TruncateDownloadsTo = 200_000;   // the server connection drops mid-stream
 
-        Assert.ThrowsAny<Exception>(() => SyncEngine.HydratePlaceholder(path));
+        Assert.ThrowsAny<Exception>(() => CfApi.HydratePlaceholder(path));
 
         Assert.True(f.Log.Contains("Short download: 200000/300000"), f.Log.Tail());
         await f.Log.WaitForAsync("Discarded unverified content");
         Assert.True(IsDehydrated(path));
 
         f.Server.TruncateDownloadsTo = null;
-        SyncEngine.HydratePlaceholder(path);
+        CfApi.HydratePlaceholder(path);
         Assert.Equal(Bytes(300_000), File.ReadAllBytes(path));
     }
 
@@ -109,7 +109,7 @@ public class DigestTests
         });
         var path = f.LocalPath("big.bin");
 
-        SyncEngine.HydratePlaceholder(path);
+        CfApi.HydratePlaceholder(path);
 
         Assert.Equal(Bytes(300_000), File.ReadAllBytes(path));
         Assert.False(f.Log.Contains("Digest"), f.Log.Tail());

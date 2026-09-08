@@ -4,9 +4,10 @@ namespace FileNodeClient.Jmap;
 
 public interface IJmapClient : IDisposable
 {
-    JmapContext Context { get; }
     string AccountId { get; }
     string Username { get; }
+    /// <summary>"username/accountId": globally unique key for this login+account, used to scope local state.</summary>
+    string ScopeKey { get; }
     /// <summary>
     /// The first digest algorithm from the server's supportedDigestAlgorithms
     /// that we support locally (sha or sha-256), or null if not advertised.
@@ -62,7 +63,6 @@ public interface IJmapClient : IDisposable
     Task<ChangesResponse> GetChangesAsync(string sinceState, CancellationToken ct = default);
     Task<(ChangesResponse Changes, FileNode[] Created, FileNode[] Updated, Quota[]? Quotas)>
         GetChangesAndNodesAsync(string sinceState, CancellationToken ct = default);
-    Task<string> GetStateAsync(string homeNodeId, CancellationToken ct = default);
     Task<string> GetCurrentStateAsync(CancellationToken ct = default);
     /// <summary>
     /// Every FileNode id in the account. Pages by position and restarts if the

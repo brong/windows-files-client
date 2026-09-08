@@ -73,7 +73,7 @@ public class OutboxProcessor : IDisposable
         _outbox.MarkRejected(change.Id, reason);
         if (change.LocalPath != null)
         {
-            try { SyncEngine.SetNotInSync(change.LocalPath); }
+            try { CfApi.SetNotInSync(change.LocalPath); }
             catch (Exception ex) { Log.Debug($"{_logPrefix} SetNotInSync failed for {change.LocalPath}: {ex.Message}"); }
         }
     }
@@ -388,7 +388,7 @@ public class OutboxProcessor : IDisposable
             node = existing;
         }
 
-        SyncEngine.EnsurePlaceholder(change.LocalPath, node.Id, isDirectory: true);
+        CfApi.EnsurePlaceholder(change.LocalPath, node.Id, isDirectory: true);
         _engine.UpdateMappings(change.LocalPath, null, node.Id);
         Log.Info($"{_logPrefix} Outbox: created folder {folderName} → node {node.Id}");
         return true;
@@ -443,8 +443,8 @@ public class OutboxProcessor : IDisposable
                 }
                 // File may have been replaced with a non-placeholder copy (e.g. local
                 // "copy over existing") — convert back to placeholder before SetInSync.
-                SyncEngine.EnsurePlaceholder(change.LocalPath, change.NodeId);
-                SyncEngine.SetInSync(change.LocalPath);
+                CfApi.EnsurePlaceholder(change.LocalPath, change.NodeId);
+                CfApi.SetInSync(change.LocalPath);
                 return true;
             }
 
@@ -493,9 +493,9 @@ public class OutboxProcessor : IDisposable
             {
                 // Edited while we were down? The write stripped the reparse point, so the
                 // file may be a plain file now — convert it back (or just update identity).
-                SyncEngine.EnsurePlaceholder(change.LocalPath, newNode.Id);
-                SyncEngine.StripZoneIdentifier(change.LocalPath);
-                SyncEngine.SetInSync(change.LocalPath);
+                CfApi.EnsurePlaceholder(change.LocalPath, newNode.Id);
+                CfApi.StripZoneIdentifier(change.LocalPath);
+                CfApi.SetInSync(change.LocalPath);
             }
             catch (Exception ex)
             {
@@ -538,9 +538,9 @@ public class OutboxProcessor : IDisposable
                 if (_outbox.TryCancelDelete(trashedInfo.NodeId))
                 {
                     Log.Info($"{_logPrefix} Outbox: cancelled pending delete for {trashedInfo.NodeId}, restoring mappings");
-                    SyncEngine.EnsurePlaceholder(change.LocalPath, trashedInfo.NodeId);
+                    CfApi.EnsurePlaceholder(change.LocalPath, trashedInfo.NodeId);
                     _engine.UpdateMappings(change.LocalPath, null, trashedInfo.NodeId);
-                    SyncEngine.SetInSync(change.LocalPath);
+                    CfApi.SetInSync(change.LocalPath);
                     return true;
                 }
 
@@ -550,9 +550,9 @@ public class OutboxProcessor : IDisposable
                     await _queue.EnqueueAsync(QueuePriority.Background,
                         () => _jmapClient.MoveFileNodeAsync(trashedInfo.NodeId, restoreParentId, fileName, ct: ct), ct);
                     Log.Info($"{_logPrefix} Outbox: restored {fileName} from server trash (node {trashedInfo.NodeId})");
-                    SyncEngine.EnsurePlaceholder(change.LocalPath, trashedInfo.NodeId);
+                    CfApi.EnsurePlaceholder(change.LocalPath, trashedInfo.NodeId);
                     _engine.UpdateMappings(change.LocalPath, null, trashedInfo.NodeId);
-                    SyncEngine.SetInSync(change.LocalPath);
+                    CfApi.SetInSync(change.LocalPath);
                     return true;
                 }
                 catch (Exception ex) when (ex.Message.Contains("notFound") || ex.Message.Contains("404"))
@@ -570,10 +570,10 @@ public class OutboxProcessor : IDisposable
                         var restoredNode = await _queue.EnqueueAsync(QueuePriority.Background,
                             () => _jmapClient.CreateFileNodeAsync(restoreParentId, trashedInfo.BlobId, fileName, contentType, "replace", restoreCtime, restoreMtime, ct), ct);
                         Log.Info($"{_logPrefix} Outbox: recreated {fileName} with existing blobId → node {restoredNode.Id}");
-                        SyncEngine.EnsurePlaceholder(change.LocalPath, restoredNode.Id);
+                        CfApi.EnsurePlaceholder(change.LocalPath, restoredNode.Id);
                         _engine.UpdateMappings(change.LocalPath, null, restoredNode.Id);
                         _engine.RecordRecentUpload(change.LocalPath);
-                        SyncEngine.SetInSync(change.LocalPath);
+                        CfApi.SetInSync(change.LocalPath);
                         return true;
                     }
                     catch (Exception ex)
@@ -625,9 +625,9 @@ public class OutboxProcessor : IDisposable
             Log.Info($"{_logPrefix} Outbox: EnsurePlaceholder {change.LocalPath} nodeId={node.Id}");
             try
             {
-                SyncEngine.EnsurePlaceholder(change.LocalPath, node.Id);
-                SyncEngine.StripZoneIdentifier(change.LocalPath);
-                SyncEngine.SetInSync(change.LocalPath);
+                CfApi.EnsurePlaceholder(change.LocalPath, node.Id);
+                CfApi.StripZoneIdentifier(change.LocalPath);
+                CfApi.SetInSync(change.LocalPath);
             }
             catch (Exception ex)
             {
@@ -673,9 +673,9 @@ public class OutboxProcessor : IDisposable
                 Log.Info($"{_logPrefix} Outbox: conflict resolved (newest-wins, local newer) for {fileName} → node {winner.Id}");
                 try
                 {
-                    SyncEngine.EnsurePlaceholder(localPath, winner.Id);
-                    SyncEngine.StripZoneIdentifier(localPath);
-                    SyncEngine.SetInSync(localPath);
+                    CfApi.EnsurePlaceholder(localPath, winner.Id);
+                    CfApi.StripZoneIdentifier(localPath);
+                    CfApi.SetInSync(localPath);
                 }
                 catch (Exception ex) { Log.Info($"{_logPrefix} Outbox: placeholder update deferred for {fileName}: {ex.Message}"); }
                 _engine.RecordRecentUpload(localPath);
@@ -708,12 +708,12 @@ public class OutboxProcessor : IDisposable
             // Re-point the local placeholder (which holds the user's edit) at the conflict node
             // and pre-map the target BEFORE moving, so the blocking NOTIFY_RENAME callback sees
             // this as our own echo (mapped node → target path) and does not issue a server move.
-            SyncEngine.EnsurePlaceholder(localPath, conflictNode.Id);
+            CfApi.EnsurePlaceholder(localPath, conflictNode.Id);
             _engine.UpdateMappings(conflictPath, null, conflictNode.Id, conflictNode.BlobId);
             File.Move(localPath, conflictPath);
             _engine.RecordRecentUpload(conflictPath);
-            SyncEngine.StripZoneIdentifier(conflictPath);
-            SyncEngine.SetInSync(conflictPath);
+            CfApi.StripZoneIdentifier(conflictPath);
+            CfApi.SetInSync(conflictPath);
 
             // Re-create the original name with the server's (other device's) content as a
             // fresh dehydrated placeholder pointing at the original node.
@@ -848,7 +848,7 @@ public class OutboxProcessor : IDisposable
         {
             await _queue.EnqueueAsync(QueuePriority.Background,
                 () => _jmapClient.MoveFileNodeAsync(change.NodeId, parentId, newName, ct: ct), ct);
-            SyncEngine.SetInSync(change.LocalPath);
+            CfApi.SetInSync(change.LocalPath);
         }
         catch (Exception ex) when (ex.Message.Contains("notFound") || ex.Message.Contains("404"))
         {

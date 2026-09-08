@@ -40,7 +40,7 @@ sealed class AccountSupervisor : IDisposable
     public string AccountId => _jmapClient.AccountId;
     public string Username => _jmapClient.Username;
     /// <summary>Key for this account's on-disk caches (node cache, outbox).</summary>
-    public string ScopeKey => _jmapClient.Context.ScopeKey;
+    public string ScopeKey => _jmapClient.ScopeKey;
 
     public SyncStatus Status { get; private set; }
     public string? StatusDetail { get; private set; }
@@ -98,10 +98,10 @@ sealed class AccountSupervisor : IDisposable
         if (clean)
         {
             Log.Info($"[{_displayName}] Cleaning previous sync state...");
-            SyncEngine.Clean(_syncRootPath, _jmapClient.Context.AccountId);
+            SyncEngine.Clean(_syncRootPath, _jmapClient.AccountId);
         }
 
-        _engine = new SyncEngine(_syncRootPath, _jmapClient, _queue, _jmapClient.Context.ScopeKey, _displayName);
+        _engine = new SyncEngine(_syncRootPath, _jmapClient, _queue, _jmapClient.ScopeKey, _displayName);
         _engine.ConflictStrategy = _conflictStrategy;
         if (clean)
             _engine.ClearOutbox();
@@ -119,7 +119,7 @@ sealed class AccountSupervisor : IDisposable
         var trashUrl = _jmapClient.TrashUrl;
         Uri? recycleBinUri = trashUrl != null ? new Uri(trashUrl) : null;
         var webUrlTemplate = _jmapClient.WebUrlTemplate;
-        await _engine.RegisterAsync(_displayName, _jmapClient.Context.AccountId, iconPath,
+        await _engine.RegisterAsync(_displayName, _jmapClient.AccountId, iconPath,
             recycleBinUri, webUrlTemplate);
 
         // Populate placeholders

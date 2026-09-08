@@ -64,7 +64,6 @@ public sealed class FakeJmapClient : IJmapClient
     public FakeJmapClient(string accountId)
     {
         AccountId = accountId;
-        Context = new JmapContext("tests", accountId);
         var now = DateTime.UtcNow;
         _nodes[HomeId] = new FileNode { Id = HomeId, Name = "", Role = "home", Created = now, Modified = now,
             MyRights = AllRights() };
@@ -196,9 +195,9 @@ public sealed class FakeJmapClient : IJmapClient
 
     // ---- IJmapClient: capabilities ----
 
-    public JmapContext Context { get; }
     public string AccountId { get; }
     public string Username => "tests";
+    public string ScopeKey => $"{Username}/{AccountId}";
     public string? PreferredDigestAlgorithm => SupportsDigests ? "sha" : null;
     public long? ChunkSize => null;
     public int? MaxDataSources => null;
@@ -269,7 +268,6 @@ public sealed class FakeJmapClient : IJmapClient
         }
     }
 
-    public Task<string> GetStateAsync(string homeNodeId, CancellationToken ct = default) => Task.FromResult(State);
     public Task<string> GetCurrentStateAsync(CancellationToken ct = default) => Task.FromResult(State);
 
     public Task<(string[] Ids, string QueryState, int Total, bool Consistent)> QueryAllFileNodeIdsAsync(CancellationToken ct = default)

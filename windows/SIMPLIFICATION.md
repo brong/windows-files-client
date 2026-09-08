@@ -132,14 +132,20 @@ Runtime smoke test (dev inner loop in `CLAUDE.md`, or `dotnet.exe run --project 
 
 Then commit.
 
-## Phase 4 — `SyncEngine` (steps 1–4 done 2026-09-07; step 5 pending)
+## Phase 4 — `SyncEngine` (complete 2026-09-08)
 
 **Status.** Steps 1–3 landed as 1.0.79.0 (`EnsureInSync`/`EnsureDirectoryFull`,
 `WalkFromHome`, then `ApplyServerNode`/`MoveLocalItem`/`RemoveNode`/`ApplyTreeLevel`/
 `ApplyChangedNodeAsync`); step 4 as 1.0.80.0 (I3 deferred server changes + server-delete-
 under-edit fallback, R3 page loop, D2 consistent enumeration + re-confirm, D1 warm-start
 verify). The ACL-ordering invariant is documented above the apply path in `SyncEngine.cs`.
-Remaining: step 5 (cfapi helpers → `CfApi`), then Phase 5 tests. The original plan follows.
+Step 5 landed 2026-09-08: the sixteen static cfapi helpers (convert / identity /
+in-sync / always-full / read identity / hydrate / dehydrate / pin / open) live in
+`CfApi.cs`; `SyncEngine` is 2,457 lines (from 2,620) and holds sync logic only.
+Smaller follow-ups also done: `JmapContext` replaced by `IJmapClient.ScopeKey`,
+`GetStateAsync` removed, ROADMAP's Service references fixed. Still open:
+folding `SYNCING.md` into `DESIGN.md` (content judgement, not mechanical) and
+the `ManageAccountsForm` button-handler helper. The original plan follows.
 
 
 `FileNodeClient.Windows/SyncEngine.cs` is 2,620 lines and contains **four
