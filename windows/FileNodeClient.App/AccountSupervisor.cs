@@ -20,6 +20,12 @@ sealed class AccountSupervisor : IDisposable
     private readonly string _displayName;
     private readonly bool _debug;
     private const string SyncNowSentinel = "\x01SYNC_NOW";
+    /// <summary>
+    /// If push has been silent this long, poll anyway. A dead push then degrades
+    /// to slightly delayed sync instead of no sync (RELIABILITY D3). One
+    /// FileNode/changes per account per interval — negligible.
+    /// </summary>
+    private static readonly TimeSpan SafetyPollInterval = TimeSpan.FromMinutes(15);
     private readonly Channel<string> _stateChannel = Channel.CreateBounded<string>(
         new BoundedChannelOptions(16) { FullMode = BoundedChannelFullMode.DropOldest });
 
@@ -228,7 +234,20 @@ sealed class AccountSupervisor : IDisposable
         {
             try
             {
-                var newState = await _stateChannel.Reader.ReadAsync(ct);
+                string newState;
+                using (var idle = CancellationTokenSource.CreateLinkedTokenSource(ct))
+                {
+                    idle.CancelAfter(SafetyPollInterval);
+                    try
+                    {
+                        newState = await _stateChannel.Reader.ReadAsync(idle.Token);
+                    }
+                    catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                    {
+                        Log.Debug($"[{_displayName}] No push for {SafetyPollInterval.TotalMinutes:F0} min — safety poll");
+                        newState = "";   // forced poll
+                    }
+                }
                 var isSyncNow = newState == SyncNowSentinel;
 
                 if (_engine!.IsPaused)

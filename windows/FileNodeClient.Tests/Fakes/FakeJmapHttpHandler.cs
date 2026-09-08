@@ -24,6 +24,9 @@ public sealed class FakeJmapHttpHandler : HttpMessageHandler
     public int PostCount { get; private set; }
     public List<(string Method, JsonElement Args)> Calls { get; } = new();
 
+    /// <summary>Serves GET on the event source URL: write SSE lines to the stream; return when the "server" hangs up.</summary>
+    public Func<StreamWriter, CancellationToken, Task>? OnEventStream { get; set; }
+
     public static object DefaultSession() => new
     {
         capabilities = new Dictionary<string, object>
@@ -56,6 +59,13 @@ public sealed class FakeJmapHttpHandler : HttpMessageHandler
         var url = request.RequestUri!.ToString();
         if (request.Method == HttpMethod.Get && url == SessionUrl)
             return Json(DefaultSession());
+
+        if (request.Method == HttpMethod.Get && url.StartsWith("https://jmap.test/events") && OnEventStream != null)
+        {
+            var content = new EventStreamContent(OnEventStream);
+            content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("text/event-stream");
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = content };
+        }
 
         if (request.Method == HttpMethod.Post && url == ApiUrl)
         {
@@ -99,6 +109,45 @@ public sealed class FakeJmapHttpHandler : HttpMessageHandler
             resolved[prop.Name[1..]] = current.Clone();
         }
         return JsonSerializer.SerializeToElement(resolved);
+    }
+
+    /// <summary>
+    /// A genuinely streaming response body. HttpContent's default read path buffers the
+    /// whole body first (SerializeToStreamAsync into a MemoryStream), which would make a
+    /// never-ending SSE stream unreadable; overriding CreateContentReadStreamAsync with
+    /// a pipe hands the reader bytes as the producer writes them.
+    /// </summary>
+    private sealed class EventStreamContent(Func<StreamWriter, CancellationToken, Task> producer) : HttpContent
+    {
+        private readonly CancellationTokenSource _cts = new();
+
+        protected override Task<Stream> CreateContentReadStreamAsync()
+        {
+            var pipe = new System.IO.Pipelines.Pipe();
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await using var writer = new StreamWriter(pipe.Writer.AsStream()) { AutoFlush = true, NewLine = "\n" };
+                    await producer(writer, _cts.Token);
+                }
+                catch (OperationCanceledException) { }
+                catch (IOException) { }
+                finally { await pipe.Writer.CompleteAsync(); }
+            });
+            return Task.FromResult(pipe.Reader.AsStream());
+        }
+
+        protected override Task SerializeToStreamAsync(Stream stream, System.Net.TransportContext? context) =>
+            throw new NotSupportedException("read via CreateContentReadStreamAsync");
+
+        protected override bool TryComputeLength(out long length) { length = -1; return false; }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) _cts.Cancel();
+            base.Dispose(disposing);
+        }
     }
 
     private static HttpResponseMessage Json(object value) => new(HttpStatusCode.OK)

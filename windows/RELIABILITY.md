@@ -77,6 +77,19 @@ using this same roadmap):
   non-owners stand down (and take over if the owner dies). (BUG-026.)
 
 Windows progress (on the collapsed `SyncEngine` — one apply path, so each fix is one site):
+- **D3 ✅ done** (1.0.86.0) — `WatchAllAccountChangesAsync` fails the stream if
+  nothing (not even a ping) arrives within 2.5× the ping interval; the push
+  watcher's existing reconnect path then forces a catch-up poll on every
+  account. Independently, each supervisor polls after 15 minutes without a
+  push, so a dead push degrades to delayed sync rather than none.
+- **D4 ✅ done** (1.0.86.0) — every JMAP failure is a typed `JmapErrorException`
+  (method, type, description); `IsPermanent` mirrors Apple's list (notFound,
+  invalidProperties, invalidArguments, tooLarge, plus unknownMethod /
+  invalidResultReference; Blob/set notFound excepted — an expired chunk is
+  fixed by re-uploading). The outbox rejects those with a plain-language
+  reason ("The destination folder no longer exists on the server") instead of
+  retrying at the backoff cap forever. Still open: promoting a *transient*
+  error to "needs attention" after K failures / T elapsed.
 - **I1 ✅ done** (1.0.85.0) — `VerifyDigest` throws `DownloadIntegrityException`;
   the buffered paths (Blob/get, range, full) never hand cfapi unverified bytes,
   and a range failure is no longer mistaken for "ranges unsupported". Streaming
@@ -124,8 +137,8 @@ Apple `JmapClient`/`FuseMount` targets are unit-tested via `swift test`.
 | 🔴 I3 conflict copy (dirty + server change) | already on Apple (`onExists:newest`/`rename`, `DECISIONS.md` #12) | ✅ done 1.0.80.0 |
 | 🟠 D1 disk↔cache↔server verify | partial on Apple | ✅ done 1.0.80.0 (`PopulateFromCacheAsync`) |
 | 🟠 D2 stable enumeration / prune | Apple generation-counter BFS (`NodeDatabase`) | ✅ done 1.0.80.0 |
-| 🟠 D3 SSE idle-timeout | `9618a74` (`consumeWithIdleTimeout`) | `JmapClient.cs` SSE loop — no idle timeout |
-| 🟠 D4 permanent-error classification | `c733227` (`JmapError.isRetriable`) | error tiers (`OutboxProcessor.cs`, DESIGN §12 table) |
+| 🟠 D3 SSE idle-timeout | `9618a74` (`consumeWithIdleTimeout`) | ✅ done 1.0.86.0 — 150 s idle timeout on the SSE read (2.5× ping) + 15-minute safety poll per account |
+| 🟠 D4 permanent-error classification | `c733227` (`JmapError.isRetriable`) | ✅ done 1.0.86.0 — `JmapErrorException.IsPermanent`; outbox rejects with a plain-language reason |
 | 🟠 D5 push: poll-on-change + backoff | `0328b70`, `910fa20` | Windows SSE handler — parts 1&2 apply. **Part 3 (per-login lease) likely N/A**: Windows runs one Service process, not one per account |
 | 🟡 R1 Verify & Repair | `a7ed026` (`verifyAgainstServer` + force-reconcile) | add a user action: clear state token → full reconcile + retry rejected |
 | 🟡 R2 crash recovery | N/A on Apple (OS-managed) | Windows: single tray process since the Service merge — restart on crash is the MSIX startup task / user relaunch; make restart recover cleanly from persisted outbox + cache |
@@ -228,7 +241,7 @@ behind that consistent snapshot, and — belt and braces — re-confirm a node i
 truly gone (single `FileNode/get`) before deleting local data. Never delete on
 an inconsistent enumeration.
 
-### 🟠 D3. SSE half-open connection → silent stall
+### 🟠 D3. SSE half-open connection → silent stall — **Windows ✅ 1.0.86.0**
 
 The SSE read loop has no per-message/idle timeout. A half-open connection
 (server stops sending state updates but keepalive pings continue, or TCP is
@@ -241,7 +254,7 @@ low-frequency **safety poll** (e.g. every few minutes) regardless of push, so a
 dead push degrades to slightly-delayed sync rather than no sync. Pair with V1 so
 a genuine stall becomes visible.
 
-### 🟠 D4. Stuck outbox entries never escalate *(reported)*
+### 🟠 D4. Stuck outbox entries never escalate *(reported)* — **Windows ✅ 1.0.86.0** (classification; time-based escalation of transient errors still open)
 
 Permanent-but-misclassified failures — e.g. a parent permanently deleted
 server-side, an orphaned node, `notFound` on a non-delete — are treated as

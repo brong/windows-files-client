@@ -58,6 +58,16 @@ public class OutboxProcessor : IDisposable
 
     private readonly string _logPrefix;
 
+    /// <summary>Plain-language reason for the Activity list's rejected row (V2/V3).</summary>
+    private static string DescribePermanentFailure(PendingChange change, JmapErrorException ex) => ex.Type switch
+    {
+        "notFound" when change.NodeId == null => "The destination folder no longer exists on the server",
+        "notFound" => "The item no longer exists on the server",
+        "tooLarge" => "File too large for the server",
+        "invalidProperties" => "The server rejected this change" + (ex.Description != null ? $": {ex.Description}" : " (invalid name or location)"),
+        _ => $"The server rejected the request ({ex.Type})" + (ex.Description != null ? $": {ex.Description}" : ""),
+    };
+
     private void MarkRejectedAndNotInSync(PendingChange change, string reason)
     {
         _outbox.MarkRejected(change.Id, reason);
@@ -216,6 +226,14 @@ public class OutboxProcessor : IDisposable
         catch (ObjectDisposedException) when (ct.IsCancellationRequested)
         {
             // Shutdown — resource already disposed, nothing to do
+        }
+        catch (JmapErrorException ex) when (!ct.IsCancellationRequested && ex.IsPermanent)
+        {
+            // Retrying can never succeed (RELIABILITY D4): surface it with a reason the
+            // user can act on instead of looping at the backoff cap forever.
+            var reason = DescribePermanentFailure(change, ex);
+            Log.Error($"{_logPrefix} Outbox: permanent failure for {change.LocalPath ?? change.NodeId}: {ex.Message} → {reason}");
+            MarkRejectedAndNotInSync(change, reason);
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {

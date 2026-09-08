@@ -113,10 +113,81 @@ public class JmapClientTests
         var (client, http) = await ConnectAsync();
         http.OnMethod = (_, _, _) => ("error", new { type = "serverFail", description = "boom" });
 
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => client.GetFileNodesAsync(["x"]));
+        var ex = await Assert.ThrowsAsync<JmapErrorException>(() => client.GetFileNodesAsync(["x"]));
 
-        Assert.Contains("JMAP error", ex.Message);
+        Assert.Equal("serverFail", ex.Type);
+        Assert.Equal("FileNode/get", ex.Method);
+        Assert.False(ex.IsPermanent);                 // a server failure is worth retrying
         Assert.Contains("serverFail", ex.Message);
+    }
+
+    [Theory]
+    [InlineData("FileNode/set create", "notFound", true)]
+    [InlineData("FileNode/set update", "invalidProperties", true)]
+    [InlineData("FileNode/set create", "tooLarge", true)]
+    [InlineData("FileNode/get", "invalidArguments", true)]
+    [InlineData("Blob/set", "notFound", false)]        // an expired chunk: re-upload fixes it
+    [InlineData("FileNode/set update", "alreadyExists", false)]
+    [InlineData("FileNode/changes", "cannotCalculateChanges", false)]
+    [InlineData("FileNode/set create", "forbidden", false)]
+    [InlineData("FileNode/get", "serverFail", false)]
+    [InlineData("FileNode/get", "rateLimit", false)]
+    public void JmapErrorException_ClassifiesPermanence(string method, string type, bool permanent)
+    {
+        var ex = new JmapErrorException(method, type, "why");
+        Assert.Equal(permanent, ex.IsPermanent);
+        Assert.Equal($"{method} failed: {type} — why", ex.Message);
+    }
+
+    [Fact]
+    public async Task Sse_SilentStream_IsAbandonedAfterTheIdleTimeout()
+    {
+        var (client, http) = await ConnectAsync();
+        var previous = JmapClient.SseIdleTimeout;
+        JmapClient.SseIdleTimeout = TimeSpan.FromMilliseconds(400);
+        try
+        {
+            http.OnEventStream = async (w, ct) =>
+            {
+                await w.WriteAsync("event: state\ndata: {\"changed\":{\"acc1\":{\"FileNode\":\"s1\"}}}\n\n");
+                await w.WriteAsync(": ping\n");
+                await Task.Delay(Timeout.InfiniteTimeSpan, ct);   // then the server goes silent forever
+            };
+
+            var received = new List<(string, string)>();
+            var ex = await Assert.ThrowsAsync<IOException>(async () =>
+            {
+                await foreach (var change in client.WatchAllAccountChangesAsync())
+                    received.Add(change);
+            });
+
+            Assert.Equal([("acc1", "s1")], received);
+            Assert.Contains("idle", ex.Message);
+        }
+        finally { JmapClient.SseIdleTimeout = previous; }
+    }
+
+    [Fact]
+    public async Task Sse_PingsKeepTheStreamAlive()
+    {
+        var (client, http) = await ConnectAsync();
+        var previous = JmapClient.SseIdleTimeout;
+        JmapClient.SseIdleTimeout = TimeSpan.FromMilliseconds(400);
+        try
+        {
+            http.OnEventStream = async (w, ct) =>
+            {
+                for (int i = 0; i < 5; i++) { await Task.Delay(150, ct); await w.WriteAsync(": ping\n"); }
+                await w.WriteAsync("event: state\ndata: {\"changed\":{\"acc1\":{\"FileNode\":\"s2\"}}}\n\n");
+            };   // then the server closes the stream normally
+
+            var received = new List<(string, string)>();
+            await foreach (var change in client.WatchAllAccountChangesAsync())
+                received.Add(change);
+
+            Assert.Equal([("acc1", "s2")], received);
+        }
+        finally { JmapClient.SseIdleTimeout = previous; }
     }
 
     [Fact]

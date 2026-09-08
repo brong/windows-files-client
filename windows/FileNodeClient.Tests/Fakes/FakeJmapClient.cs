@@ -164,7 +164,7 @@ public sealed class FakeJmapClient : IJmapClient
 
     private string NewId() => $"n{_nextId++}";
     private FileNode Node(string id) => _nodes.TryGetValue(id, out var n) ? n
-        : throw new InvalidOperationException($"FileNode/set failed: notFound — {id}");
+        : throw new JmapErrorException("FileNode/set update", "notFound", id);
     private void Record(string kind, string id) => _changes.Add((++_seq, kind, id));
     private void Touch(string? parentId)
     {
@@ -232,7 +232,7 @@ public sealed class FakeJmapClient : IJmapClient
         {
             var since = int.Parse(sinceState);
             if (since < OldestCalculableState)
-                throw new InvalidOperationException("FileNode/changes failed: cannotCalculateChanges");
+                throw new JmapErrorException("FileNode/changes", "cannotCalculateChanges", null);
 
             var pending = _changes.Where(c => c.Seq > since).OrderBy(c => c.Seq).ToList();
             var page = pending.Take(ChangesPageSize).ToList();
@@ -329,7 +329,7 @@ public sealed class FakeJmapClient : IJmapClient
         lock (_lock)
         {
             if (!_nodes.ContainsKey(parentId))
-                throw new InvalidOperationException($"FileNode/set create failed: notFound — parent {parentId}");
+                throw new JmapErrorException("FileNode/set create", "notFound", $"parent {parentId}");
             var existing = _nodes.Values.FirstOrDefault(n => n.ParentId == parentId
                 && string.Equals(n.Name, name, StringComparison.OrdinalIgnoreCase));
             if (existing != null)
@@ -338,7 +338,7 @@ public sealed class FakeJmapClient : IJmapClient
                 {
                     case "replace": _nodes.Remove(existing.Id); Record("destroyed", existing.Id); break;
                     case "rename": name = UniqueName(parentId, name, null); break;
-                    default: throw new InvalidOperationException("FileNode/set create failed: alreadyExists — name in use");
+                    default: throw new JmapErrorException("FileNode/set create", "alreadyExists", "name in use");
                 }
             }
             var id = NewId();
@@ -359,9 +359,9 @@ public sealed class FakeJmapClient : IJmapClient
         lock (_lock)
         {
             if (!_nodes.TryGetValue(nodeId, out var node))
-                throw new InvalidOperationException($"FileNode/set update failed: notFound — {nodeId}");
+                throw new JmapErrorException("FileNode/set update", "notFound", nodeId);
             if (onExists == "newest" && modifiedAt.HasValue && node.Modified >= modifiedAt.Value.ToUniversalTime())
-                throw new InvalidOperationException("FileNode/set update failed: alreadyExists — stored node is newer");
+                throw new JmapErrorException("FileNode/set update", "alreadyExists", "stored node is newer");
             node.BlobId = blobId;
             node.Size = _blobs.TryGetValue(blobId, out var b) ? b.Length : null;
             if (type != null) node.Type = type;
@@ -382,7 +382,7 @@ public sealed class FakeJmapClient : IJmapClient
             if (collision)
             {
                 if (onExists == "rename") newName = UniqueName(parentId, newName, nodeId);
-                else throw new InvalidOperationException("FileNode/set update failed: alreadyExists — name in use");
+                else throw new JmapErrorException("FileNode/set update", "alreadyExists", "name in use");
             }
             var oldParent = node.ParentId;
             node.ParentId = parentId; node.Name = newName;

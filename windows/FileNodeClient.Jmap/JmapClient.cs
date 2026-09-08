@@ -147,7 +147,7 @@ public class JmapClient : IJmapClient
             if (!byCallId.TryGetValue(callId, out var resp))
                 throw new InvalidOperationException($"No response for call ID {callId}");
             if (resp.Method == "error")
-                throw new InvalidOperationException($"JMAP error: {resp.Args}");
+                throw JmapErrorException.FromMethodError(expectedMethod, resp.Args);
             if (resp.Method != expectedMethod)
                 throw new InvalidOperationException(
                     $"JMAP method mismatch: expected {expectedMethod}, got {resp.Method}");
@@ -510,7 +510,7 @@ public class JmapClient : IJmapClient
         var blobUpload = result.Deserialize<BlobUploadResponse>(JmapSerializerOptions.Default)
             ?? throw new InvalidOperationException("Failed to parse Blob/set response");
         if (blobUpload.NotCreated != null && blobUpload.NotCreated.TryGetValue(createId, out var err))
-            throw new InvalidOperationException($"Blob/set failed: {err.Type} — {err.Description}");
+            throw new JmapErrorException("Blob/set", err.Type, err.Description);
         if (blobUpload.Created == null || !blobUpload.Created.TryGetValue(createId, out var created))
             throw new InvalidOperationException("Blob/set returned no result");
         return created.Id;
@@ -849,7 +849,7 @@ public class JmapClient : IJmapClient
         var setResponse = await CallAsync<SetResponse>(FileNodeUsing, "FileNode/set", args, ct);
 
         if (setResponse.NotCreated != null && setResponse.NotCreated.TryGetValue("c0", out var setError))
-            throw new InvalidOperationException($"FileNode/set create failed: {setError.Type} — {setError.Description}");
+            throw new JmapErrorException("FileNode/set create", setError.Type, setError.Description);
 
         if (setResponse.Created == null || !setResponse.Created.TryGetValue("c0", out var created))
             throw new InvalidOperationException("FileNode/set create returned no result");
@@ -874,7 +874,7 @@ public class JmapClient : IJmapClient
 
         var setResponse = await CallAsync<SetResponse>(FileNodeUsing, "FileNode/set", args, ct);
         if (setResponse.NotUpdated != null && setResponse.NotUpdated.TryGetValue(nodeId, out var setError))
-            throw new InvalidOperationException($"FileNode/set {what} failed: {setError.Type} — {setError.Description}");
+            throw new JmapErrorException($"FileNode/set {what}", setError.Type, setError.Description);
     }
 
     public async Task<FileNode> ReplaceFileNodeBlobAsync(string nodeId, string parentId, string name, string blobId, string? type = null, DateTime? createdAt = null, DateTime? modifiedAt = null, string? onExists = null, CancellationToken ct = default)
@@ -977,7 +977,7 @@ public class JmapClient : IJmapClient
             }, ct);
 
         if (setResponse.NotDestroyed != null && setResponse.NotDestroyed.TryGetValue(nodeId, out var setError))
-            throw new InvalidOperationException($"FileNode/set destroy failed: {setError.Type} — {setError.Description}");
+            throw new JmapErrorException("FileNode/set destroy", setError.Type, setError.Description);
     }
 
     // ---- Push ----
@@ -995,10 +995,20 @@ public class JmapClient : IJmapClient
     /// Single SSE connection that yields (accountId, state) for all accounts
     /// with FileNode capability in this session.
     /// </summary>
+    /// <summary>Server ping interval requested on the event source, in seconds.</summary>
+    private const int SsePingSeconds = 60;
+
+    /// <summary>
+    /// How long the SSE stream may be silent (no event, no ping) before we treat the
+    /// connection as half-open and reconnect. 2.5× the ping interval: one missed ping
+    /// is jitter, two is a dead connection (RELIABILITY D3, DESIGN pitfall #35).
+    /// </summary>
+    internal static TimeSpan SseIdleTimeout { get; set; } = TimeSpan.FromSeconds(SsePingSeconds * 2.5);
+
     public async IAsyncEnumerable<(string AccountId, string State)> WatchAllAccountChangesAsync(
         [EnumeratorCancellation] CancellationToken ct = default)
     {
-        var url = Session.GetEventSourceUrl("*", "no", "60");
+        var url = Session.GetEventSourceUrl("*", "no", SsePingSeconds.ToString());
         Log.Debug($"SSE connecting: {url}");
         var request = new HttpRequestMessage(HttpMethod.Get, url);
         request.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("text/event-stream"));
@@ -1015,7 +1025,21 @@ public class JmapClient : IJmapClient
 
         while (!ct.IsCancellationRequested)
         {
-            var line = await reader.ReadLineAsync(ct);
+            string? line;
+            using (var idle = CancellationTokenSource.CreateLinkedTokenSource(ct))
+            {
+                idle.CancelAfter(SseIdleTimeout);
+                try
+                {
+                    line = await reader.ReadLineAsync(idle.Token);
+                }
+                catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                {
+                    // Half-open: the socket looks alive but nothing arrives, not even the
+                    // server's pings. Fail so the watcher reconnects and catches up.
+                    throw new IOException($"SSE stream idle for {SseIdleTimeout.TotalSeconds:F0}s (no events or pings) — reconnecting");
+                }
+            }
             if (line == null)
                 break; // Stream ended
 
