@@ -25,9 +25,22 @@ public static class ThumbnailService
     private static readonly ConcurrentDictionary<string, Registration> _registrations
         = new(StringComparer.OrdinalIgnoreCase);
 
-    // LRU cache keyed by (blobId, cx) → PNG bytes
+    // Memory cache keyed by (blobId, cx) → PNG bytes
     private static readonly ConcurrentDictionary<(string BlobId, uint Cx), byte[]> _cache = new();
     private const int MaxCacheEntries = 256;
+
+    // On-disk cache behind the memory one: one PNG per (blobId, cx). blobId is the
+    // content SHA-1, so entries are content-addressed — shared across accounts,
+    // never stale, and a changed file simply gets a new key. Trimmed oldest-first
+    // (by last write time, refreshed on hit) when it grows past the cap.
+    internal static string DiskCacheDirectory { get; set; } = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "Fastmail", "FileNodeClient", "thumbcache");
+    internal static long MaxDiskCacheBytes { get; set; } = 64L * 1024 * 1024;
+    private static readonly TimeSpan TouchInterval = TimeSpan.FromDays(1);
+    private static int _writesSinceTrim;
+    private static int _trimRunning;
+    private const int TrimEveryWrites = 50;
 
     // Track blobIds that failed conversion so we don't retry on every Explorer request
     private static readonly ConcurrentDictionary<string, DateTime> _failedBlobIds = new();
@@ -158,10 +171,15 @@ public static class ThumbnailService
             return null;
         }
 
-        // Check cache
+        // Check cache: memory, then disk (which also warms memory)
         var cacheKey = (blobId, cx);
         if (_cache.TryGetValue(cacheKey, out var cached))
             return cached;
+        if (TryReadDiskCache(blobId, cx) is { } onDisk)
+        {
+            _cache[cacheKey] = onDisk;
+            return onDisk;
+        }
 
         // Skip blobIds that recently failed
         if (_failedBlobIds.TryGetValue(blobId, out var failedAt)
@@ -336,7 +354,95 @@ public static class ThumbnailService
                 _cache.TryRemove(key, out _);
         }
         _cache[(blobId, cx)] = pngBytes;
+        WriteDiskCache(blobId, cx, pngBytes);
     }
+
+    // ---- Disk cache ----
+
+    private static string DiskCachePath(string blobId, uint cx)
+    {
+        // blobId is hex from the server, but never trust it as a path component.
+        var safe = new string(blobId.Where(char.IsAsciiLetterOrDigit).ToArray());
+        return Path.Combine(DiskCacheDirectory, $"{safe}_{cx}.png");
+    }
+
+    private static byte[]? TryReadDiskCache(string blobId, uint cx)
+    {
+        try
+        {
+            var path = DiskCachePath(blobId, cx);
+            if (!File.Exists(path)) return null;
+            var bytes = File.ReadAllBytes(path);
+            if (bytes.Length == 0) return null;
+            // Refresh the "recently used" signal the trimmer sorts on, but not on every hit.
+            if (DateTime.UtcNow - File.GetLastWriteTimeUtc(path) > TouchInterval)
+                File.SetLastWriteTimeUtc(path, DateTime.UtcNow);
+            return bytes;
+        }
+        catch (Exception ex)
+        {
+            Log.Debug($"ThumbnailService: disk cache read failed for {blobId}@{cx}: {ex.Message}");
+            return null;
+        }
+    }
+
+    private static void WriteDiskCache(string blobId, uint cx, byte[] pngBytes)
+    {
+        try
+        {
+            Directory.CreateDirectory(DiskCacheDirectory);
+            var path = DiskCachePath(blobId, cx);
+            var tmp = path + "." + Environment.ProcessId + ".tmp";
+            File.WriteAllBytes(tmp, pngBytes);
+            File.Move(tmp, path, overwrite: true);   // readers never see a partial file
+        }
+        catch (Exception ex)
+        {
+            Log.Debug($"ThumbnailService: disk cache write failed for {blobId}@{cx}: {ex.Message}");
+            return;
+        }
+
+        if (Interlocked.Increment(ref _writesSinceTrim) >= TrimEveryWrites
+            && Interlocked.CompareExchange(ref _trimRunning, 1, 0) == 0)
+        {
+            Interlocked.Exchange(ref _writesSinceTrim, 0);
+            Log.FireAndForget(Task.Run(TrimDiskCache), "ThumbnailService.TrimDiskCache");
+        }
+    }
+
+    /// <summary>Bring the disk cache under the cap by deleting least-recently-written files first.</summary>
+    internal static void TrimDiskCache()
+    {
+        try
+        {
+            if (!Directory.Exists(DiskCacheDirectory)) return;
+            var files = new DirectoryInfo(DiskCacheDirectory).EnumerateFiles("*.png").ToList();
+            long total = files.Sum(f => f.Length);
+            if (total <= MaxDiskCacheBytes) return;
+
+            var target = MaxDiskCacheBytes * 8 / 10;   // trim to 80% so we don't trim on every write
+            int removed = 0;
+            foreach (var f in files.OrderBy(f => f.LastWriteTimeUtc))
+            {
+                if (total <= target) break;
+                var length = f.Length;   // read before Delete: a deleted FileInfo throws on Length
+                try { f.Delete(); total -= length; removed++; }
+                catch { /* in use or gone — skip */ }
+            }
+            Log.Info($"ThumbnailService: trimmed disk cache, removed {removed} file(s), now {total / 1024} KB");
+        }
+        catch (Exception ex)
+        {
+            Log.Debug($"ThumbnailService: disk cache trim failed: {ex.Message}");
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _trimRunning, 0);
+        }
+    }
+
+    /// <summary>Tests: drop the memory cache so the next request must come from disk or the server.</summary>
+    internal static void ClearMemoryCache() => _cache.Clear();
 
     /// <summary>
     /// Convenience method for the pipe server: resolves path → sync root + nodeId,
