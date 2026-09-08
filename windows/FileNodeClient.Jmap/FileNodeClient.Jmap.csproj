@@ -10,4 +10,8 @@
     <ProjectReference Include="..\FileNodeClient.Logging\FileNodeClient.Logging.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="FileNodeClient.Tests" />
+  </ItemGroup>
+
 </Project>

@@ -602,7 +602,7 @@ public class SyncEngine : IDisposable
     /// node ID so a given node maps to the same local name across runs. Replaces the old
     /// silent-skip, which hid a colliding file the user actually has (DESIGN §14, #41).
     /// </summary>
-    private static Dictionary<string, string> AssignLocalNames(FileNode[] children)
+    internal static Dictionary<string, string> AssignLocalNames(FileNode[] children)
     {
         var map = new Dictionary<string, string>(children.Length);
         var used = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -637,7 +637,7 @@ public class SyncEngine : IDisposable
 
     /// <summary>One folder of the server tree as it maps onto disk: the children of
     /// <see cref="ParentId"/>, and each child's collision-disambiguated local name.</summary>
-    private readonly record struct TreeLevel(
+    internal readonly record struct TreeLevel(
         string ParentId, string LocalParentPath, FileNode[] Children, Dictionary<string, string> LocalNames);
 
     /// <summary>
@@ -647,7 +647,10 @@ public class SyncEngine : IDisposable
     /// construction; a cycle in parentId is logged and not followed. Local names
     /// are assigned once per parent here so every consumer agrees on them.
     /// </summary>
-    private List<TreeLevel> WalkFromHome(FileNode[] allNodes)
+    private List<TreeLevel> WalkFromHome(FileNode[] allNodes) =>
+        WalkFromHome(allNodes, _homeNodeId, _syncRootPath, _logPrefix);
+
+    internal static List<TreeLevel> WalkFromHome(FileNode[] allNodes, string homeNodeId, string syncRootPath, string logPrefix)
     {
         var childrenByParent = allNodes
             .Where(n => n.ParentId != null)
@@ -655,9 +658,9 @@ public class SyncEngine : IDisposable
             .ToDictionary(g => g.Key, g => g.ToArray());
 
         var tree = new List<TreeLevel>();
-        var visited = new HashSet<string> { _homeNodeId };
+        var visited = new HashSet<string> { homeNodeId };
         var queue = new Queue<(string nodeId, string localPath)>();
-        queue.Enqueue((_homeNodeId, _syncRootPath));
+        queue.Enqueue((homeNodeId, syncRootPath));
 
         while (queue.Count > 0)
         {
@@ -672,7 +675,7 @@ public class SyncEngine : IDisposable
             {
                 if (!visited.Add(child.Id))
                 {
-                    Log.Warn($"{_logPrefix}  Cycle in server tree at folder {child.Id} ({child.Name}); not descending");
+                    Log.Warn($"{logPrefix}  Cycle in server tree at folder {child.Id} ({child.Name}); not descending");
                     continue;
                 }
                 queue.Enqueue((child.Id, Path.Combine(localParentPath, localNames[child.Id])));

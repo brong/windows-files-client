@@ -12,6 +12,9 @@ namespace FileNodeClient.Jmap.Auth;
 /// </summary>
 public static class OAuthClient
 {
+    /// <summary>How the token/registration endpoints are reached. Tests swap in a scripted handler.</summary>
+    internal static Func<HttpClient> HttpClientFactory = () => new HttpClient();
+
     public const string FilesScope = "urn:ietf:params:jmap:core urn:ietf:params:oauth:scope:files";
     public const string ClientName = "FileNodeClient";
     public const string SoftwareId = "4a1c3d2e-8f7b-4e6a-9d5c-1b0a2e3f4d5c";
@@ -29,7 +32,7 @@ public static class OAuthClient
         string registrationEndpoint, string[] redirectUris, string scope,
         CancellationToken ct = default)
     {
-        using var http = new HttpClient();
+        using var http = HttpClientFactory();
 
         var payload = new Dictionary<string, object>
         {
@@ -102,7 +105,7 @@ public static class OAuthClient
         string code, string redirectUri,
         string codeVerifier, CancellationToken ct = default)
     {
-        using var http = new HttpClient();
+        using var http = HttpClientFactory();
 
         var form = new FormUrlEncodedContent(new Dictionary<string, string>
         {
@@ -128,7 +131,7 @@ public static class OAuthClient
         string tokenEndpoint, string clientId,
         string refreshToken, CancellationToken ct = default)
     {
-        using var http = new HttpClient();
+        using var http = HttpClientFactory();
 
         var form = new FormUrlEncodedContent(new Dictionary<string, string>
         {
@@ -152,7 +155,7 @@ public static class OAuthClient
         string revocationEndpoint, string clientId,
         string token, CancellationToken ct = default)
     {
-        using var http = new HttpClient();
+        using var http = HttpClientFactory();
 
         var form = new FormUrlEncodedContent(new Dictionary<string, string>
         {

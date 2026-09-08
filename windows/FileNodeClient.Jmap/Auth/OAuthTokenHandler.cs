@@ -31,12 +31,19 @@ public class OAuthTokenHandler : DelegatingHandler
 
     public OAuthTokenHandler(string accessToken, string refreshToken,
         string tokenEndpoint, string clientId, DateTimeOffset expiresAt)
-        : base(new SocketsHttpHandler
+        : this(accessToken, refreshToken, tokenEndpoint, clientId, expiresAt, new SocketsHttpHandler
         {
             PooledConnectionLifetime = TimeSpan.FromMinutes(5),
             PooledConnectionIdleTimeout = TimeSpan.FromMinutes(2),
             EnableMultipleHttp2Connections = true,
         })
+    {
+    }
+
+    /// <summary>Tests supply the transport; production uses the pooled SocketsHttpHandler above.</summary>
+    internal OAuthTokenHandler(string accessToken, string refreshToken,
+        string tokenEndpoint, string clientId, DateTimeOffset expiresAt, HttpMessageHandler inner)
+        : base(inner)
     {
         _accessToken = accessToken;
         _refreshToken = refreshToken;
@@ -50,15 +57,17 @@ public class OAuthTokenHandler : DelegatingHandler
     {
         // Proactively refresh if token is about to expire (within 60s)
         if (DateTimeOffset.UtcNow >= _expiresAt.AddSeconds(-60) && !string.IsNullOrEmpty(_refreshToken))
-            await TryRefreshAsync(cancellationToken);
+            await TryRefreshAsync(rejectedToken: null, cancellationToken);
 
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _accessToken);
+        var sentToken = _accessToken;
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", sentToken);
         var response = await base.SendAsync(request, cancellationToken);
 
-        // If 401 and we have a refresh token, try refreshing once
+        // If 401 and we have a refresh token, try refreshing once. The server rejected
+        // `sentToken` regardless of what we think its expiry is (revoked, invalidated).
         if (response.StatusCode == HttpStatusCode.Unauthorized && !string.IsNullOrEmpty(_refreshToken))
         {
-            if (await TryRefreshAsync(cancellationToken))
+            if (await TryRefreshAsync(rejectedToken: sentToken, cancellationToken))
             {
                 // Clone the request with the new token and retry
                 using var retry = await CloneRequestAsync(request);
@@ -71,14 +80,24 @@ public class OAuthTokenHandler : DelegatingHandler
         return response;
     }
 
-    private async Task<bool> TryRefreshAsync(CancellationToken ct)
+    /// <param name="rejectedToken">
+    /// The access token the server just refused, or null for a proactive refresh.
+    /// Under the lock, the refresh is skipped only if it is already done: for a
+    /// proactive call, the token is no longer near expiry; for a rejection, the
+    /// current token is no longer the rejected one. (Checking expiry alone here
+    /// made a revoked-but-unexpired token unrefreshable — every request 401'd
+    /// until the token would have expired anyway.)
+    /// </param>
+    private async Task<bool> TryRefreshAsync(string? rejectedToken, CancellationToken ct)
     {
         await _refreshLock.WaitAsync(ct);
         try
         {
-            // Double-check: another thread may have already refreshed
-            if (DateTimeOffset.UtcNow < _expiresAt.AddSeconds(-60))
-                return true; // Already refreshed by another caller
+            var alreadyRefreshed = rejectedToken != null
+                ? _accessToken != rejectedToken
+                : DateTimeOffset.UtcNow < _expiresAt.AddSeconds(-60);
+            if (alreadyRefreshed)
+                return true;
 
             // Retry transient failures with exponential backoff (1s, 2s, 4s)
             const int maxRetries = 3;

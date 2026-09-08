@@ -236,9 +236,16 @@ sync root, warm restart, log capture). Covered: populate, server rename/move/del
 via poll, R3 paging, I3 deferred change (edit and delete behind a pending local rename),
 D1 warm-start (missing file/folder re-created, offline edit uploaded, dehydrated mtime
 ignored), D2 reconcile (inconsistent → no prune; alive → re-confirmed; gone → pruned).
-Still to write from the list below: the JmapClient-against-fake-HttpMessageHandler unit
-tests (batching, D2 restart-on-queryState), SyncOutbox coalescing, name round-trips,
-WalkFromHome, OAuthTokenHandler, conflict copy / newest-wins through the outbox.
+Second tranche (same day): conflict copy / newest-wins both directions / no-conflict
+in-place; Clean with read-only + hydrated files; JmapClient against `FakeJmapHttpHandler`
+(stable paging, restart on queryState change, never-stable → inconsistent, short page vs
+total, error responses, changes+get batching with result references); SyncOutbox
+(coalescing, base blobId freeze, create+delete, rename of pending create, move on pending
+edit, dequeue ordering, rejected-stays-pending, persistence); PlaceholderManager name
+round-trips; `WalkFromHome` (static core); `OAuthTokenHandler` (proactive refresh, 401 →
+refresh+retry, single refresh under concurrency, rejected refresh). 64 tests, ~1 minute.
+Found on the way: revoked-but-unexpired tokens were unrefreshable (TryRefreshAsync's
+"already refreshed" check only looked at expiry) — fixed.
 
 
 There is no Windows test project. After Phase 4 the pure-logic surface is
