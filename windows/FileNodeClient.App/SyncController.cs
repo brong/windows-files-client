@@ -31,6 +31,9 @@ sealed class SyncController : IDisposable
     private readonly Dictionary<string, Dictionary<Guid, (string FileName, string Action, long? FileSize)>> _previousEntryInfo = new();
     private readonly Dictionary<string, HashSet<string>> _previousDownloadNames = new();
     private readonly Dictionary<string, List<CompletedEntry>> _recentlyCompleted = new();
+    // Bytes of thumbnails fetched before the current "Thumbnails" row appeared, so the
+    // completed row can say how much that burst downloaded.
+    private readonly Dictionary<string, long> _thumbnailBytesAtRowStart = new();
 
     public event Action? AccountsChanged;
     public event Action? StatusChanged;
@@ -295,6 +298,16 @@ sealed class SyncController : IDisposable
             }
         }
 
+        // Thumbnail traffic (Explorer asking for previews) as one stable row while any
+        // are in flight; it completes like a download when the burst ends.
+        var thumbs = ThumbnailService.GetStats(supervisor.SyncRootPath);
+        if (thumbs.InFlight > 0)
+        {
+            downloads ??= new List<ActiveDownloadEntry>();
+            downloads.Add(new ActiveDownloadEntry(ThumbnailService.ActivityRowName, thumbs.ActiveSince));
+            _thumbnailBytesAtRowStart.TryAdd(accountId, thumbs.FetchedBytes);
+        }
+
         // --- Completion tracking: anything that left the outbox / download set completed ---
         var entryInfo = new Dictionary<Guid, (string FileName, string Action, long? FileSize)>();
         foreach (var e in entries)
@@ -305,6 +318,8 @@ sealed class SyncController : IDisposable
             entryInfo[e.Id] = (fileName, action, FileSizeOf(e));
         }
         var currentDownloadNames = downloadSnapshot.Where(d => !d.IsPending).Select(d => d.FileName).ToHashSet();
+        if (thumbs.InFlight > 0)
+            currentDownloadNames.Add(ThumbnailService.ActivityRowName);
 
         var completed = _recentlyCompleted.TryGetValue(accountId, out var list) ? list : _recentlyCompleted[accountId] = new();
         if (_previousEntryInfo.TryGetValue(accountId, out var prevInfo))
@@ -316,8 +331,13 @@ sealed class SyncController : IDisposable
         if (_previousDownloadNames.TryGetValue(accountId, out var prevDlNames))
         {
             foreach (var name in prevDlNames)
-                if (!currentDownloadNames.Contains(name))
-                    completed.Add(new CompletedEntry(name, "Download", true, null, null, now));
+            {
+                if (currentDownloadNames.Contains(name)) continue;
+                long? size = null;
+                if (name == ThumbnailService.ActivityRowName && _thumbnailBytesAtRowStart.Remove(accountId, out var startBytes))
+                    size = thumbs.FetchedBytes - startBytes;
+                completed.Add(new CompletedEntry(name, "Download", true, null, size, now));
+            }
         }
         completed.RemoveAll(c => (now - c.CompletedAt).TotalSeconds > 60);
         _previousEntryInfo[accountId] = entryInfo;

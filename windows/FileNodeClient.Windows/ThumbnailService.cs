@@ -52,6 +52,60 @@ public static class ThumbnailService
     private static List<PendingRequest> _pendingBatch = new();
     private static Timer? _batchTimer;
 
+    /// <summary>
+    /// Set by the network monitor. While metered, Explorer gets cached thumbnails only:
+    /// nothing is converted or downloaded, and the request is not remembered as failed,
+    /// so the icons fill in as soon as the connection is unmetered again.
+    /// </summary>
+    public static volatile bool NetworkIsMetered;
+
+    /// <summary>Row name the UI uses for thumbnail traffic in the activity list.</summary>
+    public const string ActivityRowName = "Thumbnails";
+
+    private sealed class RootStats
+    {
+        public int InFlight;
+        public int FetchedCount;
+        public long FetchedBytes;
+        public DateTime ActiveSince;
+    }
+    private static readonly ConcurrentDictionary<string, RootStats> _stats = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Raised (with the sync root path) whenever a root's thumbnail traffic starts or finishes.</summary>
+    public static event Action<string>? ActivityChanged;
+
+    /// <summary>Thumbnail traffic for one sync root: images in flight now, and fetched this session.</summary>
+    public static (int InFlight, int FetchedCount, long FetchedBytes, DateTime ActiveSince) GetStats(string syncRootPath)
+    {
+        if (!_stats.TryGetValue(syncRootPath, out var s)) return (0, 0, 0, DateTime.MinValue);
+        lock (s) return (s.InFlight, s.FetchedCount, s.FetchedBytes, s.ActiveSince);
+    }
+
+    private static void BeginFetch(string syncRootPath, int count)
+    {
+        var s = _stats.GetOrAdd(syncRootPath, _ => new RootStats());
+        lock (s)
+        {
+            if (s.InFlight == 0) s.ActiveSince = DateTime.UtcNow;
+            s.InFlight += count;
+        }
+        Log.SafeInvoke(() => ActivityChanged?.Invoke(syncRootPath), "ThumbnailService.ActivityChanged");
+    }
+
+    private static void EndFetch(string syncRootPath, int count, int fetched, long bytes)
+    {
+        if (_stats.TryGetValue(syncRootPath, out var s))
+        {
+            lock (s)
+            {
+                s.InFlight = Math.Max(0, s.InFlight - count);
+                s.FetchedCount += fetched;
+                s.FetchedBytes += bytes;
+            }
+        }
+        Log.SafeInvoke(() => ActivityChanged?.Invoke(syncRootPath), "ThumbnailService.ActivityChanged");
+    }
+
     public static void Register(string syncRootPath, IJmapClient client,
         Func<string, string?> getBlobId)
     {
@@ -113,6 +167,12 @@ public static class ThumbnailService
         if (_failedBlobIds.TryGetValue(blobId, out var failedAt)
             && DateTime.UtcNow - failedAt < FailureCooldown)
             return null;
+
+        if (NetworkIsMetered)
+        {
+            Log.Debug($"ThumbnailService: metered connection, not fetching thumbnail for blob {blobId}");
+            return null;
+        }
 
         Log.Debug($"ThumbnailService: queuing thumbnail for blob {blobId} at {cx}px");
 
@@ -182,6 +242,9 @@ public static class ThumbnailService
                 .Select(g => g.First())
                 .ToList();
 
+            BeginFetch(group.Key, unique.Count);
+            int fetchedCount = 0;
+            long fetchedBytes = 0;
             try
             {
                 using var cts = new CancellationTokenSource(RequestTimeout);
@@ -224,7 +287,10 @@ public static class ThumbnailService
                 // Build lookup from blobId → PNG bytes
                 var pngByBlobId = new Dictionary<string, byte[]?>();
                 foreach (var (blobId, data) in results)
+                {
                     pngByBlobId[blobId] = data;
+                    if (data != null) { fetchedCount++; fetchedBytes += data.Length; }
+                }
 
                 // Complete all waiting callers
                 foreach (var req in requests)
@@ -252,6 +318,10 @@ public static class ThumbnailService
                     _failedBlobIds[req.BlobId] = DateTime.UtcNow;
                     req.Tcs.TrySetResult(null);
                 }
+            }
+            finally
+            {
+                EndFetch(group.Key, unique.Count, fetchedCount, fetchedBytes);
             }
         }
     }

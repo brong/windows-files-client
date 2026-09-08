@@ -115,6 +115,7 @@ sealed class LoginManager : IDisposable
         _networkMonitor = new NetworkMonitor();
         _networkMonitor.NetworkStateChanged += OnNetworkStateChanged;
         Log.Info($"[NetworkMonitor] Initial state: connected={_networkMonitor.IsConnected}, metered={_networkMonitor.IsMetered}");
+        ThumbnailService.NetworkIsMetered = _networkMonitor.IsMetered;
 
         // Periodic disk space check as a safety net (5 minutes). Primary checks
         // happen on demand: before hydration and after sync polls.
@@ -889,6 +890,7 @@ sealed class LoginManager : IDisposable
 
     private void OnNetworkStateChanged(bool isConnected, bool isMetered)
     {
+        ThumbnailService.NetworkIsMetered = isMetered;
         List<LoginSession> sessions;
         lock (_lock) sessions = _sessions.ToList();
         var supervisors = Supervisors;

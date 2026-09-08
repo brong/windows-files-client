@@ -136,6 +136,7 @@ sealed class AccountSupervisor : IDisposable
 
         // Register thumbnail service for this sync root
         ThumbnailService.Register(_syncRootPath, _jmapClient, _engine.GetBlobIdForNodeId);
+        ThumbnailService.ActivityChanged += OnThumbnailActivity;
 
         // Connect callbacks
         _engine.Connect();
@@ -300,6 +301,12 @@ sealed class AccountSupervisor : IDisposable
         Log.SafeInvoke(() => StatusChanged?.Invoke(this), "AccountSupervisor.ActiveDownloadCountChanged");
     }
 
+    private void OnThumbnailActivity(string syncRootPath)
+    {
+        if (string.Equals(syncRootPath, _syncRootPath, StringComparison.OrdinalIgnoreCase))
+            OnEngineActivityChanged();
+    }
+
     private void OnEngineActivityChanged() =>
         Log.SafeInvoke(() => ActivityChanged?.Invoke(this), "AccountSupervisor.ActivityChanged");
 
@@ -337,6 +344,7 @@ sealed class AccountSupervisor : IDisposable
         if (_disposed) return;
         _disposed = true;
 
+        ThumbnailService.ActivityChanged -= OnThumbnailActivity;
         ThumbnailService.Unregister(_syncRootPath);
 
         _loopCts?.Cancel();

@@ -194,7 +194,10 @@ public sealed class FakeJmapClient : IJmapClient
     public int? MaxDataSources => null;
     public long? MaxSizeBlobSet => null;
     public bool HasBlob2 => false;                     // single-shot UploadBlobAsync path
-    public bool HasBlobConvert => false;
+    /// <summary>Enable to exercise ThumbnailService: Blob/convert yields a fake PNG per input blob.</summary>
+    public bool SupportsBlobConvert { get; set; }
+    public bool HasBlobConvert => SupportsBlobConvert;
+    public int ConvertCount { get; private set; }
     public string? TrashUrl => null;
     public string? WebUrlTemplate => null;
     public string? WebWriteUrlTemplate => null;        // no Direct HTTP Write
@@ -402,10 +405,26 @@ public sealed class FakeJmapClient : IJmapClient
         CancellationToken ct = default) => throw new NotImplementedException("chunked upload (HasBlob2 is false)");
     public Task<string> UploadBlobDeltaAsync(Stream data, string contentType, long totalSize, string? oldBlobId,
         Action<long>? onProgress = null, CancellationToken ct = default) => throw new NotImplementedException("delta upload (HasBlob2 is false)");
-    public Task<string> ConvertImageAsync(string blobId, uint width, uint height, string mimeType = "image/png", CancellationToken ct = default) =>
-        throw new NotImplementedException("Blob/convert");
+    public async Task<string> ConvertImageAsync(string blobId, uint width, uint height, string mimeType = "image/png", CancellationToken ct = default) =>
+        (await ConvertImagesAsync([(blobId, width, height)], mimeType, ct))[blobId];
+
     public Task<Dictionary<string, string>> ConvertImagesAsync(IReadOnlyList<(string BlobId, uint Width, uint Height)> items,
-        string mimeType = "image/png", CancellationToken ct = default) => throw new NotImplementedException("Blob/convert");
+        string mimeType = "image/png", CancellationToken ct = default)
+    {
+        if (!SupportsBlobConvert) throw new NotImplementedException("Blob/convert");
+        lock (_lock)
+        {
+            ConvertCount++;
+            var result = new Dictionary<string, string>();
+            foreach (var (blobId, w, h) in items)
+            {
+                if (!_blobs.ContainsKey(blobId)) continue;
+                var png = System.Text.Encoding.ASCII.GetBytes($"PNG:{blobId}:{w}x{h}");
+                result[blobId] = StoreBlob(png);
+            }
+            return Task.FromResult(result);
+        }
+    }
     public Task<(string BlobId, long Size, string Type)> DirectWriteAsync(string nodeId, Stream data, string contentType, CancellationToken ct = default) =>
         throw new NotImplementedException("Direct HTTP Write (WebWriteUrlTemplate is null)");
 
