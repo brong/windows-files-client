@@ -32,6 +32,21 @@ dotnet.exe build FileNodeClient.sln
 
 The solution contains 5 projects: Logging (cross-platform, Log static class), Jmap (cross-platform, JMAP protocol), Windows (cfapi sync engine), App (single tray process: login/sync supervision + UI + COM hosts), Package (MSIX). The native ThumbnailExtension DLL is built separately with MinGW (not in the .sln).
 
+### Tests
+
+```
+dotnet.exe test FileNodeClient.Tests
+```
+
+`FileNodeClient.Tests` (xunit) drives a real `SyncEngine` against an in-memory fake
+JMAP server (`Fakes/FakeJmapClient.cs`) inside a throw-away cfapi sync root under
+`%USERPROFILE%\FileNodeClientTests\<accountId>` (`Harness/SyncRootFixture.cs`). Each
+test registers its own root and cleans it up; the suite runs serially because the
+engine's `Log.Sink` is process-wide. "Server-side" actions are the fake's
+`AddFile/Rename/Move/Delete/SetContent`; local actions are plain file I/O. Needs the
+cloud filter driver (any Windows 10+), no admin, no network. A killed run can leave
+`Test tXXXXXXXX` sync roots behind; the app's startup audit offers to clean them.
+
 ### Dev testing
 
 ```

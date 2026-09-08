@@ -523,7 +523,7 @@ internal class SyncRoot : IDisposable
         DeleteWithReparseBypass(path, isDirectory: true);
     }
 
-    private static void DeleteWithReparseBypass(string path, bool isDirectory)
+    internal static void DeleteWithReparseBypass(string path, bool isDirectory)
     {
         try
         {

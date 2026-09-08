@@ -18,4 +18,8 @@
     <ProjectReference Include="..\FileNodeClient.Jmap\FileNodeClient.Jmap.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="FileNodeClient.Tests" />
+  </ItemGroup>
+
 </Project>

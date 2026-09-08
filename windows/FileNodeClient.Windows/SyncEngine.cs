@@ -2026,7 +2026,7 @@ public class SyncEngine : IDisposable
         }
     }
 
-    private static unsafe void HydratePlaceholder(string filePath)
+    internal static unsafe void HydratePlaceholder(string filePath)
     {
         using var safeHandle = File.OpenHandle(filePath, FileMode.Open, FileAccess.Read,
             FileShare.ReadWrite | FileShare.Delete);

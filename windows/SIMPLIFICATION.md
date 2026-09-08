@@ -227,7 +227,19 @@ Invariants to keep while doing it (all learned the hard way — `DESIGN.md` §6/
 - Dehydrate + mark-in-sync atomically; pin propagation is async.
 - Never read a dehydrated file (`GENERIC_READ` triggers your own hydration).
 
-## Phase 5 — tests
+## Phase 5 — tests (harness + first 18 scenarios landed 2026-09-08)
+
+**Status.** `FileNodeClient.Tests` exists: `FakeJmapClient` (in-memory FileNode server with
+state/changes paging, cannotCalculateChanges, inconsistent enumeration, onExists semantics,
+notFound, a `Hold` gate for in-flight uploads/moves) + `SyncRootFixture` (real temporary
+sync root, warm restart, log capture). Covered: populate, server rename/move/delete/create
+via poll, R3 paging, I3 deferred change (edit and delete behind a pending local rename),
+D1 warm-start (missing file/folder re-created, offline edit uploaded, dehydrated mtime
+ignored), D2 reconcile (inconsistent → no prune; alive → re-confirmed; gone → pruned).
+Still to write from the list below: the JmapClient-against-fake-HttpMessageHandler unit
+tests (batching, D2 restart-on-queryState), SyncOutbox coalescing, name round-trips,
+WalkFromHome, OAuthTokenHandler, conflict copy / newest-wins through the outbox.
+
 
 There is no Windows test project. After Phase 4 the pure-logic surface is
 small enough to cover cheaply; mirror the Apple tests where one exists:
