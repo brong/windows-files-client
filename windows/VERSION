@@ -2,6 +2,7 @@
 #   1. This file (VERSION)
 #   2. windows/FileNodeClient.Package/AppxManifest.xml  (<Identity Version="...">)
 
+1.0.87.0 2026-09-08  Warm start retries a transient catch-up failure and keeps the cache instead of re-populating every placeholder
 1.0.86.0 2026-09-08  Permanent server errors are rejected with a reason instead of retried forever; SSE idle timeout (150 s) and 15-minute safety poll
 1.0.85.0 2026-09-08  Download digests enforced (corrupt/short downloads rejected and re-fetched); failed downloads fail the read immediately instead of after 60 s
 1.0.84.0 2026-09-08  On-disk thumbnail cache (content-addressed, 64 MB cap, oldest-first trim)
